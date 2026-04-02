@@ -128,9 +128,9 @@ async function runScenario(scenario, sampleFile) {
       },
     });
 
-    // Scan and queue file
-    await api.scanFile(libId, containerFile);
-    await new Promise((r) => setTimeout(r, 2000));
+    // Scan file and register in DB
+    const fileObj = await api.scanFile(libId, containerFile);
+    await api.cruddb('FileJSONDB', 'insert', fileObj._id, fileObj);
     await api.requeueFile(containerFile);
 
     // Poll for completion
