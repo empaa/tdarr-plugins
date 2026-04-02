@@ -146,10 +146,12 @@ const plugin = async (args) => {
 
   jobLog('='.repeat(64));
   jobLog(`AV1AN ENCODE  encoder=${encoder}  preset=${encPreset}`);
-  jobLog(`  input     : ${inputPath}`);
-  jobLog(`  resolution: ${stream.width || '?'}x${height || '?'}${downscaleEnabled ? ` -> ${downscaleRes}` : ''}`);
-  jobLog(`  target    : VMAF ${targetVmaf}  QP-range ${qpRange}`);
-  jobLog(`  threads   : cpu=${availableThreads}  workers=${maxWorkers}  threads/worker=${threadsPerWorker}`);
+  jobLog(`  input      : ${inputPath}`);
+  jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${downscaleEnabled ? ` -> ${downscaleRes}` : ''}`);
+  jobLog(`  target     : VMAF ${targetVmaf}  QP-range ${qpRange}`);
+  jobLog(`  max size   : ${maxEncodedPercent}% of source`);
+  jobLog(`  threads    : cpu=${availableThreads}  workers=${maxWorkers}  threads/worker=${threadsPerWorker}`);
+  jobLog(`  enc flags  : ${encFlags}`);
   jobLog('='.repeat(64));
 
   const sourceSizeGb = (() => {
@@ -158,7 +160,7 @@ const plugin = async (args) => {
 
   updateWorker({ percentage: 0, startTime: Date.now(), status: 'Processing' });
 
-  const audioSizeGb = await probeAudioSize(inputPath, args.workDir, jobLog, dbg);
+  const audioSizeGb = await probeAudioSize(inputPath, args.workDir, dbg, dbg);
 
   const vpyScript = path.join(vsDir, 'source.vpy');
   const lwiCache = path.join(vsDir, 'source.lwi');
@@ -174,16 +176,15 @@ const plugin = async (args) => {
   }
   vpyLines.push('src.set_output()');
   fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
-  jobLog(`[vs] .vpy written${downscaleEnabled ? ` (Lanczos3 -> ${downscaleRes})` : ' (passthrough)'}`);
+  dbg(`[vs] .vpy written${downscaleEnabled ? ` (Lanczos3 -> ${downscaleRes})` : ' (passthrough)'}`);
 
   if (!fs.existsSync(lwiCache)) {
-    jobLog('[vs] pre-generating .lwi index...');
     updateWorker({ status: 'Indexing' });
     const lwiExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
       cwd: vsDir,
       silent: true,
     });
-    jobLog(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
+    dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
   }
 
   const av1anArgs = [
@@ -212,6 +213,8 @@ const plugin = async (args) => {
 
   av1anArgs.push('-v', encFlags);
 
+  jobLog(`av1an ${av1anArgs.map((a) => /\s/.test(a) ? `"${a}"` : a).join(' ')}`);
+
   let tracker;
   let sizeExceeded = false;
 
@@ -237,7 +240,7 @@ const plugin = async (args) => {
   });
   tracker.start();
 
-  const AV1AN_KEEP = /scene|chunk|encoded|vmaf|fps|eta|probe|error|warn|panic|crash/i;
+  const AV1AN_KEEP = /scenecut|error|warn|panic|crash|failed/i;
   const av1anExit = await pm.spawnAsync(BIN.av1an, av1anArgs, {
     cwd: vsDir,
     filter: (l) => AV1AN_KEEP.test(l),

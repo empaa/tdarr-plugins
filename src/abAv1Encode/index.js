@@ -141,10 +141,11 @@ const plugin = async (args) => {
 
   jobLog('='.repeat(64));
   jobLog(`AB-AV1 ENCODE  preset=${encPreset}  vmaf=${targetVmaf}  crf=${minCrf}-${maxCrf}`);
-  jobLog(`  input     : ${inputPath}`);
-  jobLog(`  resolution: ${stream.width || '?'}x${height || '?'}${downscaleEnabled ? ` -> ${downscaleRes}` : ''}`);
-  jobLog(`  max%      : ${maxEncodedPercent}`);
-  jobLog(`  threads   : ${availableThreads}`);
+  jobLog(`  input      : ${inputPath}`);
+  jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${downscaleEnabled ? ` -> ${downscaleRes}` : ''}`);
+  jobLog(`  max size   : ${maxEncodedPercent}% of source`);
+  jobLog(`  threads    : ${availableThreads}`);
+  jobLog(`  svt flags  : ${svtFlags}`);
   jobLog('='.repeat(64));
 
   updateWorker({ percentage: 0, startTime: Date.now(), status: 'CRF Search' });
@@ -167,6 +168,8 @@ const plugin = async (args) => {
   }
 
   svtFlags.split(/\s+/).filter(Boolean).forEach((tok) => abArgs.push(tok));
+
+  jobLog(`ab-av1 ${abArgs.map((a) => /\s/.test(a) ? `"${a}"` : a).join(' ')}`);
 
   let sizeExceeded = false;
 
