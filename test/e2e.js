@@ -139,6 +139,11 @@ async function runScenario(scenario, sampleFile) {
     // Assert output
     const elapsed = ((Date.now() - start) / 1000).toFixed(0);
 
+    if (result.status === 'skipped') {
+      console.log(`${label} ... FAIL (job skipped — check flow/library config) (${elapsed}s)`);
+      return false;
+    }
+
     if (result.status === 'error') {
       console.log(`${label} ... FAIL (transcode error) (${elapsed}s)`);
       return false;
@@ -174,14 +179,24 @@ async function runScenario(scenario, sampleFile) {
     return true;
   } finally {
     // Teardown — always run
-    try { await api.cruddb('FlowsJSONDB', 'removeOne', flowId); } catch {}
-    try { await api.cruddb('LibrarySettingsJSONDB', 'removeOne', libId); } catch {}
-    try { await api.cruddb('FileJSONDB', 'removeOne', `${containerDir}/${path.basename(sampleFile)}`); } catch {}
-    try { fs.rmSync(scenarioDir, { recursive: true, force: true }); } catch {}
+    try { await api.cruddb('FlowsJSONDB', 'removeOne', flowId); }
+    catch (e) { console.warn(`  [teardown] failed to remove flow ${flowId}: ${e.message}`); }
+    try { await api.cruddb('LibrarySettingsJSONDB', 'removeOne', libId); }
+    catch (e) { console.warn(`  [teardown] failed to remove library ${libId}: ${e.message}`); }
+    try { await api.cruddb('FileJSONDB', 'removeOne', `${containerDir}/${path.basename(sampleFile)}`); }
+    catch (e) { console.warn(`  [teardown] failed to remove file record: ${e.message}`); }
+    try { fs.rmSync(scenarioDir, { recursive: true, force: true }); }
+    catch (e) { console.warn(`  [teardown] failed to remove ${scenarioDir}: ${e.message}`); }
   }
 }
 
 async function e2eTest(filterPlugin) {
+  if (!fs.existsSync(HOST_OUTPUT_DIR)) {
+    console.error(`ERROR: Host output dir does not exist: ${HOST_OUTPUT_DIR}`);
+    console.error('Is the tdarr-av1 sibling repo at ../tdarr-av1 and the test instance running?');
+    process.exit(1);
+  }
+
   const scenarios = discoverScenarios(filterPlugin);
 
   if (scenarios.length === 0) {
