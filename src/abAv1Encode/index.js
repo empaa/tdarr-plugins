@@ -185,11 +185,8 @@ const plugin = async (args) => {
   pm.installCancelHandler(() => { tracker.stop(); });
   tracker.startInterval();
 
-  const localBinEnv = { ...process.env, PATH: `/usr/local/bin:${process.env.PATH}` };
-
   const abExit = await pm.spawnAsync(BIN_AB_AV1, abArgs, {
     cwd: abWorkDir,
-    env: localBinEnv,
     onLine: tracker.onLine,
     filter: () => false,
     onSpawn: (pid) => pm.startPpidWatcher(pid),
