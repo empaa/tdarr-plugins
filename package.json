@@ -5,7 +5,10 @@
   "description": "AV1 encoding FlowPlugins for Tdarr (av1an + ab-av1)",
   "scripts": {
     "build": "./build.sh",
-    "deploy": "./build.sh --deploy"
+    "deploy": "./build.sh --deploy",
+    "test": "node test/run.js",
+    "test:smoke": "node test/run.js --smoke",
+    "test:e2e": "node test/run.js --e2e"
   },
   "devDependencies": {
     "esbuild": "^0.25"
