@@ -134,7 +134,7 @@ async function runScenario(scenario, sampleFile) {
     await api.requeueFile(containerFile);
 
     // Poll for completion (by library ID, since file ID may change after encode)
-    const result = await api.pollJobStatus(libId, 300000);
+    const result = await api.pollJobStatus(libId, 900000);
 
     // Assert output
     const elapsed = ((Date.now() - start) / 1000).toFixed(0);

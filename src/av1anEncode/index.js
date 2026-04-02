@@ -208,8 +208,6 @@ const plugin = async (args) => {
 
   if (downscaleEnabled) {
     av1anArgs.push(...buildAv1anVmafResArgs(downscaleRes));
-  } else {
-    av1anArgs.push('--probe-res', '1280x720', '--vmaf-res', '1280x720');
   }
 
   av1anArgs.push('-v', encFlags);

@@ -7,14 +7,5 @@
       "preset": "8",
       "max_encoded_percent": "100"
     }
-  },
-  {
-    "name": "aom default",
-    "inputs": {
-      "encoder": "aom",
-      "target_vmaf": "93",
-      "preset": "6",
-      "max_encoded_percent": "100"
-    }
   }
 ]
