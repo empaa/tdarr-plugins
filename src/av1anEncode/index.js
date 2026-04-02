@@ -116,13 +116,19 @@ const plugin = async (args) => {
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
   const pm = createProcessManager(jobLog, dbg);
 
-  // diagnostic: find all ffmpeg binaries on PATH
+  // diagnostic: check ffmpeg libvmaf support
   try {
-    const which = require('child_process').execSync('which -a ffmpeg 2>/dev/null || true').toString().trim();
-    jobLog(`[diag] all ffmpeg on PATH: ${which.replace(/\n/g, ', ')}`);
-    for (const p of ['/command/ffmpeg', '/command/bin/ffmpeg', '/lsiopy/bin/ffmpeg']) {
-      if (fs.existsSync(p)) jobLog(`[diag] found: ${p}`);
-    }
+    const cp_ = require('child_process');
+    const ver = cp_.execSync(`${BIN.ffmpeg} -version 2>&1 | head -1`).toString().trim();
+    jobLog(`[diag] ffmpeg version: ${ver}`);
+    const filters = cp_.execSync(`${BIN.ffmpeg} -filters 2>&1 | grep -i vmaf || echo 'NO VMAF FILTER'`).toString().trim();
+    jobLog(`[diag] vmaf filter: ${filters}`);
+    const buildconf = cp_.execSync(`${BIN.ffmpeg} -buildconf 2>&1 | grep -i vmaf || echo 'NO VMAF IN BUILDCONF'`).toString().trim();
+    jobLog(`[diag] buildconf vmaf: ${buildconf}`);
+    const ldd = cp_.execSync(`ldd ${BIN.ffmpeg} 2>&1 | grep -i vmaf || echo 'NO VMAF IN LDD'`).toString().trim();
+    jobLog(`[diag] ldd vmaf: ${ldd}`);
+    const md5 = cp_.execSync(`md5sum ${BIN.ffmpeg} 2>/dev/null || true`).toString().trim();
+    jobLog(`[diag] ffmpeg md5: ${md5}`);
   } catch (_) {}
 
   const updateWorker = (fields) => {
