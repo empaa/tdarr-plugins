@@ -100,17 +100,17 @@ const plugin = async (args) => {
   const downscaleEnabled  = inputs.downscale_enabled === true || inputs.downscale_enabled === 'true';
   const downscaleRes      = String(inputs.downscale_resolution || '1080p');
 
+  const findBin = (name, ...paths) => paths.find((p) => fs.existsSync(p))
+    || (() => { throw new Error(`Required binary not found: ${name} (checked ${paths.join(', ')})`); })();
+
   const BIN = {
-    av1an:    '/usr/local/bin/av1an',
-    ffmpeg:   '/usr/local/bin/ffmpeg',
-    vspipe:   '/usr/local/bin/vspipe',
-    mkvmerge: '/usr/local/bin/mkvmerge',
+    av1an:    findBin('av1an',    '/usr/local/bin/av1an',    '/usr/bin/av1an'),
+    ffmpeg:   findBin('ffmpeg',   '/usr/local/bin/ffmpeg',   '/usr/bin/ffmpeg'),
+    vspipe:   findBin('vspipe',   '/usr/local/bin/vspipe',   '/usr/bin/vspipe'),
+    mkvmerge: findBin('mkvmerge', '/usr/local/bin/mkvmerge', '/usr/bin/mkvmerge'),
   };
   const vmafModel = '/usr/local/share/vmaf/vmaf_v0.6.1.json';
 
-  for (const b of Object.values(BIN)) {
-    if (!fs.existsSync(b)) throw new Error(`Required binary not found: ${b}`);
-  }
   if (!fs.existsSync(vmafModel)) throw new Error(`VMAF model not found: ${vmafModel}`);
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);

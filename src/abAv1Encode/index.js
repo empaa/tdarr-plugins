@@ -99,10 +99,9 @@ const plugin = async (args) => {
   const downscaleEnabled  = inputs.downscale_enabled === true || inputs.downscale_enabled === 'true';
   const downscaleRes      = String(inputs.downscale_resolution || '1080p');
 
-  const BIN_AB_AV1 = '/usr/local/bin/ab-av1';
+  const BIN_AB_AV1 = ['/usr/local/bin/ab-av1', '/usr/bin/ab-av1'].find((p) => fs.existsSync(p));
+  if (!BIN_AB_AV1) throw new Error('Required binary not found: ab-av1 (checked /usr/local/bin, /usr/bin)');
   const vmafModel = '/usr/local/share/vmaf/vmaf_v0.6.1.json';
-
-  if (!fs.existsSync(BIN_AB_AV1)) throw new Error(`Required binary not found: ${BIN_AB_AV1}`);
   if (!fs.existsSync(vmafModel)) throw new Error(`VMAF model not found: ${vmafModel}`);
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
