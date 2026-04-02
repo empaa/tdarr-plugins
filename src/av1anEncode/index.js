@@ -116,6 +116,15 @@ const plugin = async (args) => {
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
   const pm = createProcessManager(jobLog, dbg);
 
+  // diagnostic: which ffmpeg and does it have libvmaf?
+  jobLog(`[diag] ffmpeg resolved: ${BIN.ffmpeg}`);
+  jobLog(`[diag] PATH: ${process.env.PATH}`);
+  try {
+    const vout = require('child_process').execSync(`${BIN.ffmpeg} -buildconf 2>&1 || true`).toString();
+    jobLog(`[diag] libvmaf: ${vout.includes('libvmaf') ? 'YES' : 'NO'}`);
+    if (!vout.includes('libvmaf')) jobLog(`[diag] buildconf: ${vout.slice(0, 500)}`);
+  } catch (e) { jobLog(`[diag] buildconf check failed: ${e.message}`); }
+
   const updateWorker = (fields) => {
     if (typeof args.updateWorker === 'function') {
       try { args.updateWorker(fields); } catch (_) {}
