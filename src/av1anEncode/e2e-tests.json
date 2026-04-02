@@ -1,0 +1,10 @@
+[
+  {
+    "name": "svt-av1 default",
+    "inputs": {
+      "encoder": "svt-av1",
+      "target_vmaf": "93",
+      "preset": "8"
+    }
+  }
+]
