@@ -22,7 +22,8 @@ async function smokeTest(filterPlugin) {
   await new Promise((r) => setTimeout(r, 2000));
 
   console.log('Fetching local plugin list...');
-  const plugins = await api.searchFlowPlugins('Local');
+  const raw = await api.searchFlowPlugins('Local');
+  const plugins = raw.flat().filter((p) => p && typeof p === 'object' && p.pluginName);
 
   let failures = 0;
 
