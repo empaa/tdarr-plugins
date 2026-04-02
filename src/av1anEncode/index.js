@@ -240,9 +240,12 @@ const plugin = async (args) => {
   });
   tracker.start();
 
+  const localBinEnv = { ...process.env, PATH: `/usr/local/bin:${process.env.PATH}` };
+
   const AV1AN_KEEP = /scenecut|error|warn|panic|crash|failed/i;
   const av1anExit = await pm.spawnAsync(BIN.av1an, av1anArgs, {
     cwd: vsDir,
+    env: localBinEnv,
     filter: (l) => AV1AN_KEEP.test(l),
     onSpawn: (pid) => pm.startPpidWatcher(pid),
   });
