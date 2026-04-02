@@ -5,13 +5,19 @@ const fs = require('fs');
 const path = require('path');
 const cp = require('child_process');
 
-const MKVMERGE_BIN = '/usr/local/bin/mkvmerge';
+const findMkvmerge = () => {
+  for (const p of ['/usr/local/bin/mkvmerge', '/usr/bin/mkvmerge']) {
+    if (fs.existsSync(p)) return p;
+  }
+  return 'mkvmerge'; // fallback to PATH
+};
 
 const probeAudioSize = async (inputPath, workDir, jobLog, dbg) => {
+  const mkvmergeBin = findMkvmerge();
   const tmpAudio = path.join(workDir, 'audio-size-probe.mkv');
   try {
     await new Promise((resolve) => {
-      const proc = cp.spawn(MKVMERGE_BIN, ['-q', '-o', tmpAudio, '-D', inputPath]);
+      const proc = cp.spawn(mkvmergeBin, ['-q', '-o', tmpAudio, '-D', inputPath]);
       proc.on('close', resolve);
       proc.on('error', resolve);
     });
@@ -30,9 +36,10 @@ const probeAudioSize = async (inputPath, workDir, jobLog, dbg) => {
 };
 
 const mergeAudioVideo = async (videoPath, inputPath, outputPath, processManager, jobLog, dbg) => {
+  const mkvmergeBin = findMkvmerge();
   jobLog('[mux] muxing audio + subtitles from original via mkvmerge...');
 
-  const muxExit = await processManager.spawnAsync(MKVMERGE_BIN, [
+  const muxExit = await processManager.spawnAsync(mkvmergeBin, [
     '-o', outputPath,
     videoPath,
     '--no-video', inputPath,

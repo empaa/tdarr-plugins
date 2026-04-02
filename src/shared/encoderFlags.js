@@ -96,7 +96,7 @@ const buildSvtFlags = (preset, svtLp, hdrSvt) => {
     '--enable-qm 1', '--qm-min 0', '--qm-max 15',
     '--chroma-qm-min 8', '--chroma-qm-max 15',
     '--tf-strength 1', '--sharpness 1', '--tile-columns 1',
-    '--scm 0', '--pin 0', `--lp ${svtLp}`, hdrSvt,
+    '--scm 0', `--lp ${svtLp}`, hdrSvt,
   ].filter(Boolean).join(' ');
 };
 
@@ -109,7 +109,7 @@ const buildAbAv1SvtFlags = (cpu, lookahead) => {
     '--svt irefresh-type=2', '--svt scm=0', '--svt sharpness=1',
     '--svt tf-strength=1', '--svt tile-columns=1', '--svt enable-overlays=1',
     `--svt lookahead=${lookahead}`, '--keyint 10s', '--scd true',
-    '--svt pin=0', `--svt lp=${Math.min(6, cpu)}`,
+    `--svt lp=${Math.min(6, cpu)}`,
   ].join(' ');
 };
 

@@ -166,7 +166,6 @@ const plugin = async (args) => {
 
   let vpyLines = [
     'import vapoursynth as vs',
-    'from math import round',
     'core = vs.core',
     `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
   ];
