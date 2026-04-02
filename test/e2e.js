@@ -133,8 +133,8 @@ async function runScenario(scenario, sampleFile) {
     await api.cruddb('FileJSONDB', 'insert', fileObj._id, fileObj);
     await api.requeueFile(containerFile);
 
-    // Poll for completion
-    const result = await api.pollJobStatus(containerFile, 300000);
+    // Poll for completion (by library ID, since file ID may change after encode)
+    const result = await api.pollJobStatus(libId, 300000);
 
     // Assert output
     const elapsed = ((Date.now() - start) / 1000).toFixed(0);
@@ -183,8 +183,8 @@ async function runScenario(scenario, sampleFile) {
     catch (e) { console.warn(`  [teardown] failed to remove flow ${flowId}: ${e.message}`); }
     try { await api.cruddb('LibrarySettingsJSONDB', 'removeOne', libId); }
     catch (e) { console.warn(`  [teardown] failed to remove library ${libId}: ${e.message}`); }
-    try { await api.cruddb('FileJSONDB', 'removeOne', `${containerDir}/${path.basename(sampleFile)}`); }
-    catch (e) { console.warn(`  [teardown] failed to remove file record: ${e.message}`); }
+    try { await api.cruddb('FileJSONDB', 'removeByDB', libId); }
+    catch (e) { console.warn(`  [teardown] failed to remove file records: ${e.message}`); }
     try { fs.rmSync(scenarioDir, { recursive: true, force: true }); }
     catch (e) { console.warn(`  [teardown] failed to remove ${scenarioDir}: ${e.message}`); }
   }

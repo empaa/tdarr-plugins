@@ -67,12 +67,12 @@ async function alterWorkerLimit(nodeID, workerType, process) {
   });
 }
 
-async function pollJobStatus(fileId, timeoutMs = 300000) {
+async function pollJobStatus(libraryId, timeoutMs = 300000) {
   const start = Date.now();
   const poll = 3000;
   while (Date.now() - start < timeoutMs) {
     const files = await cruddb('FileJSONDB', 'getAll');
-    const file = Array.isArray(files) ? files.find((f) => f._id === fileId) : null;
+    const file = Array.isArray(files) ? files.find((f) => f.DB === libraryId) : null;
     if (file) {
       if (file.TranscodeDecisionMaker === 'Not required') return { status: 'skipped', file };
       if (file.TranscodeDecisionMaker === 'Transcode success') return { status: 'success', file };
@@ -80,7 +80,7 @@ async function pollJobStatus(fileId, timeoutMs = 300000) {
     }
     await new Promise((r) => setTimeout(r, poll));
   }
-  throw new Error(`Timed out after ${timeoutMs / 1000}s waiting for job on ${fileId}`);
+  throw new Error(`Timed out after ${timeoutMs / 1000}s waiting for job in library ${libraryId}`);
 }
 
 module.exports = {
