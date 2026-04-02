@@ -30,13 +30,10 @@ async function cruddb(collection, mode, docID, obj) {
 }
 
 async function scanFile(libraryId, filePath) {
-  return post('/api/v2/scan-files', {
+  return post('/api/v2/scan-individual-file', {
     data: {
-      scanConfig: {
-        dbID: libraryId,
-        mode: 'scanFolderWatcher',
-        arrayOrPath: [filePath],
-      },
+      file: { file: filePath, DB: libraryId },
+      scanTypes: { exifToolScan: false, mediaInfoScan: false, closedCaptionScan: false },
     },
   });
 }
@@ -64,6 +61,12 @@ async function syncPlugins() {
   return res.text();
 }
 
+async function alterWorkerLimit(nodeID, workerType, process) {
+  return post('/api/v2/alter-worker-limit', {
+    data: { nodeID, workerType, process },
+  });
+}
+
 async function pollJobStatus(fileId, timeoutMs = 300000) {
   const start = Date.now();
   const poll = 3000;
@@ -87,6 +90,7 @@ module.exports = {
   requeueFile,
   getNodes,
   syncPlugins,
+  alterWorkerLimit,
   pollJobStatus,
   BASE_URL,
 };

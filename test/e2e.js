@@ -208,6 +208,15 @@ async function e2eTest(filterPlugin) {
     process.exit(1);
   }
 
+  // Ensure at least 1 transcode CPU worker is available
+  const nodes = await api.getNodes();
+  for (const [nodeId, node] of Object.entries(nodes)) {
+    if (node.workerLimits && node.workerLimits.transcodecpu < 1) {
+      console.log(`Enabling transcode CPU worker on node: ${node.nodeName || nodeId}`);
+      await api.alterWorkerLimit(nodeId, 'transcodecpu', 'increase');
+    }
+  }
+
   const sampleFile = findSampleFile();
   console.log(`Using sample: ${path.basename(sampleFile)}`);
   console.log(`Running ${scenarios.length} scenario(s)...\n`);
