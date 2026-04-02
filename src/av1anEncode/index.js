@@ -116,6 +116,15 @@ const plugin = async (args) => {
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
   const pm = createProcessManager(jobLog, dbg);
 
+  // diagnostic: find all ffmpeg binaries on PATH
+  try {
+    const which = require('child_process').execSync('which -a ffmpeg 2>/dev/null || true').toString().trim();
+    jobLog(`[diag] all ffmpeg on PATH: ${which.replace(/\n/g, ', ')}`);
+    for (const p of ['/command/ffmpeg', '/command/bin/ffmpeg', '/lsiopy/bin/ffmpeg']) {
+      if (fs.existsSync(p)) jobLog(`[diag] found: ${p}`);
+    }
+  } catch (_) {}
+
   const updateWorker = (fields) => {
     if (typeof args.updateWorker === 'function') {
       try { args.updateWorker(fields); } catch (_) {}
