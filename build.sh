@@ -47,10 +47,10 @@ for plugin_dir in "${SRC_DIR}"/*/; do
   fi
 
   version="1.0.0"
-  out_dir="${DIST_DIR}/${plugin_name}/${version}"
+  out_dir="${DIST_DIR}/video/${plugin_name}/${version}"
   mkdir -p "$out_dir"
 
-  echo "  bundle: ${plugin_name} -> dist/LocalFlowPlugins/${plugin_name}/${version}/index.js"
+  echo "  bundle: ${plugin_name} -> dist/LocalFlowPlugins/video/${plugin_name}/${version}/index.js"
 
   # shellcheck disable=SC2086
   "$ESBUILD" "$entry" \
