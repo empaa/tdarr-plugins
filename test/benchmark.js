@@ -203,7 +203,6 @@ function parseMemGiB(str) {
 async function benchAv1an(samplePath, config) {
   const containerSample = `/samples/${path.basename(samplePath)}`;
   const warmupDir = `${BENCH_TEMP}/warmup`;
-  const tempDir = `${BENCH_TEMP}/${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
   const encFlags = encoderArg === 'aom'
     ? buildAomFlags(Number(cpuUsed), config.tpw, '')
@@ -211,11 +210,10 @@ async function benchAv1an(samplePath, config) {
 
   const av1anEncoder = encoderArg === 'aom' ? 'aom' : 'svt-av1';
 
-  // Reuse warmup's VPY script and cached scenes.json
+  // Reuse warmup's work dir (has cached scenes) — clean encode output between runs
   const av1anCmdParts = [
-    `mkdir -p ${tempDir}/work &&`,
-    `cp ${warmupDir}/work/scenes.json ${tempDir}/work/scenes.json &&`,
-    `av1an -i ${warmupDir}/vs/bench.vpy -o ${tempDir}/out.mkv --temp ${tempDir}/work`,
+    `rm -rf ${warmupDir}/work/encode ${warmupDir}/work/done.json ${warmupDir}/out.mkv 2>/dev/null;`,
+    `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
     `-c mkvmerge -e ${av1anEncoder}`,
     `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
     `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
@@ -231,7 +229,7 @@ async function benchAv1an(samplePath, config) {
   const cmd = av1anCmdParts.join(' ');
 
   const startMs = Date.now();
-  const workDir = `${tempDir}/work`;
+  const workDir = `${warmupDir}/work`;
   const cpuSamples = [];
   const memSamples = [];
 
