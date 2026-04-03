@@ -293,7 +293,13 @@ const createAbAv1Tracker = (opts) => {
       return;
     }
 
-    if (currentPct === 0) return;
+    if (currentPct === 0) {
+      // Still push actual file size during CRF search so dashboard isn't stale
+      if (actualSizeGb > 0) {
+        pushStats({ outputFileSizeInGbytes: actualSizeGb });
+      }
+      return;
+    }
 
     let remain;
     if (lastEtaSec > 0) {
