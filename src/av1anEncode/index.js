@@ -102,7 +102,7 @@ const plugin = async (args) => {
 
   const { createProcessManager } = require('../shared/processManager');
   const { createLogger, humanSize } = require('../shared/logger');
-  const { detectHdrMeta, buildAomFlags, buildSvtFlags, calculateThreadBudget } = require('../shared/encoderFlags');
+  const { detectHdrMeta, buildAomFlags, buildSvtFlags, calculateThreadBudget, capSvtLpByPreset } = require('../shared/encoderFlags');
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
@@ -171,9 +171,10 @@ const plugin = async (args) => {
     { strategy: threadStrategy, ...threadOverrides },
   );
 
+  const effectiveSvtLp = encoder !== 'aom' ? capSvtLpByPreset(svtLp, encPreset) : svtLp;
   const encFlags = encoder === 'aom'
     ? buildAomFlags(encPreset, threadsPerWorker, hdrAom)
-    : buildSvtFlags(encPreset, svtLp, hdrSvt);
+    : buildSvtFlags(encPreset, effectiveSvtLp, hdrSvt);
 
   const workBase = path.join(args.workDir, 'av1an-work');
   const vsDir = path.join(workBase, 'vs');

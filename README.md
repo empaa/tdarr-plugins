@@ -62,6 +62,20 @@ The default `safe` strategy is conservative — on high-core-count systems you m
 | aggressive | 16 workers × 2 threads | 6 workers × 5 threads | 20 | 10 |
 | max | 20 workers × 1 thread | 8 workers × 4 threads | 28 | 16 |
 
+### SVT-AV1 Thread Limits
+
+SVT-AV1 has preset-dependent parallelization limits. Lower presets use algorithms with dependencies that prevent effective threading beyond a certain point:
+
+| SVT-AV1 Preset | Effective max lp |
+|-----------------|-----------------|
+| 0-3 | ~4 threads |
+| 4-6 | ~16 threads |
+| 7+ | 32+ threads |
+
+The plugins automatically cap `lp` based on the encoder preset. This means **ab-av1 at preset 3 won't benefit from thread strategies beyond `safe`** — the encoder simply can't use the extra threads.
+
+For maximum multicore utilization at low presets, use **av1an** instead — it runs multiple independent encoder instances in parallel via scene-based chunking, bypassing SVT-AV1's per-instance thread limits.
+
 ### Custom Overrides
 
 Set **Thread Strategy** to `custom` and paste a JSON object into **Thread Overrides**:

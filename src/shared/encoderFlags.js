@@ -113,6 +113,20 @@ const buildAbAv1SvtFlags = (lp, lookahead) => {
   ].join(' ');
 };
 
+// SVT-AV1 effective thread limits per encoder preset.
+// Lower presets have algorithmic dependencies that prevent parallelization.
+// See: https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/1843
+const SVT_LP_CAP_BY_PRESET = {
+  0: 4, 1: 4, 2: 4, 3: 4,
+  4: 16, 5: 16, 6: 16,
+  7: 32, 8: 32, 9: 32, 10: 32, 11: 32, 12: 32, 13: 32,
+};
+
+const capSvtLpByPreset = (lp, encPreset) => {
+  const cap = SVT_LP_CAP_BY_PRESET[encPreset];
+  return cap != null ? Math.min(lp, cap) : lp;
+};
+
 const THREAD_PRESETS = {
   safe:        { aomTpwRatio: 4, aomTpwMin: 4, svtTpwRatio: 6, svtTpwMin: 4, svtTpwMax: 6, svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
   balanced:    { aomTpwRatio: 8, aomTpwMin: 2, svtTpwRatio: 5, svtTpwMin: 4, svtTpwMax: 8, svtLpMax: 12, vmafThreadDiv: 4, halve4kHdr: false },
@@ -169,5 +183,6 @@ module.exports = {
   buildSvtFlags,
   buildAbAv1SvtFlags,
   calculateThreadBudget,
+  capSvtLpByPreset,
   THREAD_PRESETS,
 };

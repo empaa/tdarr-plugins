@@ -102,7 +102,7 @@ const plugin = async (args) => {
 
   const { createProcessManager } = require('../shared/processManager');
   const { createLogger, humanSize } = require('../shared/logger');
-  const { detectHdrMeta, buildAbAv1SvtFlags, calculateThreadBudget } = require('../shared/encoderFlags');
+  const { detectHdrMeta, buildAbAv1SvtFlags, calculateThreadBudget, capSvtLpByPreset } = require('../shared/encoderFlags');
   const { shouldDownscale, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { createAbAv1Tracker } = require('../shared/progressTracker');
 
@@ -170,7 +170,8 @@ const plugin = async (args) => {
   const sampleFrames = Math.round(srcFps * 4);
   const lookahead = Math.min(40, Math.max(8, Math.floor(sampleFrames * 0.25)));
 
-  const svtFlags = buildAbAv1SvtFlags(svtLp, lookahead);
+  const effectiveLp = capSvtLpByPreset(svtLp, encPreset);
+  const svtFlags = buildAbAv1SvtFlags(effectiveLp, lookahead);
 
   const abWorkDir = path.join(args.workDir, 'ab-av1-work');
   const outputPath = path.join(args.workDir, 'ab-av1-output.mkv');
@@ -185,7 +186,7 @@ const plugin = async (args) => {
   jobLog(`  input      : ${inputPath}`);
   jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${doDownscale ? ` -> ${downscaleRes}` : ''}`);
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
-  jobLog(`  threads    : cpu=${availableThreads}  lp=${svtLp}  strategy=${threadStrategy}`);
+  jobLog(`  threads    : cpu=${availableThreads}  lp=${effectiveLp}${effectiveLp !== svtLp ? ` (capped from ${svtLp} — SVT-AV1 preset ${encPreset} limit)` : ''}  strategy=${threadStrategy}`);
   jobLog(`  svt flags  : ${svtFlags}`);
   jobLog('='.repeat(64));
 
