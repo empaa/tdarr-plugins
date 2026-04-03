@@ -35,7 +35,7 @@ Options:
   --cpu-used <N>        Encoder preset/cpu-used value (default: 3)
   --vmaf <N>            Target VMAF score (default: 93)
   --downscale <res>     Downscale before encoding: 720p, 1080p, or 1440p (off by default)
-  --chunks <N>          Stop av1an after N chunks complete (default: 5, 0=full encode)
+  --duration <sec>      How long to run each test in seconds (default: 120)
   --preset <name>       Test a single preset: safe, balanced, aggressive, or max
   --grid                Test a custom worker×thread grid instead of presets
   --sample <name>       Filter sample files by name substring
@@ -84,9 +84,9 @@ const downscaleRes = (() => {
   const idx = cliArgs.indexOf('--downscale');
   return idx !== -1 && cliArgs[idx + 1] ? cliArgs[idx + 1] : null;
 })();
-const chunkLimit = (() => {
-  const idx = cliArgs.indexOf('--chunks');
-  return idx !== -1 && cliArgs[idx + 1] ? Number(cliArgs[idx + 1]) : 5;
+const testDuration = (() => {
+  const idx = cliArgs.indexOf('--duration');
+  return idx !== -1 && cliArgs[idx + 1] ? Number(cliArgs[idx + 1]) : 120;
 })();
 
 // ---------------------------------------------------------------------------
@@ -202,20 +202,8 @@ function parseMemGiB(str) {
 // ---------------------------------------------------------------------------
 async function benchAv1an(samplePath, config) {
   const containerSample = `/samples/${path.basename(samplePath)}`;
+  const warmupDir = `${BENCH_TEMP}/warmup`;
   const tempDir = `${BENCH_TEMP}/${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-
-  const vpyParts = [
-    'import vapoursynth as vs',
-    'core = vs.core',
-    `src = core.lsmas.LWLibavSource(source=\\"${containerSample}\\")`,
-  ];
-  if (downscaleRes) {
-    for (const line of buildVsDownscaleLines(downscaleRes)) {
-      vpyParts.push(line);
-    }
-  }
-  vpyParts.push('src.set_output()');
-  const vpyLines = vpyParts.join('\\n');
 
   const encFlags = encoderArg === 'aom'
     ? buildAomFlags(Number(cpuUsed), config.tpw, '')
@@ -223,10 +211,11 @@ async function benchAv1an(samplePath, config) {
 
   const av1anEncoder = encoderArg === 'aom' ? 'aom' : 'svt-av1';
 
+  // Reuse warmup's VPY script and cached scenes.json
   const av1anCmdParts = [
-    `mkdir -p ${tempDir} &&`,
-    `printf '${vpyLines}\\n' > ${tempDir}/bench.vpy &&`,
-    `av1an -i ${tempDir}/bench.vpy -o ${tempDir}/out.mkv --temp ${tempDir}/work`,
+    `mkdir -p ${tempDir}/work &&`,
+    `cp ${warmupDir}/work/scenes.json ${tempDir}/work/scenes.json &&`,
+    `av1an -i ${warmupDir}/vs/bench.vpy -o ${tempDir}/out.mkv --temp ${tempDir}/work`,
     `-c mkvmerge -e ${av1anEncoder}`,
     `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
     `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
@@ -242,37 +231,26 @@ async function benchAv1an(samplePath, config) {
   const cmd = av1anCmdParts.join(' ');
 
   const startMs = Date.now();
-
-  // Poll av1an work dir for progress + one-shot docker stats each tick
   const workDir = `${tempDir}/work`;
-  let stoppedByLimit = false;
   const cpuSamples = [];
   const memSamples = [];
 
-  // Script to read done.json chunk count only (for progress + chunk limit)
-  const chunkCountScript = `python3 -c "
-import json, os, sys
-done_f = os.path.join('${workDir}', 'done.json')
-if not os.path.exists(done_f): print('0'); sys.exit(0)
-try:
-    done = json.load(open(done_f))
-    print(len(done.get('done', {})))
-except: print('0')
-" 2>/dev/null || echo 0`;
-
-  // Script to read final frames from done.json (only called once at end)
-  const finalStatsScript = `python3 -c "
+  // Script to read total encoded bytes and chunks from done.json
+  const readDoneScript = `python3 -c "
 import json, os, sys
 done_f = os.path.join('${workDir}', 'done.json')
 if not os.path.exists(done_f): print('0|0'); sys.exit(0)
 try:
     done = json.load(open(done_f))
     done_map = done.get('done', {})
-    enc_frames = sum(e.get('frames', 0) for e in done_map.values())
+    enc_bytes = sum(e.get('size_bytes', 0) for e in done_map.values())
     done_chunks = len(done_map)
-    print(f'{done_chunks}|{enc_frames}')
+    print(f'{done_chunks}|{enc_bytes}')
 except: print('0|0')
 " 2>/dev/null || echo 0|0`;
+
+  // Progress + stats monitor, kills encode when duration reached
+  let timedOut = false;
 
   const progressMonitor = setInterval(async () => {
     try {
@@ -290,19 +268,22 @@ except: print('0|0')
         }
       }
 
-      // Chunk count
-      const check = await dockerExec(chunkCountScript, { timeout: 5000 });
-      const doneChunks = parseInt(check.stdout.trim(), 10) || 0;
+      // Read current progress
+      const check = await dockerExec(readDoneScript, { timeout: 5000 });
+      const [doneChunks, encBytes] = check.stdout.trim().split('|').map((v) => parseInt(v, 10) || 0);
+      const encMiB = (encBytes / (1024 * 1024)).toFixed(1);
 
+      const elapsedSec = (Date.now() - startMs) / 1000;
+      const remaining = Math.max(0, testDuration - elapsedSec);
       const elapsed = formatMs(Date.now() - startMs);
       const cpuStr = cpuSamples.length > 0 ? `  CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
       const memStr = memSamples.length > 0 ? `  RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
-      process.stdout.write(`    [${elapsed}] ${doneChunks} chunks done${cpuStr}${memStr}\n`);
+      process.stdout.write(`    [${elapsed}] ${doneChunks} chunks  ${encMiB} MiB encoded  ${formatMs(remaining * 1000)} left${cpuStr}${memStr}\n`);
 
-      // Chunk limit
-      if (chunkLimit > 0 && doneChunks >= chunkLimit) {
-        stoppedByLimit = true;
-        process.stdout.write(`    Chunk limit reached (${doneChunks}/${chunkLimit}) — stopping encode\n`);
+      // Time limit
+      if (elapsedSec >= testDuration) {
+        timedOut = true;
+        process.stdout.write(`    Time limit reached (${testDuration}s) — stopping encode\n`);
         spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
           'pkill -f "av1an|aomenc|SvtAv1EncApp" 2>/dev/null; true',
         ]);
@@ -310,7 +291,7 @@ except: print('0|0')
     } catch (_) {}
   }, 10000);
 
-  const result = await dockerExec(cmd, { timeout: 1800000, live: true });
+  const result = await dockerExec(cmd, { timeout: (testDuration + 60) * 1000, live: true });
 
   clearInterval(progressMonitor);
   const encodeTimeMs = Date.now() - startMs;
@@ -319,26 +300,33 @@ except: print('0|0')
     ? cpuSamples.reduce((s, v) => s + v, 0) / cpuSamples.length : 0;
   const peakMem = memSamples.length > 0 ? Math.max(...memSamples) : 0;
 
-  // FPS = total encoded frames / total wall-clock time
-  let fps = 0;
+  // Read final encoded bytes
+  let encBytes = 0;
+  let doneChunks = 0;
   try {
-    const final = await dockerExec(finalStatsScript, { timeout: 8000 });
-    const [doneChunks, encFrames] = final.stdout.trim().split('|').map((v) => parseInt(v, 10) || 0);
-    const encodeTimeSec = encodeTimeMs / 1000;
-    if (encFrames > 0 && encodeTimeSec > 0) fps = encFrames / encodeTimeSec;
+    const final = await dockerExec(readDoneScript, { timeout: 8000 });
+    const parts = final.stdout.trim().split('|').map((v) => parseInt(v, 10) || 0);
+    doneChunks = parts[0];
+    encBytes = parts[1];
   } catch (_) {}
+
+  const encodeTimeSec = encodeTimeMs / 1000;
+  const mibPerMin = encBytes > 0 && encodeTimeSec > 0
+    ? (encBytes / (1024 * 1024)) / (encodeTimeSec / 60) : 0;
 
   return {
     label: config.label,
     workers: config.workers,
     threads: config.tpw,
     vmafThreads: config.vmafThreads,
-    fps: fps.toFixed(1),
+    mibPerMin: mibPerMin.toFixed(1),
+    totalMiB: (encBytes / (1024 * 1024)).toFixed(1),
+    chunks: doneChunks,
     avgCpu: avgCpu.toFixed(0),
     peakMem: peakMem.toFixed(1),
     time: formatMs(encodeTimeMs),
-    exitCode: stoppedByLimit ? 0 : result.code,
-    oom: peakMem > 0 && result.code !== 0 && !stoppedByLimit && peakMem > 50,
+    exitCode: timedOut ? 0 : result.code,
+    oom: peakMem > 0 && result.code !== 0 && !timedOut && peakMem > 50,
   };
 }
 
@@ -365,52 +353,78 @@ async function benchAbAv1(samplePath, config) {
   const startMs = Date.now();
   const cpuSamples = [];
   const memSamples = [];
+  let timedOut = false;
 
-  // Periodic one-shot docker stats for ab-av1
-  const statsInterval = setInterval(() => {
-    const ds = spawnSync('docker', [
-      'stats', CONTAINER, '--no-stream', '--format', '{{.CPUPerc}}\t{{.MemUsage}}',
-    ], { timeout: 5000 });
-    if (ds.stdout) {
-      const parts = ds.stdout.toString().trim().split('\t');
-      if (parts.length >= 2) {
-        const cpu = parseFloat(parts[0]);
-        const mem = parseMemGiB(parts[1].split('/')[0].trim());
-        if (!isNaN(cpu)) cpuSamples.push(cpu);
-        if (!isNaN(mem)) memSamples.push(mem);
+  // Read output file size inside container
+  const readSizeScript = `stat -c %s ${tempDir}/out.mkv 2>/dev/null || echo 0`;
+
+  const statsInterval = setInterval(async () => {
+    try {
+      const ds = spawnSync('docker', [
+        'stats', CONTAINER, '--no-stream', '--format', '{{.CPUPerc}}\t{{.MemUsage}}',
+      ], { timeout: 5000 });
+      if (ds.stdout) {
+        const parts = ds.stdout.toString().trim().split('\t');
+        if (parts.length >= 2) {
+          const cpu = parseFloat(parts[0]);
+          const mem = parseMemGiB(parts[1].split('/')[0].trim());
+          if (!isNaN(cpu)) cpuSamples.push(cpu);
+          if (!isNaN(mem)) memSamples.push(mem);
+        }
       }
-    }
-    const elapsed = formatMs(Date.now() - startMs);
-    const cpuStr = cpuSamples.length > 0 ? `CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
-    const memStr = memSamples.length > 0 ? `RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
-    if (cpuStr || memStr) process.stdout.write(`    [${elapsed}] ${cpuStr}  ${memStr}\n`);
+
+      const sizeCheck = await dockerExec(readSizeScript, { timeout: 5000 });
+      const encBytes = parseInt(sizeCheck.stdout.trim(), 10) || 0;
+      const encMiB = (encBytes / (1024 * 1024)).toFixed(1);
+
+      const elapsedSec = (Date.now() - startMs) / 1000;
+      const remaining = Math.max(0, testDuration - elapsedSec);
+      const elapsed = formatMs(Date.now() - startMs);
+      const cpuStr = cpuSamples.length > 0 ? `  CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
+      const memStr = memSamples.length > 0 ? `  RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
+      process.stdout.write(`    [${elapsed}] ${encMiB} MiB encoded  ${formatMs(remaining * 1000)} left${cpuStr}${memStr}\n`);
+
+      if (elapsedSec >= testDuration) {
+        timedOut = true;
+        process.stdout.write(`    Time limit reached (${testDuration}s) — stopping encode\n`);
+        spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
+          'pkill -f "ab-av1|SvtAv1EncApp|ffmpeg" 2>/dev/null; true',
+        ]);
+      }
+    } catch (_) {}
   }, 10000);
 
-  const result = await dockerExec(cmd, { timeout: 1800000, live: true });
+  const result = await dockerExec(cmd, { timeout: (testDuration + 60) * 1000, live: true });
 
   clearInterval(statsInterval);
-  const elapsed = Date.now() - startMs;
+  const encodeTimeMs = Date.now() - startMs;
   const avgCpu = cpuSamples.length > 0
     ? cpuSamples.reduce((s, v) => s + v, 0) / cpuSamples.length : 0;
   const peakMem = memSamples.length > 0 ? Math.max(...memSamples) : 0;
 
-  const combined = result.stdout + result.stderr;
-  const fpsMatches = combined.match(/([\d.]+)\s*fps/gi);
-  const fps = fpsMatches
-    ? fpsMatches.map((m) => parseFloat(m)).reduce((a, b) => a + b, 0) / fpsMatches.length
-    : 0;
+  let encBytes = 0;
+  try {
+    const final = await dockerExec(readSizeScript, { timeout: 5000 });
+    encBytes = parseInt(final.stdout.trim(), 10) || 0;
+  } catch (_) {}
+
+  const encodeTimeSec = encodeTimeMs / 1000;
+  const mibPerMin = encBytes > 0 && encodeTimeSec > 0
+    ? (encBytes / (1024 * 1024)) / (encodeTimeSec / 60) : 0;
 
   return {
     label: config.label,
     workers: '-',
     threads: config.svtLp,
     vmafThreads: '-',
-    fps: fps.toFixed(1),
+    mibPerMin: mibPerMin.toFixed(1),
+    totalMiB: (encBytes / (1024 * 1024)).toFixed(1),
+    chunks: '-',
     avgCpu: avgCpu.toFixed(0),
     peakMem: peakMem.toFixed(1),
-    time: formatMs(elapsed),
-    exitCode: result.code,
-    oom: peakMem > 0 && result.code !== 0 && peakMem > 50,
+    time: formatMs(encodeTimeMs),
+    exitCode: timedOut ? 0 : result.code,
+    oom: peakMem > 0 && result.code !== 0 && !timedOut && peakMem > 50,
   };
 }
 
@@ -424,15 +438,16 @@ function formatMs(ms) {
 }
 
 function printTable(results) {
-  const headers = ['Config', 'Workers', 'Threads', 'VMAF-T', 'FPS', 'CPU %', 'Time', 'Peak RAM', 'Status'];
+  const headers = ['Config', 'Workers', 'Threads', 'VMAF-T', 'MiB/min', 'Total MiB', 'Chunks', 'CPU %', 'Peak RAM', 'Status'];
   const rows = results.map((r) => [
     r.label,
     String(r.workers),
     String(r.threads),
     String(r.vmafThreads),
-    r.fps,
+    r.mibPerMin,
+    r.totalMiB,
+    String(r.chunks),
     `${r.avgCpu}%`,
-    r.time,
     `${r.peakMem} GiB`,
     r.oom ? 'OOM' : r.exitCode === 0 ? 'OK' : `exit ${r.exitCode}`,
   ]);
@@ -453,7 +468,7 @@ function printTable(results) {
   // Recommendation
   const best = results
     .filter((r) => !r.oom && r.exitCode === 0)
-    .sort((a, b) => parseFloat(b.fps) - parseFloat(a.fps))[0];
+    .sort((a, b) => parseFloat(b.mibPerMin) - parseFloat(a.mibPerMin))[0];
 
   if (best) {
     const isPreset = PRESETS.includes(best.label);
@@ -477,7 +492,8 @@ async function main() {
   const threads = os.cpus().length;
   console.log(`System: ${threads} threads`);
   console.log(`Container: ${CONTAINER}`);
-  console.log(`Encoder: ${encoderArg}, cpu-used/preset: ${cpuUsed}, target-vmaf: ${targetVmaf}`);
+  console.log(`Encoder: ${encoderArg}, cpu-used/preset: ${cpuUsed}, target-vmaf: ${targetVmaf}`)
+  console.log(`Test duration: ${testDuration}s per config`);
   console.log('');
 
   // Verify container is running
@@ -542,22 +558,70 @@ async function main() {
     console.log(`Sample: ${path.basename(sample)}`);
     console.log('='.repeat(60));
 
+    // Warmup: run scene detection once so all benchmark runs use cached scenes
+    if (!isAbAv1) {
+      console.log('\nWarmup: running scene detection (will be cached for all configs)...');
+      const containerSample = `/samples/${path.basename(sample)}`;
+      const warmupDir = `${BENCH_TEMP}/warmup`;
+      const vpyParts = [
+        'import vapoursynth as vs',
+        'core = vs.core',
+        `src = core.lsmas.LWLibavSource(source=\\"${containerSample}\\")`,
+      ];
+      if (downscaleRes) {
+        for (const line of buildVsDownscaleLines(downscaleRes)) {
+          vpyParts.push(line);
+        }
+      }
+      vpyParts.push('src.set_output()');
+      const vpyLines = vpyParts.join('\\n');
+
+      // Run av1an just long enough to complete scene detection, then kill
+      const warmupCmd = [
+        `mkdir -p ${warmupDir}/work ${warmupDir}/vs &&`,
+        `printf '${vpyLines}\\n' > ${warmupDir}/vs/bench.vpy &&`,
+        `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
+        `-c mkvmerge -e ${encoderArg === 'aom' ? 'aom' : 'svt-av1'}`,
+        `--workers 1 --sc-downscale-height 540`,
+        `--target-quality ${targetVmaf} --qp-range 10-50`,
+        `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
+        `--verbose`,
+        `-v "--cpu-used=8"`,
+      ].join(' ');
+
+      // Wait for scenes.json to appear, then kill
+      const warmupProc = dockerExec(warmupCmd, { timeout: 300000, live: true });
+      while (true) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const check = await dockerExec(`test -f ${warmupDir}/work/scenes.json && echo yes || echo no`, { timeout: 5000 });
+        if (check.stdout.trim() === 'yes') {
+          process.stdout.write('    Scene detection complete — killing warmup encode\n');
+          spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
+            'pkill -f "av1an|aomenc|SvtAv1EncApp" 2>/dev/null; true',
+          ]);
+          break;
+        }
+      }
+      await warmupProc.catch(() => {});
+      console.log('    Scenes cached.\n');
+    }
+
     const results = [];
     for (const config of configs) {
       const detail = isAbAv1
         ? `lp=${config.svtLp}`
         : `workers=${config.workers} threads=${config.tpw} vmaf=${config.vmafThreads}`;
-      console.log(`\nRunning: ${config.label} (${detail})...`);
+      console.log(`\nRunning: ${config.label} (${detail}) for ${testDuration}s...`);
 
-      // Clean temp between runs
-      await dockerExec(`rm -rf ${BENCH_TEMP}`);
+      // Clean encode output but keep cached scenes
+      await dockerExec(`rm -rf ${BENCH_TEMP}/*/work/done.json ${BENCH_TEMP}/*/work/encode/ ${BENCH_TEMP}/*/out.mkv 2>/dev/null; true`);
 
       const result = isAbAv1
         ? await benchAbAv1(sample, config)
         : await benchAv1an(sample, config);
 
       results.push(result);
-      console.log(`  -> ${result.fps} fps, ${result.avgCpu}% CPU, ${result.peakMem} GiB RAM, ${result.time}${result.oom ? ' [OOM]' : ''}`);
+      console.log(`  -> ${result.mibPerMin} MiB/min (${result.totalMiB} MiB total), ${result.avgCpu}% CPU, ${result.peakMem} GiB RAM${result.oom ? ' [OOM]' : ''}`);
     }
 
     console.log('');

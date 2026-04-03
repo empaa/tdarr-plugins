@@ -101,7 +101,7 @@ npm run benchmark -- --encoder aom --preset aggressive
 npm run benchmark -- --encoder aom --grid
 ```
 
-The benchmark runs encodes inside the Tdarr node Docker container via `docker exec`. By default it stops after 5 chunks (configurable with `--chunks`), which takes a few minutes per config instead of hours.
+The benchmark runs encodes inside the Tdarr node Docker container via `docker exec`. Each config runs for a fixed duration (default 2 minutes, configurable with `--duration`), then measures total encoded bytes. More MiB/min = better multicore utilization. Scene detection runs once upfront and is cached for all configs so it doesn't skew the results.
 
 **Environment variables:**
 
@@ -110,14 +110,14 @@ The benchmark runs encodes inside the Tdarr node Docker container via `docker ex
 **Output example:**
 
 ```
-+------------+---------+---------+--------+-----+-------+---------+----------+--------+
-| Config     | Workers | Threads | VMAF-T | FPS | CPU % | Time    | Peak RAM | Status |
-+------------+---------+---------+--------+-----+-------+---------+----------+--------+
-| safe       | 8       | 4       | 4      | 2.1 | 42%   | 4m 12s  | 6.1 GiB  | OK     |
-| balanced   | 12      | 2       | 8      | 3.8 | 71%   | 2m 21s  | 8.4 GiB  | OK     |
-| aggressive | 16      | 2       | 12     | 4.9 | 88%   | 1m 49s  | 11.2 GiB | OK     |
-| max        | 20      | 1       | 16     | 5.2 | 96%   | 1m 42s  | 14.2 GiB | OK     |
-+------------+---------+---------+--------+-----+-------+---------+----------+--------+
++------------+---------+---------+--------+---------+-----------+--------+-------+----------+--------+
+| Config     | Workers | Threads | VMAF-T | MiB/min | Total MiB | Chunks | CPU % | Peak RAM | Status |
++------------+---------+---------+--------+---------+-----------+--------+-------+----------+--------+
+| safe       | 8       | 4       | 4      | 12.3    | 24.6      | 8      | 42%   | 6.1 GiB  | OK     |
+| balanced   | 12      | 2       | 8      | 22.1    | 44.2      | 14     | 71%   | 8.4 GiB  | OK     |
+| aggressive | 16      | 2       | 12     | 28.5    | 57.0      | 19     | 88%   | 11.2 GiB | OK     |
+| max        | 20      | 1       | 16     | 30.2    | 60.4      | 21     | 96%   | 14.2 GiB | OK     |
++------------+---------+---------+--------+---------+-----------+--------+-------+----------+--------+
 
 Recommended: aggressive
 Set Thread Strategy to "aggressive" in the plugin settings.
