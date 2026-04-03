@@ -144,22 +144,26 @@ function dockerExec(cmd, { timeout = 600000, live = false } = {}) {
     let stdout = '';
     let stderr = '';
 
-    // Patterns worth showing in real-time
-    const LIVE_KEEP = /scene|chunk|pass|encode|fps|frame|progress|crf|vmaf|error|warn/i;
+    // av1an uses \r for progress bars — split on both \n and \r
+    const splitLines = (str) => str.split(/[\r\n]+/).filter(Boolean);
+    // Skip noisy/empty lines
+    const SKIP = /^\s*$/;
 
     proc.stdout.on('data', (d) => {
       stdout += d;
       if (live) {
-        for (const line of d.toString().split('\n').filter(Boolean)) {
-          if (LIVE_KEEP.test(line)) process.stdout.write(`    ${line.trimEnd()}\n`);
+        for (const line of splitLines(d.toString())) {
+          const clean = line.replace(/\x1b\[[0-9;]*m/g, '').trimEnd();
+          if (clean && !SKIP.test(clean)) process.stdout.write(`    ${clean}\n`);
         }
       }
     });
     proc.stderr.on('data', (d) => {
       stderr += d;
       if (live) {
-        for (const line of d.toString().split('\n').filter(Boolean)) {
-          if (LIVE_KEEP.test(line)) process.stdout.write(`    ${line.trimEnd()}\n`);
+        for (const line of splitLines(d.toString())) {
+          const clean = line.replace(/\x1b\[[0-9;]*m/g, '').trimEnd();
+          if (clean && !SKIP.test(clean)) process.stdout.write(`    ${clean}\n`);
         }
       }
     });
@@ -201,14 +205,14 @@ function startDockerStats(startMs) {
     }
   });
 
-  // Print periodic stats every 30s
+  // Print periodic stats every 15s
   const statsInterval = setInterval(() => {
     if (samples.length === 0) return;
     const latest = samples[samples.length - 1];
     const elapsed = formatMs(Date.now() - startMs);
     const peak = Math.max(...samples.map((x) => x.mem));
     process.stdout.write(`    [${elapsed}] CPU: ${latest.cpu.toFixed(0)}%  RAM: ${latest.mem.toFixed(1)} GiB (peak ${peak.toFixed(1)} GiB)\n`);
-  }, 30000);
+  }, 15000);
 
   return {
     stop() {
