@@ -110,7 +110,7 @@ function generateGrid(threads) {
 // ---------------------------------------------------------------------------
 // Docker helpers
 // ---------------------------------------------------------------------------
-function dockerExec(cmd, { timeout = 600000 } = {}) {
+function dockerExec(cmd, { timeout = 600000, live = false } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn('docker', ['exec', CONTAINER, 'bash', '-c', cmd], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -118,8 +118,26 @@ function dockerExec(cmd, { timeout = 600000 } = {}) {
 
     let stdout = '';
     let stderr = '';
-    proc.stdout.on('data', (d) => { stdout += d; });
-    proc.stderr.on('data', (d) => { stderr += d; });
+
+    // Patterns worth showing in real-time
+    const LIVE_KEEP = /scene|chunk|pass|encode|fps|frame|progress|crf|vmaf|error|warn/i;
+
+    proc.stdout.on('data', (d) => {
+      stdout += d;
+      if (live) {
+        for (const line of d.toString().split('\n').filter(Boolean)) {
+          if (LIVE_KEEP.test(line)) process.stdout.write(`    ${line.trimEnd()}\n`);
+        }
+      }
+    });
+    proc.stderr.on('data', (d) => {
+      stderr += d;
+      if (live) {
+        for (const line of d.toString().split('\n').filter(Boolean)) {
+          if (LIVE_KEEP.test(line)) process.stdout.write(`    ${line.trimEnd()}\n`);
+        }
+      }
+    });
 
     const timer = setTimeout(() => {
       proc.kill('SIGKILL');
@@ -134,7 +152,7 @@ function dockerExec(cmd, { timeout = 600000 } = {}) {
   });
 }
 
-function startDockerStats() {
+function startDockerStats(startMs) {
   const samples = [];
   const proc = spawn('docker', [
     'stats', CONTAINER, '--no-trunc',
@@ -157,8 +175,18 @@ function startDockerStats() {
     }
   });
 
+  // Print periodic stats every 30s
+  const statsInterval = setInterval(() => {
+    if (samples.length === 0) return;
+    const latest = samples[samples.length - 1];
+    const elapsed = formatMs(Date.now() - startMs);
+    const peak = Math.max(...samples.map((x) => x.mem));
+    process.stdout.write(`    [${elapsed}] CPU: ${latest.cpu.toFixed(0)}%  RAM: ${latest.mem.toFixed(1)} GiB (peak ${peak.toFixed(1)} GiB)\n`);
+  }, 30000);
+
   return {
     stop() {
+      clearInterval(statsInterval);
       proc.kill('SIGTERM');
       if (samples.length === 0) return { avgCpu: 0, peakCpu: 0, peakMem: 0 };
       const avgCpu = samples.reduce((s, x) => s + x.cpu, 0) / samples.length;
@@ -225,10 +253,10 @@ async function benchAv1an(samplePath, config) {
   av1anCmdParts.push(`-v "${encFlags}"`);
   const cmd = av1anCmdParts.join(' ');
 
-  const stats = startDockerStats();
   const startMs = Date.now();
+  const stats = startDockerStats(startMs);
 
-  const result = await dockerExec(cmd, { timeout: 1800000 });
+  const result = await dockerExec(cmd, { timeout: 1800000, live: true });
 
   const elapsed = Date.now() - startMs;
   const { avgCpu, peakMem } = stats.stop();
@@ -274,10 +302,10 @@ async function benchAbAv1(samplePath, config) {
   abCmdParts.push(svtFlags, `--verbose`);
   const cmd = abCmdParts.join(' ');
 
-  const stats = startDockerStats();
   const startMs = Date.now();
+  const stats = startDockerStats(startMs);
 
-  const result = await dockerExec(cmd, { timeout: 1800000 });
+  const result = await dockerExec(cmd, { timeout: 1800000, live: true });
 
   const elapsed = Date.now() - startMs;
   const { avgCpu, peakMem } = stats.stop();
