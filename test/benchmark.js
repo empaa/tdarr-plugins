@@ -5,6 +5,7 @@ const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { THREAD_PRESETS, calculateThreadBudget } = require('../src/shared/encoderFlags');
 
 // ---------------------------------------------------------------------------
 // Config
@@ -14,14 +15,6 @@ const SAMPLES_DIR = path.join(__dirname, 'samples');
 const BENCH_TEMP = '/tmp/bench';
 
 const PRESETS = ['safe', 'balanced', 'aggressive', 'max'];
-
-// Thread preset definitions (mirrors src/shared/encoderFlags.js)
-const THREAD_PRESETS = {
-  safe:        { aomTpwRatio: 4, aomTpwMin: 4, svtTpwRatio: 6, svtTpwMin: 4, svtTpwMax: 6, svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
-  balanced:    { aomTpwRatio: 8, aomTpwMin: 2, svtTpwRatio: 5, svtTpwMin: 4, svtTpwMax: 8, svtLpMax: 12, vmafThreadDiv: 4, halve4kHdr: false },
-  aggressive:  { aomTpwRatio: 8, aomTpwMin: 2, svtTpwRatio: 5, svtTpwMin: 3, svtTpwMax: 6, svtLpMax: 20, vmafThreadDiv: 3, halve4kHdr: false },
-  max:         { aomTpwRatio: 10, aomTpwMin: 1, svtTpwRatio: 4, svtTpwMin: 2, svtTpwMax: 4, svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
-};
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -48,23 +41,6 @@ const targetVmaf = (() => {
   const idx = cliArgs.indexOf('--vmaf');
   return idx !== -1 && cliArgs[idx + 1] ? cliArgs[idx + 1] : '93';
 })();
-
-// ---------------------------------------------------------------------------
-// Thread budget calculation (mirrors encoderFlags.js)
-// ---------------------------------------------------------------------------
-function calcBudget(threads, encoder, preset) {
-  let tpw, workers;
-  if (encoder === 'aom') {
-    tpw = Math.max(preset.aomTpwMin, Math.floor(threads / preset.aomTpwRatio));
-    workers = Math.max(1, Math.floor(threads / tpw));
-  } else {
-    tpw = Math.min(preset.svtTpwMax, Math.max(preset.svtTpwMin, Math.floor(threads / preset.svtTpwRatio)));
-    workers = Math.max(1, Math.floor(threads / tpw));
-  }
-  const svtLp = Math.min(preset.svtLpMax, tpw);
-  const vmafThreads = Math.max(2, Math.floor(threads / preset.vmafThreadDiv));
-  return { workers, tpw, svtLp, vmafThreads };
-}
 
 // ---------------------------------------------------------------------------
 // Grid generation
@@ -380,8 +356,9 @@ async function main() {
         console.error(`ERROR: unknown preset "${name}". Available: ${PRESETS.join(', ')}`);
         process.exit(1);
       }
-      const b = calcBudget(threads, encoderArg === 'ab-av1' ? 'svt-av1' : encoderArg, p);
-      return { ...b, label: name };
+      const encoder = encoderArg === 'ab-av1' ? 'svt-av1' : encoderArg;
+      const b = calculateThreadBudget(threads, encoder, false, { strategy: name });
+      return { workers: b.maxWorkers, tpw: b.threadsPerWorker, svtLp: b.svtLp, vmafThreads: b.vmafThreads, label: name };
     });
     console.log(`\nPreset mode: testing ${configs.map((c) => c.label).join(', ')}\n`);
   }
