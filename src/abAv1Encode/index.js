@@ -72,6 +72,22 @@ const details = () => ({
       inputUI: { type: 'dropdown', options: ['720p', '1080p', '1440p'] },
       tooltip: 'Target resolution for downscaling. Only used when downscale is enabled.',
     },
+    {
+      label: 'Thread Strategy',
+      name: 'thread_strategy',
+      type: 'string',
+      defaultValue: 'safe',
+      inputUI: { type: 'dropdown', options: ['safe', 'balanced', 'aggressive', 'max', 'custom'] },
+      tooltip: 'Controls SVT-AV1 thread parallelism (lp). safe=current defaults. balanced=~70% CPU. aggressive=~90% CPU. max=saturate all cores. custom=use thread_overrides JSON.',
+    },
+    {
+      label: 'Thread Overrides (JSON)',
+      name: 'thread_overrides',
+      type: 'string',
+      defaultValue: '',
+      inputUI: { type: 'text' },
+      tooltip: 'Only used when Thread Strategy is "custom". JSON: {"threadsPerWorker":20}. Sets SVT-AV1 lp value. "workers" and "vmafThreads" are ignored for ab-av1.',
+    },
   ],
   outputs: [
     { number: 1, tooltip: 'Encode succeeded -- output file is the encoded video+audio MKV' },
@@ -86,7 +102,7 @@ const plugin = async (args) => {
 
   const { createProcessManager } = require('../shared/processManager');
   const { createLogger, humanSize } = require('../shared/logger');
-  const { detectHdrMeta, buildAbAv1SvtFlags } = require('../shared/encoderFlags');
+  const { detectHdrMeta, buildAbAv1SvtFlags, calculateThreadBudget } = require('../shared/encoderFlags');
   const { buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { createAbAv1Tracker } = require('../shared/progressTracker');
 
@@ -99,12 +115,25 @@ const plugin = async (args) => {
   const downscaleEnabled  = inputs.downscale_enabled === true || inputs.downscale_enabled === 'true';
   const downscaleRes      = String(inputs.downscale_resolution || '1080p');
 
+  const threadStrategy    = String(inputs.thread_strategy || 'safe');
+  let threadOverrides = {};
+  let threadOverridesError = null;
+  const rawOverrides = String(inputs.thread_overrides || '').trim();
+  if (rawOverrides) {
+    try { threadOverrides = JSON.parse(rawOverrides); } catch (e) {
+      threadOverridesError = e.message;
+    }
+  }
+
   const BIN_AB_AV1 = ['/usr/local/bin/ab-av1', '/usr/bin/ab-av1'].find((p) => fs.existsSync(p));
   if (!BIN_AB_AV1) throw new Error('Required binary not found: ab-av1 (checked /usr/local/bin, /usr/bin)');
   const vmafModel = '/usr/local/share/vmaf/vmaf_v0.6.1.json';
   if (!fs.existsSync(vmafModel)) throw new Error(`VMAF model not found: ${vmafModel}`);
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
+  if (threadOverridesError) {
+    jobLog(`WARNING: invalid thread_overrides JSON, falling back to aggressive: ${threadOverridesError}`);
+  }
   const pm = createProcessManager(jobLog, dbg);
 
   const updateWorker = (fields) => {
@@ -121,6 +150,12 @@ const plugin = async (args) => {
 
   detectHdrMeta(stream);
 
+  const is4kHdr = height >= 2160 && stream.color_transfer === 'smpte2084';
+  const { svtLp } = calculateThreadBudget(
+    availableThreads, 'svt-av1', is4kHdr,
+    { strategy: threadStrategy, ...threadOverrides },
+  );
+
   const srcFps = (() => {
     const r = stream.r_frame_rate || stream.avg_frame_rate || '24/1';
     const parts = r.split('/').map(Number);
@@ -129,7 +164,7 @@ const plugin = async (args) => {
   const sampleFrames = Math.round(srcFps * 4);
   const lookahead = Math.min(40, Math.max(8, Math.floor(sampleFrames * 0.25)));
 
-  const svtFlags = buildAbAv1SvtFlags(Math.min(6, availableThreads), lookahead);
+  const svtFlags = buildAbAv1SvtFlags(svtLp, lookahead);
 
   const abWorkDir = path.join(args.workDir, 'ab-av1-work');
   const outputPath = path.join(args.workDir, 'ab-av1-output.mkv');
@@ -144,7 +179,7 @@ const plugin = async (args) => {
   jobLog(`  input      : ${inputPath}`);
   jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${downscaleEnabled ? ` -> ${downscaleRes}` : ''}`);
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
-  jobLog(`  threads    : ${availableThreads}`);
+  jobLog(`  threads    : cpu=${availableThreads}  lp=${svtLp}  strategy=${threadStrategy}`);
   jobLog(`  svt flags  : ${svtFlags}`);
   jobLog('='.repeat(64));
 
