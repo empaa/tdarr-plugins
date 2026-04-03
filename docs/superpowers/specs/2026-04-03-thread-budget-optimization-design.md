@@ -92,25 +92,49 @@ Returns: `{ workers, threadsPerWorker, svtLp, vmafThreads, strategy }`
 
 `test/benchmark.js`, invoked via `npm run benchmark`.
 
-Requires a running Tdarr instance (same as e2e tests). The benchmark reuses the e2e test infrastructure (`test/lib/tdarrApi.js`) to create flows with different `thread_strategy` inputs, scan sample files, and poll job completion. All encoding happens inside the Tdarr container where av1an, ab-av1, and ffmpeg are installed.
+Runs `docker exec` directly against the Tdarr node container — no Tdarr API or flow setup needed. This gives direct control over av1an/ab-av1 arguments and real-time stdout parsing for FPS.
 
 ### Sample Files
 
 - `test/samples/` directory (gitignored, user-provided)
 - Users place a typical 1080p and 4K source file there
 - `test/samples/.gitkeep` committed as placeholder
+- Files are mounted into the container (or copied via `docker cp`) before benchmarking
 
-### Benchmark Strategy
+### How It Works
+
+The benchmark script templates `docker exec` one-liners for each config in the test grid.
 
 **av1an (aomenc or SVT-AV1):**
-1. Run av1an scene detection on sample file (cached after first run)
-2. For each config in the test grid, encode the first N chunks (default 5)
-3. Measure metrics, kill after chunks complete
+
+Writes an inline VapourSynth script and runs av1an in a single `docker exec bash -c`:
+
+```bash
+docker exec tdarr-node bash -c '
+  echo "import vapoursynth as vs
+core = vs.core
+src = core.lsmas.LWLibavSource(source=\"/samples/test-1080p.mkv\")
+src.set_output()" > /tmp/bench.vpy &&
+  av1an -i /tmp/bench.vpy --encoder aom --workers 16 --vmaf-threads 12 \
+    --sc-downscale-height 540 --chunk-order long-to-short --verbose \
+    -v "--threads=2 --cpu-used=3 --end-usage=q --tune=ssim" \
+    -o /tmp/bench-out.mkv --temp /tmp/bench-temp'
+```
+
+When testing downscale scenarios, the VapourSynth Lanczos3 downscale filter lines are added to the inline script (same as the plugin generates).
+
+Scene detection is cached — av1an reuses `/tmp/bench-temp/scenes.json` across runs with `--resume`, so only the first run pays the scene detection cost.
 
 **ab-av1:**
-1. Extract a 60-second clip from sample via ffmpeg
-2. For each config, run ab-av1 on the clip
-3. Measure metrics
+
+Single command, no VapourSynth needed:
+
+```bash
+docker exec tdarr-node ab-av1 auto-encode \
+  -i /samples/test-1080p.mkv -o /tmp/bench-ab.mkv \
+  --encoder libsvtav1 --preset 3 --svt "lp=20" \
+  --min-vmaf 93 --min-crf 10 --max-crf 50
+```
 
 ### Two Modes
 
@@ -145,12 +169,12 @@ Paste into plugin: {"workers": 16, "threadsPerWorker": 2, "vmafThreads": 12}
 
 ### Metrics Collection
 
-- **Wall-clock**: time from job start to completion via Tdarr API polling
-- **FPS**: extracted from Tdarr job progress updates during polling
-- **CPU% and Memory**: `docker stats` sampled in parallel during encode, capturing container-level CPU and memory usage from the host side. Detects OOM risk — if memory peaks near container limit, the config is flagged as unsafe.
+- **Wall-clock**: simple timer around each `docker exec` invocation
+- **FPS**: parsed in real-time from av1an stdout (verbose mode outputs per-chunk FPS); for ab-av1 parsed from its progress output
+- **CPU% and Memory**: `docker stats --no-stream` sampled every 1s in a parallel child process during encode, capturing container-level CPU and peak memory from the host side
 - Container name/ID configurable via `TDARR_CONTAINER` env var (defaults to auto-detection)
 
-**OOM detection:** If a benchmark run is killed by the OOM killer (job fails + memory was near limit), the result row shows `OOM` instead of metrics and the config is excluded from recommendations.
+**OOM detection:** If a benchmark run is killed by the OOM killer (docker exec exits non-zero + memory was near container limit), the result row shows `OOM` instead of metrics and the config is excluded from recommendations.
 
 ---
 
@@ -163,7 +187,6 @@ Paste into plugin: {"workers": 16, "threadsPerWorker": 2, "vmafThreads": 12}
 | `src/shared/encoderFlags.js` | Add preset profiles, refactor `calculateThreadBudget` to accept strategy + overrides |
 | `src/av1anEncode/index.js` | Add `thread_strategy` and `thread_overrides` inputs, pass to thread budget |
 | `src/abAv1Encode/index.js` | Same inputs, map `threadsPerWorker` to `lp` |
-| `src/shared/progressTracker.js` | Export FPS/metrics helpers for benchmark reuse |
 | `package.json` | Add `benchmark` script |
 
 ### Created
