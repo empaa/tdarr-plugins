@@ -456,11 +456,16 @@ function printTable(results) {
     .sort((a, b) => parseFloat(b.fps) - parseFloat(a.fps))[0];
 
   if (best) {
+    const isPreset = PRESETS.includes(best.label);
     console.log(`\nRecommended: ${best.label}`);
-    if (best.workers !== '-') {
-      console.log(`Paste into plugin: {"workers":${best.workers},"threadsPerWorker":${best.threads},"vmafThreads":${best.vmafThreads}}`);
+    if (isPreset) {
+      console.log(`Set Thread Strategy to "${best.label}" in the plugin settings.`);
+    } else if (best.workers !== '-') {
+      console.log(`Set Thread Strategy to "custom" and paste into Thread Overrides:`);
+      console.log(`{"workers":${best.workers},"threadsPerWorker":${best.threads},"vmafThreads":${best.vmafThreads}}`);
     } else {
-      console.log(`Paste into plugin: {"threadsPerWorker":${best.threads}}`);
+      console.log(`Set Thread Strategy to "custom" and paste into Thread Overrides:`);
+      console.log(`{"threadsPerWorker":${best.threads}}`);
     }
   }
 }

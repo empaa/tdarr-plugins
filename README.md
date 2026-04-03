@@ -120,10 +120,10 @@ The benchmark runs encodes inside the Tdarr node Docker container via `docker ex
 +------------+---------+---------+--------+-----+-------+---------+----------+--------+
 
 Recommended: aggressive
-Paste into plugin: {"workers":16,"threadsPerWorker":2,"vmafThreads":12}
+Set Thread Strategy to "aggressive" in the plugin settings.
 ```
 
-Copy the recommended JSON into the plugin's **Thread Overrides** field with strategy set to `custom`.
+If a named preset wins, just select it from the **Thread Strategy** dropdown. The `custom` + JSON override route is only needed for grid mode results that don't map to a preset.
 
 ## Install
 
