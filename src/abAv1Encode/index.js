@@ -151,9 +151,9 @@ const plugin = async (args) => {
   detectHdrMeta(stream);
 
   const is4kHdr = height >= 2160 && stream.color_transfer === 'smpte2084';
-  const { svtLp } = calculateThreadBudget(
+  const { svtLp, vmafThreads } = calculateThreadBudget(
     availableThreads, 'svt-av1', is4kHdr,
-    { strategy: threadStrategy, ...threadOverrides },
+    { strategy: threadStrategy, ...threadOverrides, singleProcess: true },
   );
 
   const srcFps = (() => {
@@ -193,7 +193,7 @@ const plugin = async (args) => {
     '--min-vmaf', String(targetVmaf),
     '--min-crf', String(minCrf),
     '--max-crf', String(maxCrf),
-    '--vmaf', `n_threads=4:model=path=${vmafModel}`,
+    '--vmaf', `n_threads=${vmafThreads}:model=path=${vmafModel}`,
     '--max-encoded-percent', String(maxEncodedPercent),
     '--verbose',
   ];

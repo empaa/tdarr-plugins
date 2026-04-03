@@ -142,6 +142,11 @@ const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
     maxWorkers = Math.max(1, Math.floor(availableThreads / threadsPerWorker));
   }
 
+  if (opts.singleProcess) {
+    threadsPerWorker = availableThreads;
+    maxWorkers = 1;
+  }
+
   if (is4kHdr && preset.halve4kHdr) {
     maxWorkers = Math.max(1, Math.floor(maxWorkers / 2));
   }
