@@ -5,7 +5,10 @@ const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { THREAD_PRESETS, calculateThreadBudget } = require('../src/shared/encoderFlags');
+const {
+  THREAD_PRESETS, calculateThreadBudget,
+  buildAomFlags, buildSvtFlags, buildAbAv1SvtFlags,
+} = require('../src/shared/encoderFlags');
 
 // ---------------------------------------------------------------------------
 // Config
@@ -20,6 +23,36 @@ const PRESETS = ['safe', 'balanced', 'aggressive', 'max'];
 // CLI args
 // ---------------------------------------------------------------------------
 const cliArgs = process.argv.slice(2);
+
+if (cliArgs.includes('--help') || cliArgs.includes('-h')) {
+  console.log(`Usage: npm run benchmark -- [options]
+
+Options:
+  --encoder <name>    Encoder to benchmark: aom (default), svt-av1, or ab-av1
+  --cpu-used <N>      Encoder preset/cpu-used value (default: 3)
+  --vmaf <N>          Target VMAF score (default: 93)
+  --preset <name>     Test a single preset: safe, balanced, aggressive, or max
+  --grid              Test a custom worker×thread grid instead of presets
+  --sample <name>     Filter sample files by name substring
+  --help, -h          Show this help
+
+Environment:
+  TDARR_CONTAINER     Docker container name (default: tdarr-node)
+
+Examples:
+  npm run benchmark                                    # test all 4 presets with aom
+  npm run benchmark -- --encoder aom --cpu-used 3      # aomenc at preset 3
+  npm run benchmark -- --encoder svt-av1 --cpu-used 4  # SVT-AV1 at preset 4
+  npm run benchmark -- --encoder ab-av1 --cpu-used 3   # ab-av1 (single-process)
+  npm run benchmark -- --preset aggressive             # test one preset only
+  npm run benchmark -- --grid --encoder aom            # custom worker×thread grid
+  npm run benchmark -- --sample jurassic               # only use matching samples
+
+Encoder flags match the plugin defaults (buildAomFlags/buildSvtFlags from encoderFlags.js).
+Sample files go in test/samples/ (.mkv, .mp4, .ts).`);
+  process.exit(0);
+}
+
 const gridMode = cliArgs.includes('--grid');
 const presetFilter = (() => {
   const idx = cliArgs.indexOf('--preset');
@@ -153,8 +186,8 @@ async function benchAv1an(samplePath, config) {
   ].join('\\n');
 
   const encFlags = encoderArg === 'aom'
-    ? `--end-usage=q --cpu-used=${cpuUsed} --threads=${config.tpw} --tune=ssim --bit-depth=10 --lag-in-frames=48 --tile-columns=0 --tile-rows=0 --sb-size=dynamic --aq-mode=0 --enable-qm=1`
-    : `--rc 0 --preset ${cpuUsed} --lp ${config.svtLp} --tile-columns 1 --input-depth 10 --lookahead 48 --keyint -1 --enable-variance-boost 1 --variance-boost-strength 2 --variance-octile 6 --enable-overlays 1`;
+    ? buildAomFlags(Number(cpuUsed), config.tpw, '')
+    : buildSvtFlags(Number(cpuUsed), config.svtLp, '');
 
   const av1anEncoder = encoderArg === 'aom' ? 'aom' : 'svt-av1';
 
@@ -204,17 +237,15 @@ async function benchAbAv1(samplePath, config) {
   const containerSample = `/samples/${path.basename(samplePath)}`;
   const tempDir = `${BENCH_TEMP}/ab-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
+  const svtFlags = buildAbAv1SvtFlags(config.svtLp, 24);
   const cmd = [
     `mkdir -p ${tempDir} &&`,
     `ab-av1 auto-encode`,
     `-i ${containerSample} -o ${tempDir}/out.mkv`,
     `--encoder libsvtav1 --preset ${cpuUsed}`,
     `--min-vmaf ${targetVmaf} --min-crf 10 --max-crf 50`,
-    `--vmaf "n_threads=4:model=path=/usr/local/share/vmaf/vmaf_v0.6.1.json"`,
-    `--svt "lp=${config.svtLp}"`,
-    `--svt tune=1 --svt enable-variance-boost=1`,
-    `--svt variance-boost-strength=2 --svt variance-octile=6`,
-    `--svt tile-columns=1 --svt enable-overlays=1`,
+    `--vmaf "n_threads=${config.vmafThreads || 4}:model=path=/usr/local/share/vmaf/vmaf_v0.6.1.json"`,
+    svtFlags,
     `--verbose`,
   ].join(' ');
 
