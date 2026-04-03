@@ -292,43 +292,125 @@ async function benchAv1an(samplePath, config) {
   const stats = startDockerStats(startMs);
   activeStats = stats;
 
-  // Monitor done.json and kill av1an after chunkLimit chunks
-  let chunkMonitor = null;
+  // Poll av1an work dir for progress (mirrors plugin progressTracker)
+  const workDir = `${tempDir}/work`;
   let stoppedByLimit = false;
-  const doneJsonPath = `${tempDir}/work/done.json`;
+  let encodeStartMs = 0;
+  let smoothedFps = 0;
+  let lastPollChunks = 0;
 
-  if (chunkLimit > 0) {
-    chunkMonitor = setInterval(async () => {
-      try {
-        const check = await dockerExec(
-          `cat ${doneJsonPath} 2>/dev/null | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0`,
-          { timeout: 5000 },
+  // Single docker exec script that reads scenes.json, done.json, and log fps
+  const pollScript = `python3 -c "
+import json, os, re, glob, sys
+work = '${workDir}'
+scenes_f = os.path.join(work, 'scenes.json')
+done_f = os.path.join(work, 'done.json')
+if not os.path.exists(scenes_f) or not os.path.exists(done_f):
+    print('WAITING'); sys.exit(0)
+try:
+    scenes = json.load(open(scenes_f))
+    done = json.load(open(done_f))
+except: print('WAITING'); sys.exit(0)
+total_frames = scenes.get('frames', 0)
+total_chunks = len(scenes.get('scenes', []))
+done_map = done.get('done', {})
+done_chunks = len(done_map)
+enc_frames = sum(e.get('frames', 0) for e in done_map.values())
+enc_bytes = sum(e.get('size_bytes', 0) for e in done_map.values())
+# Parse fps from worker logs
+fps_samples = []
+log_dir = '${tempDir}/vs/logs'
+if os.path.isdir(log_dir):
+    for lf in glob.glob(os.path.join(log_dir, 'av1an.log*')):
+        try:
+            lines = open(lf).readlines()[-300:]
+            for l in lines:
+                m = re.search(r'(\\\\d+\\\\.?\\\\d*)\\\\s+fps', l, re.I)
+                if m: fps_samples.append(float(m.group(1)))
+        except: pass
+avg_fps = 0
+if fps_samples:
+    recent = fps_samples[-20:]
+    if len(recent) > 2:
+        recent.sort()
+        recent = recent[1:-1]
+    avg_fps = sum(recent) / len(recent)
+print(f'{done_chunks}|{total_chunks}|{enc_frames}|{total_frames}|{enc_bytes}|{avg_fps:.1f}')
+" 2>/dev/null || echo WAITING`;
+
+  const progressMonitor = setInterval(async () => {
+    try {
+      const check = await dockerExec(pollScript, { timeout: 8000 });
+      const line = check.stdout.trim();
+      if (line === 'WAITING') {
+        const elapsed = formatMs(Date.now() - startMs);
+        process.stdout.write(`    [${elapsed}] waiting for scene detection / first chunks...\n`);
+        return;
+      }
+
+      const [doneChunks, totalChunks, encFrames, totalFrames, encBytes, logFps] =
+        line.split('|').map((v, i) => i <= 4 ? parseInt(v, 10) || 0 : parseFloat(v) || 0);
+
+      if (doneChunks >= 1 && encodeStartMs === 0) encodeStartMs = Date.now();
+
+      // Smoothed FPS from logs
+      if (logFps > 0) {
+        smoothedFps = smoothedFps === 0 ? logFps : smoothedFps * 0.7 + logFps * 0.3;
+      }
+      const chunkTotalFps = smoothedFps * config.workers;
+
+      // Throughput FPS from frames/elapsed
+      let throughputFps = chunkTotalFps;
+      if (encodeStartMs > 0 && encFrames > 0) {
+        const elapsedS = (Date.now() - encodeStartMs) / 1000;
+        if (elapsedS > 0) throughputFps = encFrames / elapsedS;
+      }
+      const totalFps = chunkTotalFps > 0 ? (chunkTotalFps + throughputFps) / 2 : throughputFps;
+
+      const pct = totalFrames > 0 ? Math.min(99, Math.round((encFrames / totalFrames) * 100)) : 0;
+      const remainFrames = totalFrames - encFrames;
+      const etaS = totalFps > 0 ? Math.round(remainFrames / totalFps) : 0;
+      const elapsed = formatMs(Date.now() - startMs);
+      const etaStr = etaS > 0 ? formatMs(etaS * 1000) : '?';
+
+      if (doneChunks !== lastPollChunks || doneChunks === 0) {
+        process.stdout.write(
+          `    [${elapsed}] ${pct}%  ${doneChunks}/${totalChunks} chunks` +
+          `  ${totalFps > 0 ? totalFps.toFixed(1) + ' fps' : ''}` +
+          `  ETA ${etaStr}\n`,
         );
-        const done = parseInt(check.stdout.trim(), 10) || 0;
-        if (done >= chunkLimit) {
-          stoppedByLimit = true;
-          process.stdout.write(`    Chunk limit reached (${done}/${chunkLimit}) — stopping encode\n`);
-          spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
-            'pkill -f "av1an|aomenc|SvtAv1EncApp" 2>/dev/null; true',
-          ]);
-        }
-      } catch (_) {}
-    }, 5000);
-  }
+        lastPollChunks = doneChunks;
+      }
+
+      // Chunk limit
+      if (chunkLimit > 0 && doneChunks >= chunkLimit) {
+        stoppedByLimit = true;
+        process.stdout.write(`    Chunk limit reached (${doneChunks}/${chunkLimit}) — stopping encode\n`);
+        spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
+          'pkill -f "av1an|aomenc|SvtAv1EncApp" 2>/dev/null; true',
+        ]);
+      }
+    } catch (_) {}
+  }, 5000);
 
   const result = await dockerExec(cmd, { timeout: 1800000, live: true });
 
-  if (chunkMonitor) clearInterval(chunkMonitor);
+  clearInterval(progressMonitor);
   const elapsed = Date.now() - startMs;
   const { avgCpu, peakMem } = stats.stop();
   activeStats = null;
 
-  // Parse FPS from av1an verbose output (stderr typically)
-  const combined = result.stdout + result.stderr;
-  const fpsMatches = combined.match(/([\d.]+)\s*fps/gi);
-  const fps = fpsMatches
-    ? fpsMatches.map((m) => parseFloat(m)).reduce((a, b) => a + b, 0) / fpsMatches.length
-    : 0;
+  // Final FPS: use throughput (frames / wall-clock) as most reliable metric
+  let fps = 0;
+  try {
+    const final = await dockerExec(pollScript, { timeout: 8000 });
+    const parts = final.stdout.trim().split('|');
+    if (parts.length >= 5) {
+      const encFrames = parseInt(parts[2], 10) || 0;
+      const encodeElapsed = encodeStartMs > 0 ? (Date.now() - encodeStartMs) / 1000 : elapsed / 1000;
+      if (encFrames > 0 && encodeElapsed > 0) fps = encFrames / encodeElapsed;
+    }
+  } catch (_) {}
 
   return {
     label: config.label,
