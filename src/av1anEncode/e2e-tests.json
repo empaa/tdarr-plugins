@@ -5,7 +5,21 @@
       "encoder": "svt-av1",
       "target_vmaf": "93",
       "preset": "8",
-      "max_encoded_percent": "100"
+      "max_encoded_percent": "100",
+      "downscale_enabled": "true",
+      "downscale_resolution": "720p"
+    }
+  },
+  {
+    "name": "svt-av1 balanced strategy",
+    "inputs": {
+      "encoder": "svt-av1",
+      "target_vmaf": "93",
+      "preset": "8",
+      "max_encoded_percent": "100",
+      "downscale_enabled": "true",
+      "downscale_resolution": "720p",
+      "thread_strategy": "balanced"
     }
   }
 ]

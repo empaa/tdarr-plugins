@@ -5,5 +5,13 @@
       "target_vmaf": "93",
       "preset": "8"
     }
+  },
+  {
+    "name": "balanced strategy",
+    "inputs": {
+      "target_vmaf": "93",
+      "preset": "8",
+      "thread_strategy": "balanced"
+    }
   }
 ]
