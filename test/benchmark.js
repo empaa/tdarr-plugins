@@ -116,11 +116,9 @@ function generateGrid(threads) {
 // Cleanup on interrupt
 // ---------------------------------------------------------------------------
 let activeProc = null;
-let activeStats = null;
 
 function cleanup() {
   console.log('\n\nInterrupted — killing encode processes in container...');
-  if (activeStats) activeStats.stop();
   if (activeProc) activeProc.kill('SIGKILL');
   // Kill av1an, ab-av1, aomenc, SvtAv1EncApp, and ffmpeg inside the container
   spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
@@ -187,51 +185,6 @@ function dockerExec(cmd, { timeout = 600000, live = false } = {}) {
   });
 }
 
-function startDockerStats(startMs) {
-  const samples = [];
-  const proc = spawn('docker', [
-    'stats', CONTAINER, '--no-trunc',
-    '--format', '{{.CPUPerc}}\t{{.MemUsage}}',
-  ], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  proc.stdout.on('data', (d) => {
-    for (const line of d.toString().split('\n').filter(Boolean)) {
-      const parts = line.split('\t');
-      if (parts.length >= 2) {
-        const cpu = parseFloat(parts[0]);
-        const memStr = parts[1].split('/')[0].trim();
-        const mem = parseMemGiB(memStr);
-        if (!isNaN(cpu) && !isNaN(mem)) {
-          samples.push({ cpu, mem });
-        }
-      }
-    }
-  });
-
-  // Print periodic stats every 15s
-  const statsInterval = setInterval(() => {
-    if (samples.length === 0) return;
-    const latest = samples[samples.length - 1];
-    const elapsed = formatMs(Date.now() - startMs);
-    const peak = Math.max(...samples.map((x) => x.mem));
-    process.stdout.write(`    [${elapsed}] CPU: ${latest.cpu.toFixed(0)}%  RAM: ${latest.mem.toFixed(1)} GiB (peak ${peak.toFixed(1)} GiB)\n`);
-  }, 15000);
-
-  return {
-    stop() {
-      clearInterval(statsInterval);
-      proc.kill('SIGTERM');
-      if (samples.length === 0) return { avgCpu: 0, peakCpu: 0, peakMem: 0 };
-      const avgCpu = samples.reduce((s, x) => s + x.cpu, 0) / samples.length;
-      const peakCpu = Math.max(...samples.map((x) => x.cpu));
-      const peakMem = Math.max(...samples.map((x) => x.mem));
-      return { avgCpu, peakCpu, peakMem };
-    },
-  };
-}
-
 function parseMemGiB(str) {
   const match = str.match(/([\d.]+)\s*(GiB|MiB|KiB|B)/i);
   if (!match) return NaN;
@@ -289,19 +242,18 @@ async function benchAv1an(samplePath, config) {
   const cmd = av1anCmdParts.join(' ');
 
   const startMs = Date.now();
-  const stats = startDockerStats(startMs);
-  activeStats = stats;
 
-  // Poll av1an work dir for progress (mirrors plugin progressTracker)
+  // Poll av1an work dir for progress + one-shot docker stats each tick
   const workDir = `${tempDir}/work`;
   let stoppedByLimit = false;
   let encodeStartMs = 0;
-  let smoothedFps = 0;
   let lastPollChunks = 0;
+  const cpuSamples = [];
+  const memSamples = [];
 
-  // Single docker exec script that reads scenes.json, done.json, and log fps
+  // Python script to read scenes.json + done.json (queue count from done keys, not scenes array)
   const pollScript = `python3 -c "
-import json, os, re, glob, sys
+import json, os, sys
 work = '${workDir}'
 scenes_f = os.path.join(work, 'scenes.json')
 done_f = os.path.join(work, 'done.json')
@@ -312,75 +264,76 @@ try:
     done = json.load(open(done_f))
 except: print('WAITING'); sys.exit(0)
 total_frames = scenes.get('frames', 0)
+# Queue size = number of chunk files av1an created (keys in done + pending)
+# scenes.json 'scenes' has original scenes, but av1an may split further (extra_splits)
+# The actual queue is reflected by the total chunk count in the work dir
 total_chunks = len(scenes.get('scenes', []))
 done_map = done.get('done', {})
 done_chunks = len(done_map)
 enc_frames = sum(e.get('frames', 0) for e in done_map.values())
 enc_bytes = sum(e.get('size_bytes', 0) for e in done_map.values())
-# Parse fps from worker logs
-fps_samples = []
-log_dir = '${tempDir}/vs/logs'
-if os.path.isdir(log_dir):
-    for lf in glob.glob(os.path.join(log_dir, 'av1an.log*')):
-        try:
-            lines = open(lf).readlines()[-300:]
-            for l in lines:
-                m = re.search(r'(\\\\d+\\\\.?\\\\d*)\\\\s+fps', l, re.I)
-                if m: fps_samples.append(float(m.group(1)))
-        except: pass
-avg_fps = 0
-if fps_samples:
-    recent = fps_samples[-20:]
-    if len(recent) > 2:
-        recent.sort()
-        recent = recent[1:-1]
-    avg_fps = sum(recent) / len(recent)
-print(f'{done_chunks}|{total_chunks}|{enc_frames}|{total_frames}|{enc_bytes}|{avg_fps:.1f}')
+print(f'{done_chunks}|{total_chunks}|{enc_frames}|{total_frames}|{enc_bytes}')
 " 2>/dev/null || echo WAITING`;
 
   const progressMonitor = setInterval(async () => {
     try {
+      // One-shot docker stats (reliable, no streaming issues)
+      const statsCheck = await dockerExec(
+        `cat /proc/stat 2>/dev/null | head -1; cat /sys/fs/cgroup/memory.current 2>/dev/null || true`,
+        { timeout: 3000 },
+      );
+      // Simpler: just use docker stats --no-stream
+      const dsCheck = spawnSync('docker', [
+        'stats', CONTAINER, '--no-stream', '--format', '{{.CPUPerc}}\t{{.MemUsage}}',
+      ], { timeout: 5000 });
+      if (dsCheck.stdout) {
+        const dsLine = dsCheck.stdout.toString().trim();
+        const dsParts = dsLine.split('\t');
+        if (dsParts.length >= 2) {
+          const cpu = parseFloat(dsParts[0]);
+          const mem = parseMemGiB(dsParts[1].split('/')[0].trim());
+          if (!isNaN(cpu)) cpuSamples.push(cpu);
+          if (!isNaN(mem)) memSamples.push(mem);
+        }
+      }
+
+      // Poll av1an progress
       const check = await dockerExec(pollScript, { timeout: 8000 });
       const line = check.stdout.trim();
       if (line === 'WAITING') {
         const elapsed = formatMs(Date.now() - startMs);
-        process.stdout.write(`    [${elapsed}] waiting for scene detection / first chunks...\n`);
+        const cpuStr = cpuSamples.length > 0 ? `  CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
+        const memStr = memSamples.length > 0 ? `  RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
+        process.stdout.write(`    [${elapsed}] waiting for first chunks...${cpuStr}${memStr}\n`);
         return;
       }
 
-      const [doneChunks, totalChunks, encFrames, totalFrames, encBytes, logFps] =
-        line.split('|').map((v, i) => i <= 4 ? parseInt(v, 10) || 0 : parseFloat(v) || 0);
+      const [doneChunks, totalChunks, encFrames, totalFrames] =
+        line.split('|').map((v) => parseInt(v, 10) || 0);
 
       if (doneChunks >= 1 && encodeStartMs === 0) encodeStartMs = Date.now();
 
-      // Smoothed FPS from logs
-      if (logFps > 0) {
-        smoothedFps = smoothedFps === 0 ? logFps : smoothedFps * 0.7 + logFps * 0.3;
-      }
-      const chunkTotalFps = smoothedFps * config.workers;
-
-      // Throughput FPS from frames/elapsed
-      let throughputFps = chunkTotalFps;
+      // Throughput FPS = encoded frames / encode wall-clock
+      let throughputFps = 0;
       if (encodeStartMs > 0 && encFrames > 0) {
         const elapsedS = (Date.now() - encodeStartMs) / 1000;
         if (elapsedS > 0) throughputFps = encFrames / elapsedS;
       }
-      const totalFps = chunkTotalFps > 0 ? (chunkTotalFps + throughputFps) / 2 : throughputFps;
 
       const pct = totalFrames > 0 ? Math.min(99, Math.round((encFrames / totalFrames) * 100)) : 0;
       const remainFrames = totalFrames - encFrames;
-      const etaS = totalFps > 0 ? Math.round(remainFrames / totalFps) : 0;
+      const etaS = throughputFps > 0 ? Math.round(remainFrames / throughputFps) : 0;
       const elapsed = formatMs(Date.now() - startMs);
       const etaStr = etaS > 0 ? formatMs(etaS * 1000) : '?';
+      const cpuNow = cpuSamples.length > 0 ? `  CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
+      const memNow = memSamples.length > 0 ? `  RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
 
-      if (doneChunks !== lastPollChunks || doneChunks === 0) {
-        process.stdout.write(
-          `    [${elapsed}] ${pct}%  ${doneChunks}/${totalChunks} chunks` +
-          `  ${totalFps > 0 ? totalFps.toFixed(1) + ' fps' : ''}` +
-          `  ETA ${etaStr}\n`,
-        );
-        lastPollChunks = doneChunks;
-      }
+      process.stdout.write(
+        `    [${elapsed}] ${pct}%  ${doneChunks}/${totalChunks} chunks` +
+        `  ${throughputFps > 0 ? throughputFps.toFixed(1) + ' fps' : ''}` +
+        `  ETA ${etaStr}${cpuNow}${memNow}\n`,
+      );
+      lastPollChunks = doneChunks;
 
       // Chunk limit
       if (chunkLimit > 0 && doneChunks >= chunkLimit) {
@@ -397,16 +350,19 @@ print(f'{done_chunks}|{total_chunks}|{enc_frames}|{total_frames}|{enc_bytes}|{av
 
   clearInterval(progressMonitor);
   const elapsed = Date.now() - startMs;
-  const { avgCpu, peakMem } = stats.stop();
-  activeStats = null;
 
-  // Final FPS: use throughput (frames / wall-clock) as most reliable metric
+  // Final stats: one more docker stats sample + throughput FPS
+  const avgCpu = cpuSamples.length > 0
+    ? cpuSamples.reduce((s, v) => s + v, 0) / cpuSamples.length : 0;
+  const peakMem = memSamples.length > 0 ? Math.max(...memSamples) : 0;
+
   let fps = 0;
   try {
     const final = await dockerExec(pollScript, { timeout: 8000 });
     const parts = final.stdout.trim().split('|');
-    if (parts.length >= 5) {
+    if (parts.length >= 4) {
       const encFrames = parseInt(parts[2], 10) || 0;
+      // Use time from first chunk completion to end — that's actual encode time
       const encodeElapsed = encodeStartMs > 0 ? (Date.now() - encodeStartMs) / 1000 : elapsed / 1000;
       if (encFrames > 0 && encodeElapsed > 0) fps = encFrames / encodeElapsed;
     }
@@ -447,14 +403,36 @@ async function benchAbAv1(samplePath, config) {
   const cmd = abCmdParts.join(' ');
 
   const startMs = Date.now();
-  const stats = startDockerStats(startMs);
-  activeStats = stats;
+  const cpuSamples = [];
+  const memSamples = [];
+
+  // Periodic one-shot docker stats for ab-av1
+  const statsInterval = setInterval(() => {
+    const ds = spawnSync('docker', [
+      'stats', CONTAINER, '--no-stream', '--format', '{{.CPUPerc}}\t{{.MemUsage}}',
+    ], { timeout: 5000 });
+    if (ds.stdout) {
+      const parts = ds.stdout.toString().trim().split('\t');
+      if (parts.length >= 2) {
+        const cpu = parseFloat(parts[0]);
+        const mem = parseMemGiB(parts[1].split('/')[0].trim());
+        if (!isNaN(cpu)) cpuSamples.push(cpu);
+        if (!isNaN(mem)) memSamples.push(mem);
+      }
+    }
+    const elapsed = formatMs(Date.now() - startMs);
+    const cpuStr = cpuSamples.length > 0 ? `CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
+    const memStr = memSamples.length > 0 ? `RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
+    if (cpuStr || memStr) process.stdout.write(`    [${elapsed}] ${cpuStr}  ${memStr}\n`);
+  }, 10000);
 
   const result = await dockerExec(cmd, { timeout: 1800000, live: true });
 
+  clearInterval(statsInterval);
   const elapsed = Date.now() - startMs;
-  const { avgCpu, peakMem } = stats.stop();
-  activeStats = null;
+  const avgCpu = cpuSamples.length > 0
+    ? cpuSamples.reduce((s, v) => s + v, 0) / cpuSamples.length : 0;
+  const peakMem = memSamples.length > 0 ? Math.max(...memSamples) : 0;
 
   const combined = result.stdout + result.stderr;
   const fpsMatches = combined.match(/([\d.]+)\s*fps/gi);
