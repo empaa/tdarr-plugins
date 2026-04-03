@@ -108,6 +108,30 @@ function generateGrid(threads) {
 }
 
 // ---------------------------------------------------------------------------
+// Cleanup on interrupt
+// ---------------------------------------------------------------------------
+let activeProc = null;
+let activeStats = null;
+
+function cleanup() {
+  console.log('\n\nInterrupted — killing encode processes in container...');
+  if (activeStats) activeStats.stop();
+  if (activeProc) activeProc.kill('SIGKILL');
+  // Kill av1an, ab-av1, aomenc, SvtAv1EncApp, and ffmpeg inside the container
+  spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
+    'pkill -9 -f "av1an|ab-av1|aomenc|SvtAv1EncApp|ffmpeg" 2>/dev/null; true',
+  ]);
+  spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
+    `rm -rf ${BENCH_TEMP} 2>/dev/null; true`,
+  ]);
+  console.log('Cleanup done.');
+  process.exit(1);
+}
+
+process.on('SIGINT', cleanup);
+process.on('SIGTERM', cleanup);
+
+// ---------------------------------------------------------------------------
 // Docker helpers
 // ---------------------------------------------------------------------------
 function dockerExec(cmd, { timeout = 600000, live = false } = {}) {
@@ -115,6 +139,7 @@ function dockerExec(cmd, { timeout = 600000, live = false } = {}) {
     const proc = spawn('docker', ['exec', CONTAINER, 'bash', '-c', cmd], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    if (live) activeProc = proc;
 
     let stdout = '';
     let stderr = '';
@@ -146,6 +171,7 @@ function dockerExec(cmd, { timeout = 600000, live = false } = {}) {
 
     proc.on('close', (code) => {
       clearTimeout(timer);
+      if (live) activeProc = null;
       resolve({ code, stdout, stderr });
     });
     proc.on('error', reject);
@@ -255,11 +281,13 @@ async function benchAv1an(samplePath, config) {
 
   const startMs = Date.now();
   const stats = startDockerStats(startMs);
+  activeStats = stats;
 
   const result = await dockerExec(cmd, { timeout: 1800000, live: true });
 
   const elapsed = Date.now() - startMs;
   const { avgCpu, peakMem } = stats.stop();
+  activeStats = null;
 
   // Parse FPS from av1an verbose output (stderr typically)
   const combined = result.stdout + result.stderr;
@@ -304,11 +332,13 @@ async function benchAbAv1(samplePath, config) {
 
   const startMs = Date.now();
   const stats = startDockerStats(startMs);
+  activeStats = stats;
 
   const result = await dockerExec(cmd, { timeout: 1800000, live: true });
 
   const elapsed = Date.now() - startMs;
   const { avgCpu, peakMem } = stats.stop();
+  activeStats = null;
 
   const combined = result.stdout + result.stderr;
   const fpsMatches = combined.match(/([\d.]+)\s*fps/gi);
