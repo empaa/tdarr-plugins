@@ -100,7 +100,7 @@ const buildSvtFlags = (preset, svtLp, hdrSvt) => {
   ].filter(Boolean).join(' ');
 };
 
-const buildAbAv1SvtFlags = (cpu, lookahead) => {
+const buildAbAv1SvtFlags = (lp, lookahead) => {
   return [
     '--svt tune=1', '--svt enable-variance-boost=1',
     '--svt variance-boost-strength=2', '--svt variance-octile=6',
@@ -109,28 +109,52 @@ const buildAbAv1SvtFlags = (cpu, lookahead) => {
     '--svt irefresh-type=2', '--svt scm=0', '--svt sharpness=1',
     '--svt tf-strength=1', '--svt tile-columns=1', '--svt enable-overlays=1',
     `--svt lookahead=${lookahead}`, '--keyint 10s', '--scd true',
-    `--svt lp=${Math.min(6, cpu)}`,
+    `--svt lp=${lp}`,
   ].join(' ');
 };
 
-const calculateThreadBudget = (availableThreads, encoder, is4kHdr) => {
+const THREAD_PRESETS = {
+  safe:        { aomTpwRatio: 4, aomTpwMin: 4, svtTpwRatio: 6, svtTpwMin: 4, svtTpwMax: 6, svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
+  balanced:    { aomTpwRatio: 8, aomTpwMin: 2, svtTpwRatio: 5, svtTpwMin: 4, svtTpwMax: 8, svtLpMax: 12, vmafThreadDiv: 4, halve4kHdr: false },
+  aggressive:  { aomTpwRatio: 8, aomTpwMin: 2, svtTpwRatio: 5, svtTpwMin: 3, svtTpwMax: 6, svtLpMax: 20, vmafThreadDiv: 3, halve4kHdr: false },
+  max:         { aomTpwRatio: 10, aomTpwMin: 1, svtTpwRatio: 4, svtTpwMin: 2, svtTpwMax: 4, svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
+};
+
+const resolveThreadStrategy = (strategyName, overrides) => {
+  const base = strategyName === 'custom'
+    ? THREAD_PRESETS.aggressive
+    : (THREAD_PRESETS[strategyName] || THREAD_PRESETS.safe);
+  return { preset: base, overrides: overrides || {} };
+};
+
+const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
+  const opts = options || {};
+  const strategyName = opts.strategy || 'safe';
+  const { preset, overrides } = resolveThreadStrategy(strategyName, opts);
+
   let threadsPerWorker, maxWorkers;
 
   if (encoder === 'aom') {
-    threadsPerWorker = Math.max(4, Math.floor(availableThreads / 4));
+    threadsPerWorker = Math.max(preset.aomTpwMin, Math.floor(availableThreads / preset.aomTpwRatio));
     maxWorkers = Math.max(1, Math.floor(availableThreads / threadsPerWorker));
   } else {
-    threadsPerWorker = Math.min(6, Math.max(4, Math.floor(availableThreads / 6)));
+    threadsPerWorker = Math.min(preset.svtTpwMax, Math.max(preset.svtTpwMin, Math.floor(availableThreads / preset.svtTpwRatio)));
     maxWorkers = Math.max(1, Math.floor(availableThreads / threadsPerWorker));
   }
 
-  if (is4kHdr) {
+  if (is4kHdr && preset.halve4kHdr) {
     maxWorkers = Math.max(1, Math.floor(maxWorkers / 2));
   }
 
-  const svtLp = Math.min(6, threadsPerWorker);
+  const svtLp = Math.min(preset.svtLpMax, threadsPerWorker);
+  let vmafThreads = Math.max(2, Math.floor(availableThreads / preset.vmafThreadDiv));
 
-  return { maxWorkers, threadsPerWorker, svtLp };
+  // Apply explicit overrides
+  if (overrides.workers != null) maxWorkers = overrides.workers;
+  if (overrides.threadsPerWorker != null) threadsPerWorker = overrides.threadsPerWorker;
+  if (overrides.vmafThreads != null) vmafThreads = overrides.vmafThreads;
+
+  return { maxWorkers, threadsPerWorker, svtLp, vmafThreads, strategy: strategyName };
 };
 
 module.exports = {
@@ -139,4 +163,5 @@ module.exports = {
   buildSvtFlags,
   buildAbAv1SvtFlags,
   calculateThreadBudget,
+  THREAD_PRESETS,
 };
