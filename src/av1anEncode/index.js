@@ -72,6 +72,22 @@ const details = () => ({
       inputUI: { type: 'dropdown', options: ['720p', '1080p', '1440p'] },
       tooltip: 'Target resolution for downscaling. Only used when downscale is enabled.',
     },
+    {
+      label: 'Thread Strategy',
+      name: 'thread_strategy',
+      type: 'string',
+      defaultValue: 'safe',
+      inputUI: { type: 'dropdown', options: ['safe', 'balanced', 'aggressive', 'max', 'custom'] },
+      tooltip: 'Controls thread/worker budget. safe=current conservative defaults. balanced=~70% CPU. aggressive=~90% CPU. max=saturate all cores. custom=use thread_overrides JSON.',
+    },
+    {
+      label: 'Thread Overrides (JSON)',
+      name: 'thread_overrides',
+      type: 'string',
+      defaultValue: '',
+      inputUI: { type: 'text' },
+      tooltip: 'Only used when Thread Strategy is "custom". JSON: {"workers":16,"threadsPerWorker":2,"vmafThreads":12}. Omitted keys fall back to aggressive preset.',
+    },
   ],
   outputs: [
     { number: 1, tooltip: 'Encode succeeded -- output file is the encoded video+audio MKV' },
@@ -100,6 +116,16 @@ const plugin = async (args) => {
   const downscaleEnabled  = inputs.downscale_enabled === true || inputs.downscale_enabled === 'true';
   const downscaleRes      = String(inputs.downscale_resolution || '1080p');
 
+  const threadStrategy    = String(inputs.thread_strategy || 'safe');
+  let threadOverrides = {};
+  let threadOverridesError = null;
+  const rawOverrides = String(inputs.thread_overrides || '').trim();
+  if (rawOverrides) {
+    try { threadOverrides = JSON.parse(rawOverrides); } catch (e) {
+      threadOverridesError = e.message;
+    }
+  }
+
   const findBin = (name, ...paths) => paths.find((p) => fs.existsSync(p))
     || (() => { throw new Error(`Required binary not found: ${name} (checked ${paths.join(', ')})`); })();
 
@@ -114,6 +140,9 @@ const plugin = async (args) => {
   if (!fs.existsSync(vmafModel)) throw new Error(`VMAF model not found: ${vmafModel}`);
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
+  if (threadOverridesError) {
+    jobLog(`WARNING: invalid thread_overrides JSON, falling back to aggressive: ${threadOverridesError}`);
+  }
   const pm = createProcessManager(jobLog, dbg);
 
   const updateWorker = (fields) => {
@@ -131,7 +160,10 @@ const plugin = async (args) => {
   const { hdrAom, hdrSvt } = detectHdrMeta(stream);
 
   const is4kHdr = height >= 2160 && stream.color_transfer === 'smpte2084';
-  const { maxWorkers, threadsPerWorker, svtLp } = calculateThreadBudget(availableThreads, encoder, is4kHdr);
+  const { maxWorkers, threadsPerWorker, svtLp, vmafThreads } = calculateThreadBudget(
+    availableThreads, encoder, is4kHdr,
+    { strategy: threadStrategy, ...threadOverrides },
+  );
 
   const encFlags = encoder === 'aom'
     ? buildAomFlags(encPreset, threadsPerWorker, hdrAom)
@@ -150,7 +182,7 @@ const plugin = async (args) => {
   jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${downscaleEnabled ? ` -> ${downscaleRes}` : ''}`);
   jobLog(`  target     : VMAF ${targetVmaf}  QP-range ${qpRange}`);
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
-  jobLog(`  threads    : cpu=${availableThreads}  workers=${maxWorkers}  threads/worker=${threadsPerWorker}`);
+  jobLog(`  threads    : cpu=${availableThreads}  workers=${maxWorkers}  threads/worker=${threadsPerWorker}  vmaf-threads=${vmafThreads}  strategy=${threadStrategy}`);
   jobLog(`  enc flags  : ${encFlags}`);
   jobLog('='.repeat(64));
 
@@ -199,7 +231,7 @@ const plugin = async (args) => {
     '--qp-range', qpRange,
     '--target-quality', String(targetVmaf),
     '--vmaf-path', vmafModel,
-    '--vmaf-threads', '4',
+    '--vmaf-threads', String(vmafThreads),
     '--probes', '6',
     '--chunk-order', 'long-to-short',
     '--keep',
