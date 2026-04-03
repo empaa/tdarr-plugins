@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const {
-  THREAD_PRESETS, calculateThreadBudget, capSvtLpByPreset,
+  THREAD_PRESETS, calculateThreadBudget,
   buildAomFlags, buildSvtFlags, buildAbAv1SvtFlags,
 } = require('../src/shared/encoderFlags');
 const {
@@ -546,9 +546,8 @@ async function main() {
       }
       const encoder = encoderArg === 'ab-av1' ? 'svt-av1' : encoderArg;
       const singleProcess = encoderArg === 'ab-av1';
-      const b = calculateThreadBudget(threads, encoder, false, { strategy: name, singleProcess });
-      const svtLp = encoder !== 'aom' ? capSvtLpByPreset(b.svtLp, Number(cpuUsed)) : b.svtLp;
-      return { workers: b.maxWorkers, tpw: b.threadsPerWorker, svtLp, vmafThreads: b.vmafThreads, label: name };
+      const b = calculateThreadBudget(threads, encoder, false, { strategy: name, singleProcess, encPreset: Number(cpuUsed) });
+      return { workers: b.maxWorkers, tpw: b.threadsPerWorker, svtLp: b.svtLp, vmafThreads: b.vmafThreads, label: name };
     });
     console.log(`\nPreset mode: testing ${configs.map((c) => c.label).join(', ')}\n`);
   }

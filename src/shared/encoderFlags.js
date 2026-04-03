@@ -172,7 +172,16 @@ const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
   if (overrides.threadsPerWorker != null) threadsPerWorker = overrides.threadsPerWorker;
   if (overrides.vmafThreads != null) vmafThreads = overrides.vmafThreads;
 
-  const svtLp = Math.min(preset.svtLpMax, threadsPerWorker);
+  let svtLp = Math.min(preset.svtLpMax, threadsPerWorker);
+
+  // Cap lp by SVT-AV1 encoder preset and compensate with more workers
+  if (encoder !== 'aom' && opts.encPreset != null) {
+    const cappedLp = capSvtLpByPreset(svtLp, opts.encPreset);
+    if (cappedLp < svtLp && !opts.singleProcess && overrides.workers == null) {
+      maxWorkers = Math.max(1, Math.floor(availableThreads / cappedLp));
+    }
+    svtLp = cappedLp;
+  }
 
   return { maxWorkers, threadsPerWorker, svtLp, vmafThreads, strategy: strategyName };
 };
