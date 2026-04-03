@@ -128,10 +128,10 @@ const capSvtLpByPreset = (lp, encPreset) => {
 };
 
 const THREAD_PRESETS = {
-  safe:        { aomTpwRatio: 4, aomTpwMin: 4, svtTpwRatio: 6, svtTpwMin: 4, svtTpwMax: 6, svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
-  balanced:    { aomTpwRatio: 8, aomTpwMin: 2, svtTpwRatio: 5, svtTpwMin: 4, svtTpwMax: 8, svtLpMax: 12, vmafThreadDiv: 4, halve4kHdr: false },
-  aggressive:  { aomTpwRatio: 8, aomTpwMin: 2, svtTpwRatio: 5, svtTpwMin: 3, svtTpwMax: 6, svtLpMax: 20, vmafThreadDiv: 3, halve4kHdr: false },
-  max:         { aomTpwRatio: 10, aomTpwMin: 1, svtTpwRatio: 4, svtTpwMin: 2, svtTpwMax: 4, svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
+  safe:        { aomTpwRatio: 4, aomTpwMin: 4, svtWorkerFill: 0.5,  svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
+  balanced:    { aomTpwRatio: 8, aomTpwMin: 2, svtWorkerFill: 0.7,  svtLpMax: 12, vmafThreadDiv: 4, halve4kHdr: false },
+  aggressive:  { aomTpwRatio: 8, aomTpwMin: 2, svtWorkerFill: 0.9,  svtLpMax: 20, vmafThreadDiv: 3, halve4kHdr: false },
+  max:         { aomTpwRatio: 10, aomTpwMin: 1, svtWorkerFill: 1.0,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
 };
 
 const resolveThreadStrategy = (strategyName, overrides) => {
@@ -152,12 +152,18 @@ const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
     threadsPerWorker = Math.max(preset.aomTpwMin, Math.floor(availableThreads / preset.aomTpwRatio));
     maxWorkers = Math.max(1, Math.floor(availableThreads / threadsPerWorker));
   } else {
-    threadsPerWorker = Math.min(preset.svtTpwMax, Math.max(preset.svtTpwMin, Math.floor(availableThreads / preset.svtTpwRatio)));
-    maxWorkers = Math.max(1, Math.floor(availableThreads / threadsPerWorker));
+    // SVT-AV1: use capped lp, then fill workers by strategy aggressiveness
+    let lp = Math.min(preset.svtLpMax, availableThreads);
+    if (opts.encPreset != null) lp = capSvtLpByPreset(lp, opts.encPreset);
+    threadsPerWorker = lp;
+    const maxPossibleWorkers = Math.max(1, Math.floor(availableThreads / lp));
+    maxWorkers = Math.max(1, Math.ceil(maxPossibleWorkers * preset.svtWorkerFill));
   }
 
   if (opts.singleProcess) {
-    threadsPerWorker = availableThreads;
+    let lp = Math.min(preset.svtLpMax, availableThreads);
+    if (encoder !== 'aom' && opts.encPreset != null) lp = capSvtLpByPreset(lp, opts.encPreset);
+    threadsPerWorker = lp;
     maxWorkers = 1;
   }
 
@@ -172,16 +178,7 @@ const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
   if (overrides.threadsPerWorker != null) threadsPerWorker = overrides.threadsPerWorker;
   if (overrides.vmafThreads != null) vmafThreads = overrides.vmafThreads;
 
-  let svtLp = Math.min(preset.svtLpMax, threadsPerWorker);
-
-  // Cap lp by SVT-AV1 encoder preset and compensate with more workers
-  if (encoder !== 'aom' && opts.encPreset != null) {
-    const cappedLp = capSvtLpByPreset(svtLp, opts.encPreset);
-    if (cappedLp < svtLp && !opts.singleProcess && overrides.workers == null) {
-      maxWorkers = Math.max(1, Math.floor(availableThreads / cappedLp));
-    }
-    svtLp = cappedLp;
-  }
+  const svtLp = Math.min(preset.svtLpMax, threadsPerWorker);
 
   return { maxWorkers, threadsPerWorker, svtLp, vmafThreads, strategy: strategyName };
 };
