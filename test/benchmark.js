@@ -329,18 +329,17 @@ async function benchAv1an(samplePath, config) {
   };
 }
 
-async function benchAbAv1(samplePath, config) {
+async function benchAbAv1(samplePath, config, crf) {
   const containerSample = `/samples/${path.basename(samplePath)}`;
   const tempDir = `${BENCH_TEMP}/ab-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
   const svtFlags = buildAbAv1SvtFlags(config.svtLp, 24);
   const abCmdParts = [
     `mkdir -p ${tempDir} &&`,
-    `ab-av1 auto-encode`,
+    `ab-av1 encode`,
     `-i ${containerSample} -o ${tempDir}/out.mkv`,
     `--encoder libsvtav1 --preset ${cpuUsed}`,
-    `--min-vmaf ${targetVmaf} --min-crf 10 --max-crf 50`,
-    `--vmaf "n_threads=${config.vmafThreads || 4}:model=path=/usr/local/share/vmaf/vmaf_v0.6.1.json"`,
+    `--crf ${crf}`,
   ];
   if (downscaleRes) {
     const dsArgs = buildAbAv1DownscaleArgs(downscaleRes);
@@ -606,6 +605,46 @@ async function main() {
       console.log('    Scenes cached.\n');
     }
 
+    // ab-av1 warmup: run crf-search once, then use the found CRF for all encode tests
+    let abAv1Crf = null;
+    if (isAbAv1) {
+      console.log('\nWarmup: running CRF search (will use found CRF for all configs)...');
+      const containerSample = `/samples/${path.basename(sample)}`;
+      const warmupDir = `${BENCH_TEMP}/ab-warmup`;
+
+      // Use first config's svtLp for the search (doesn't affect CRF result much)
+      const warmupLp = configs[0].svtLp;
+      const warmupSvtFlags = buildAbAv1SvtFlags(warmupLp, 24);
+      const crfSearchParts = [
+        `mkdir -p ${warmupDir} &&`,
+        `ab-av1 crf-search`,
+        `-i ${containerSample}`,
+        `--encoder libsvtav1 --preset ${cpuUsed}`,
+        `--min-vmaf ${targetVmaf} --min-crf 10 --max-crf 50`,
+        `--vmaf "n_threads=4:model=path=/usr/local/share/vmaf/vmaf_v0.6.1.json"`,
+      ];
+      if (downscaleRes) {
+        const dsArgs = buildAbAv1DownscaleArgs(downscaleRes);
+        if (dsArgs.length) crfSearchParts.push(dsArgs.join(' '));
+      }
+      crfSearchParts.push(warmupSvtFlags, `--verbose`);
+      const crfSearchCmd = crfSearchParts.join(' ');
+
+      const crfResult = await dockerExec(crfSearchCmd, { timeout: 600000, live: true });
+      const combined = crfResult.stdout + crfResult.stderr;
+
+      // Parse CRF from ab-av1 output: "crf N" or "using crf N"
+      const crfMatch = combined.match(/(?:crf|using crf)\s+(\d+)/i);
+      if (crfMatch) {
+        abAv1Crf = parseInt(crfMatch[1], 10);
+        console.log(`    CRF search complete: crf=${abAv1Crf}\n`);
+      } else {
+        console.error('    ERROR: could not parse CRF from ab-av1 crf-search output');
+        console.error('    Output:', combined.slice(-500));
+        process.exit(1);
+      }
+    }
+
     const results = [];
     for (const config of configs) {
       const detail = isAbAv1
@@ -614,10 +653,11 @@ async function main() {
       console.log(`\nRunning: ${config.label} (${detail}) for ${testDuration}s...`);
 
       // Clean encode output but keep cached scenes
-      await dockerExec(`rm -rf ${BENCH_TEMP}/*/work/done.json ${BENCH_TEMP}/*/work/encode/ ${BENCH_TEMP}/*/out.mkv 2>/dev/null; true`);
+      // Clean encode output but keep cached scenes/warmup
+      await dockerExec(`rm -rf ${BENCH_TEMP}/*/work/done.json ${BENCH_TEMP}/*/work/encode/ ${BENCH_TEMP}/*/out.mkv ${BENCH_TEMP}/ab-*/out.mkv 2>/dev/null; true`);
 
       const result = isAbAv1
-        ? await benchAbAv1(sample, config)
+        ? await benchAbAv1(sample, config, abAv1Crf)
         : await benchAv1an(sample, config);
 
       results.push(result);
