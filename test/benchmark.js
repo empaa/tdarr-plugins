@@ -345,7 +345,7 @@ async function benchAbAv1(samplePath, config, crf) {
     const dsArgs = buildAbAv1DownscaleArgs(downscaleRes);
     if (dsArgs.length) abCmdParts.push(dsArgs.join(' '));
   }
-  abCmdParts.push(svtFlags, `--verbose`);
+  abCmdParts.push(svtFlags);
   const cmd = abCmdParts.join(' ');
 
   const startMs = Date.now();
