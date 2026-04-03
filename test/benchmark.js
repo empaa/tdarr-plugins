@@ -545,7 +545,8 @@ async function main() {
         process.exit(1);
       }
       const encoder = encoderArg === 'ab-av1' ? 'svt-av1' : encoderArg;
-      const b = calculateThreadBudget(threads, encoder, false, { strategy: name });
+      const singleProcess = encoderArg === 'ab-av1';
+      const b = calculateThreadBudget(threads, encoder, false, { strategy: name, singleProcess });
       return { workers: b.maxWorkers, tpw: b.threadsPerWorker, svtLp: b.svtLp, vmafThreads: b.vmafThreads, label: name };
     });
     console.log(`\nPreset mode: testing ${configs.map((c) => c.label).join(', ')}\n`);
