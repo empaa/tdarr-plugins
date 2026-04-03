@@ -69,7 +69,9 @@ SVT-AV1 has preset-dependent parallelization limits. Lower presets use algorithm
 | SVT-AV1 Preset | Effective max lp |
 |-----------------|-----------------|
 | 0-3 | ~4 threads |
-| 4-6 | ~16 threads |
+| 4 | ~8 threads |
+| 5 | ~12 threads |
+| 6 | ~16 threads |
 | 7+ | 32+ threads |
 
 The plugins automatically cap `lp` based on the encoder preset. This means **ab-av1 at preset 3 won't benefit from thread strategies beyond `safe`** — the encoder simply can't use the extra threads.
