@@ -146,13 +146,14 @@ const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
     maxWorkers = Math.max(1, Math.floor(maxWorkers / 2));
   }
 
-  const svtLp = Math.min(preset.svtLpMax, threadsPerWorker);
   let vmafThreads = Math.max(2, Math.floor(availableThreads / preset.vmafThreadDiv));
 
   // Apply explicit overrides
   if (overrides.workers != null) maxWorkers = overrides.workers;
   if (overrides.threadsPerWorker != null) threadsPerWorker = overrides.threadsPerWorker;
   if (overrides.vmafThreads != null) vmafThreads = overrides.vmafThreads;
+
+  const svtLp = Math.min(preset.svtLpMax, threadsPerWorker);
 
   return { maxWorkers, threadsPerWorker, svtLp, vmafThreads, strategy: strategyName };
 };

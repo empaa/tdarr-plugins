@@ -129,7 +129,7 @@ const plugin = async (args) => {
   const sampleFrames = Math.round(srcFps * 4);
   const lookahead = Math.min(40, Math.max(8, Math.floor(sampleFrames * 0.25)));
 
-  const svtFlags = buildAbAv1SvtFlags(availableThreads, lookahead);
+  const svtFlags = buildAbAv1SvtFlags(Math.min(6, availableThreads), lookahead);
 
   const abWorkDir = path.join(args.workDir, 'ab-av1-work');
   const outputPath = path.join(args.workDir, 'ab-av1-output.mkv');
