@@ -246,94 +246,58 @@ async function benchAv1an(samplePath, config) {
   // Poll av1an work dir for progress + one-shot docker stats each tick
   const workDir = `${tempDir}/work`;
   let stoppedByLimit = false;
-  let encodeStartMs = 0;
-  let lastPollChunks = 0;
   const cpuSamples = [];
   const memSamples = [];
 
-  // Python script to read scenes.json + done.json (queue count from done keys, not scenes array)
-  const pollScript = `python3 -c "
+  // Script to read done.json chunk count only (for progress + chunk limit)
+  const chunkCountScript = `python3 -c "
 import json, os, sys
-work = '${workDir}'
-scenes_f = os.path.join(work, 'scenes.json')
-done_f = os.path.join(work, 'done.json')
-if not os.path.exists(scenes_f) or not os.path.exists(done_f):
-    print('WAITING'); sys.exit(0)
+done_f = os.path.join('${workDir}', 'done.json')
+if not os.path.exists(done_f): print('0'); sys.exit(0)
 try:
-    scenes = json.load(open(scenes_f))
     done = json.load(open(done_f))
-except: print('WAITING'); sys.exit(0)
-total_frames = scenes.get('frames', 0)
-# Queue size = number of chunk files av1an created (keys in done + pending)
-# scenes.json 'scenes' has original scenes, but av1an may split further (extra_splits)
-# The actual queue is reflected by the total chunk count in the work dir
-total_chunks = len(scenes.get('scenes', []))
-done_map = done.get('done', {})
-done_chunks = len(done_map)
-enc_frames = sum(e.get('frames', 0) for e in done_map.values())
-enc_bytes = sum(e.get('size_bytes', 0) for e in done_map.values())
-print(f'{done_chunks}|{total_chunks}|{enc_frames}|{total_frames}|{enc_bytes}')
-" 2>/dev/null || echo WAITING`;
+    print(len(done.get('done', {})))
+except: print('0')
+" 2>/dev/null || echo 0`;
+
+  // Script to read final frames from done.json (only called once at end)
+  const finalStatsScript = `python3 -c "
+import json, os, sys
+done_f = os.path.join('${workDir}', 'done.json')
+if not os.path.exists(done_f): print('0|0'); sys.exit(0)
+try:
+    done = json.load(open(done_f))
+    done_map = done.get('done', {})
+    enc_frames = sum(e.get('frames', 0) for e in done_map.values())
+    done_chunks = len(done_map)
+    print(f'{done_chunks}|{enc_frames}')
+except: print('0|0')
+" 2>/dev/null || echo 0|0`;
 
   const progressMonitor = setInterval(async () => {
     try {
-      // One-shot docker stats (reliable, no streaming issues)
-      const statsCheck = await dockerExec(
-        `cat /proc/stat 2>/dev/null | head -1; cat /sys/fs/cgroup/memory.current 2>/dev/null || true`,
-        { timeout: 3000 },
-      );
-      // Simpler: just use docker stats --no-stream
-      const dsCheck = spawnSync('docker', [
+      // One-shot docker stats
+      const ds = spawnSync('docker', [
         'stats', CONTAINER, '--no-stream', '--format', '{{.CPUPerc}}\t{{.MemUsage}}',
       ], { timeout: 5000 });
-      if (dsCheck.stdout) {
-        const dsLine = dsCheck.stdout.toString().trim();
-        const dsParts = dsLine.split('\t');
-        if (dsParts.length >= 2) {
-          const cpu = parseFloat(dsParts[0]);
-          const mem = parseMemGiB(dsParts[1].split('/')[0].trim());
+      if (ds.stdout) {
+        const parts = ds.stdout.toString().trim().split('\t');
+        if (parts.length >= 2) {
+          const cpu = parseFloat(parts[0]);
+          const mem = parseMemGiB(parts[1].split('/')[0].trim());
           if (!isNaN(cpu)) cpuSamples.push(cpu);
           if (!isNaN(mem)) memSamples.push(mem);
         }
       }
 
-      // Poll av1an progress
-      const check = await dockerExec(pollScript, { timeout: 8000 });
-      const line = check.stdout.trim();
-      if (line === 'WAITING') {
-        const elapsed = formatMs(Date.now() - startMs);
-        const cpuStr = cpuSamples.length > 0 ? `  CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
-        const memStr = memSamples.length > 0 ? `  RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
-        process.stdout.write(`    [${elapsed}] waiting for first chunks...${cpuStr}${memStr}\n`);
-        return;
-      }
+      // Chunk count
+      const check = await dockerExec(chunkCountScript, { timeout: 5000 });
+      const doneChunks = parseInt(check.stdout.trim(), 10) || 0;
 
-      const [doneChunks, totalChunks, encFrames, totalFrames] =
-        line.split('|').map((v) => parseInt(v, 10) || 0);
-
-      if (doneChunks >= 1 && encodeStartMs === 0) encodeStartMs = Date.now();
-
-      // Throughput FPS = encoded frames / encode wall-clock
-      let throughputFps = 0;
-      if (encodeStartMs > 0 && encFrames > 0) {
-        const elapsedS = (Date.now() - encodeStartMs) / 1000;
-        if (elapsedS > 0) throughputFps = encFrames / elapsedS;
-      }
-
-      const pct = totalFrames > 0 ? Math.min(99, Math.round((encFrames / totalFrames) * 100)) : 0;
-      const remainFrames = totalFrames - encFrames;
-      const etaS = throughputFps > 0 ? Math.round(remainFrames / throughputFps) : 0;
       const elapsed = formatMs(Date.now() - startMs);
-      const etaStr = etaS > 0 ? formatMs(etaS * 1000) : '?';
-      const cpuNow = cpuSamples.length > 0 ? `  CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
-      const memNow = memSamples.length > 0 ? `  RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
-
-      process.stdout.write(
-        `    [${elapsed}] ${pct}%  ${doneChunks}/${totalChunks} chunks` +
-        `  ${throughputFps > 0 ? throughputFps.toFixed(1) + ' fps' : ''}` +
-        `  ETA ${etaStr}${cpuNow}${memNow}\n`,
-      );
-      lastPollChunks = doneChunks;
+      const cpuStr = cpuSamples.length > 0 ? `  CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
+      const memStr = memSamples.length > 0 ? `  RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
+      process.stdout.write(`    [${elapsed}] ${doneChunks} chunks done${cpuStr}${memStr}\n`);
 
       // Chunk limit
       if (chunkLimit > 0 && doneChunks >= chunkLimit) {
@@ -344,28 +308,24 @@ print(f'{done_chunks}|{total_chunks}|{enc_frames}|{total_frames}|{enc_bytes}')
         ]);
       }
     } catch (_) {}
-  }, 5000);
+  }, 10000);
 
   const result = await dockerExec(cmd, { timeout: 1800000, live: true });
 
   clearInterval(progressMonitor);
-  const elapsed = Date.now() - startMs;
+  const encodeTimeMs = Date.now() - startMs;
 
-  // Final stats: one more docker stats sample + throughput FPS
   const avgCpu = cpuSamples.length > 0
     ? cpuSamples.reduce((s, v) => s + v, 0) / cpuSamples.length : 0;
   const peakMem = memSamples.length > 0 ? Math.max(...memSamples) : 0;
 
+  // FPS = total encoded frames / total wall-clock time
   let fps = 0;
   try {
-    const final = await dockerExec(pollScript, { timeout: 8000 });
-    const parts = final.stdout.trim().split('|');
-    if (parts.length >= 4) {
-      const encFrames = parseInt(parts[2], 10) || 0;
-      // Use time from first chunk completion to end — that's actual encode time
-      const encodeElapsed = encodeStartMs > 0 ? (Date.now() - encodeStartMs) / 1000 : elapsed / 1000;
-      if (encFrames > 0 && encodeElapsed > 0) fps = encFrames / encodeElapsed;
-    }
+    const final = await dockerExec(finalStatsScript, { timeout: 8000 });
+    const [doneChunks, encFrames] = final.stdout.trim().split('|').map((v) => parseInt(v, 10) || 0);
+    const encodeTimeSec = encodeTimeMs / 1000;
+    if (encFrames > 0 && encodeTimeSec > 0) fps = encFrames / encodeTimeSec;
   } catch (_) {}
 
   return {
@@ -376,7 +336,7 @@ print(f'{done_chunks}|{total_chunks}|{enc_frames}|{total_frames}|{enc_bytes}')
     fps: fps.toFixed(1),
     avgCpu: avgCpu.toFixed(0),
     peakMem: peakMem.toFixed(1),
-    time: formatMs(elapsed),
+    time: formatMs(encodeTimeMs),
     exitCode: stoppedByLimit ? 0 : result.code,
     oom: peakMem > 0 && result.code !== 0 && !stoppedByLimit && peakMem > 50,
   };
