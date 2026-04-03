@@ -213,6 +213,7 @@ async function benchAv1an(samplePath, config) {
   // Reuse warmup's work dir (has cached scenes) — clean encode output between runs
   const av1anCmdParts = [
     `rm -rf ${warmupDir}/work/encode ${warmupDir}/work/done.json ${warmupDir}/out.mkv 2>/dev/null;`,
+    `echo '{"done":{}}' > ${warmupDir}/work/done.json &&`,
     `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
     `-c mkvmerge -e ${av1anEncoder}`,
     `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
