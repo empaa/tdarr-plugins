@@ -237,7 +237,6 @@ async function benchAv1an(samplePath, config) {
 
   // Measure total bytes in work dir (captures all encoder output regardless of format/structure)
   const readBytesScript = `du -sb ${tempDir} 2>/dev/null | cut -f1 || echo 0`;
-  const readChunksScript = `find ${workDir} -name 'done.json' -exec python3 -c "import json,sys; print(len(json.load(open(sys.argv[1])).get('done',{})))" {} \\; 2>/dev/null || echo 0`;
 
   // Capture baseline dir size before encoding starts (scenes.json, vpy, etc)
   let baselineBytes = 0;
@@ -276,7 +275,7 @@ async function benchAv1an(samplePath, config) {
       const elapsed = formatMs(Date.now() - startMs);
       const cpuStr = cpuSamples.length > 0 ? `  CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
       const memStr = memSamples.length > 0 ? `  RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
-      process.stdout.write(`    [${elapsed}] ${doneChunks} chunks  ${encMiB} MiB encoded  ${formatMs(remaining * 1000)} left${cpuStr}${memStr}\n`);
+      process.stdout.write(`    [${elapsed}] ${encMiB} MiB encoded  ${formatMs(remaining * 1000)} left${cpuStr}${memStr}\n`);
 
       // Time limit
       if (elapsedSec >= testDuration) {
@@ -300,13 +299,10 @@ async function benchAv1an(samplePath, config) {
 
   // Read final encoded bytes from disk (minus baseline)
   let encBytes = 0;
-  let doneChunks = 0;
   try {
     const bytesResult = await dockerExec(readBytesScript, { timeout: 8000 });
     const totalBytes = parseInt(bytesResult.stdout.trim(), 10) || 0;
     encBytes = Math.max(0, totalBytes - baselineBytes);
-    const chunksResult = await dockerExec(readChunksScript, { timeout: 8000 });
-    doneChunks = parseInt(chunksResult.stdout.trim(), 10) || 0;
   } catch (_) {}
 
   const encodeTimeSec = encodeTimeMs / 1000;
@@ -320,7 +316,6 @@ async function benchAv1an(samplePath, config) {
     vmafThreads: config.vmafThreads,
     mibPerMin: mibPerMin.toFixed(1),
     totalMiB: (encBytes / (1024 * 1024)).toFixed(1),
-    chunks: doneChunks,
     avgCpu: avgCpu.toFixed(0),
     peakMem: peakMem.toFixed(1),
     time: formatMs(encodeTimeMs),
@@ -417,7 +412,6 @@ async function benchAbAv1(samplePath, config, crf) {
     vmafThreads: '-',
     mibPerMin: mibPerMin.toFixed(1),
     totalMiB: (encBytes / (1024 * 1024)).toFixed(1),
-    chunks: '-',
     avgCpu: avgCpu.toFixed(0),
     peakMem: peakMem.toFixed(1),
     time: formatMs(encodeTimeMs),
@@ -436,7 +430,7 @@ function formatMs(ms) {
 }
 
 function printTable(results) {
-  const headers = ['Config', 'Workers', 'Threads', 'VMAF-T', 'MiB/min', 'Total MiB', 'Chunks', 'CPU %', 'Peak RAM', 'Status'];
+  const headers = ['Config', 'Workers', 'Threads', 'VMAF-T', 'MiB/min', 'Total MiB', 'CPU %', 'Peak RAM', 'Status'];
   const rows = results.map((r) => [
     r.label,
     String(r.workers),
@@ -444,7 +438,6 @@ function printTable(results) {
     String(r.vmafThreads),
     r.mibPerMin,
     r.totalMiB,
-    String(r.chunks),
     `${r.avgCpu}%`,
     `${r.peakMem} GiB`,
     r.oom ? 'OOM' : r.exitCode === 0 ? 'OK' : `exit ${r.exitCode}`,
