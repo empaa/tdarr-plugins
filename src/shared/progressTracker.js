@@ -190,6 +190,8 @@ const createAbAv1Tracker = (opts) => {
   let lastEtaSec = 0;
   let lastEtaReceivedMs = 0;
   let encodeStartMs = 0;
+  let lastEstPct = 0;
+  let cachedEstSizeGb = 0;
 
   const pushStats = (fields) => {
     updateWorker(fields);
@@ -244,6 +246,18 @@ const createAbAv1Tracker = (opts) => {
           currentPct = 99;
         } else if (p > 0 && p < 100) {
           currentPct = p;
+          // Recalculate estimated size only on % ticks to avoid spiraling between ticks
+          if (p !== lastEstPct) {
+            lastEstPct = p;
+            try {
+              if (fs.existsSync(outputPath)) {
+                const nowSizeGb = fs.statSync(outputPath).size / (1024 ** 3);
+                if (nowSizeGb > 0) {
+                  cachedEstSizeGb = nowSizeGb / (p / 100);
+                }
+              }
+            } catch (_) {}
+          }
         }
       }
 
@@ -272,10 +286,7 @@ const createAbAv1Tracker = (opts) => {
       }
     } catch (_) {}
 
-    let estFinalSizeGb = 0;
-    if (currentPct > 0 && actualSizeGb > 0 && !encodeReached100) {
-      estFinalSizeGb = actualSizeGb / (currentPct / 100);
-    }
+    const estFinalSizeGb = encodeReached100 ? 0 : cachedEstSizeGb;
 
     if (encodeReached100) {
       pushStats({
