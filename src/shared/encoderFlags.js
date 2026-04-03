@@ -128,10 +128,10 @@ const capSvtLpByPreset = (lp, encPreset) => {
 };
 
 const THREAD_PRESETS = {
-  safe:        { aomTpwRatio: 4, aomTpwMin: 4, svtWorkerFill: 0.5,  svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
-  balanced:    { aomTpwRatio: 8, aomTpwMin: 2, svtWorkerFill: 0.7,  svtLpMax: 12, vmafThreadDiv: 4, halve4kHdr: false },
-  aggressive:  { aomTpwRatio: 8, aomTpwMin: 2, svtWorkerFill: 0.9,  svtLpMax: 20, vmafThreadDiv: 3, halve4kHdr: false },
-  max:         { aomTpwRatio: 10, aomTpwMin: 1, svtWorkerFill: 1.0,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
+  safe:        { aomTpwRatio: 4,  aomTpwMin: 4, svtWorkerFill: 0.5,  svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
+  balanced:    { aomTpwRatio: 8,  aomTpwMin: 2, svtWorkerFill: 0.7,  svtLpMax: 12, vmafThreadDiv: 3, halve4kHdr: false },
+  aggressive:  { aomTpwRatio: 10, aomTpwMin: 1, svtWorkerFill: 0.9,  svtLpMax: 20, vmafThreadDiv: 2, halve4kHdr: false },
+  max:         { aomTpwRatio: 16, aomTpwMin: 1, svtWorkerFill: 1.0,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
 };
 
 const resolveThreadStrategy = (strategyName, overrides) => {
