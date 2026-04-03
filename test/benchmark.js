@@ -559,16 +559,20 @@ async function main() {
       const vpyLines = vpyParts.join('\\n');
 
       // Run av1an just long enough to complete scene detection, then kill
+      const av1anEncoder = encoderArg === 'aom' ? 'aom' : 'svt-av1';
+      const warmupEncFlags = encoderArg === 'aom'
+        ? '--cpu-used=8 --threads=1'
+        : '--preset 8 --lp 1';
       const warmupCmd = [
         `mkdir -p ${warmupDir}/work ${warmupDir}/vs &&`,
         `printf '${vpyLines}\\n' > ${warmupDir}/vs/bench.vpy &&`,
         `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
-        `-c mkvmerge -e ${encoderArg === 'aom' ? 'aom' : 'svt-av1'}`,
+        `-c mkvmerge -e ${av1anEncoder}`,
         `--workers 1 --sc-downscale-height 540`,
         `--target-quality ${targetVmaf} --qp-range 10-50`,
         `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
         `--verbose`,
-        `-v "--cpu-used=8"`,
+        `-v "${warmupEncFlags}"`,
       ].join(' ');
 
       // Wait for scenes.json to appear, then kill
