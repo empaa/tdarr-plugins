@@ -117,7 +117,7 @@ const buildAbAv1SvtFlags = (lp, lookahead) => {
 // Lower presets have algorithmic dependencies that prevent parallelization.
 // See: https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/1843
 const SVT_LP_CAP_BY_PRESET = {
-  0: 4, 1: 4, 2: 4, 3: 4,
+  0: 4, 1: 4, 2: 6, 3: 6,
   4: 8, 5: 12, 6: 16,
   7: 32, 8: 32, 9: 32, 10: 32, 11: 32, 12: 32, 13: 32,
 };

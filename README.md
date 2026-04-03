@@ -68,7 +68,8 @@ SVT-AV1 has preset-dependent parallelization limits. Lower presets use algorithm
 
 | SVT-AV1 Preset | Effective max lp |
 |-----------------|-----------------|
-| 0-3 | ~4 threads |
+| 0-1 | ~4 threads |
+| 2-3 | ~6 threads |
 | 4 | ~8 threads |
 | 5 | ~12 threads |
 | 6 | ~16 threads |
