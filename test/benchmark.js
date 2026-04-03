@@ -9,6 +9,9 @@ const {
   THREAD_PRESETS, calculateThreadBudget,
   buildAomFlags, buildSvtFlags, buildAbAv1SvtFlags,
 } = require('../src/shared/encoderFlags');
+const {
+  buildVsDownscaleLines, buildAv1anVmafResArgs, buildAbAv1DownscaleArgs,
+} = require('../src/shared/downscale');
 
 // ---------------------------------------------------------------------------
 // Config
@@ -28,13 +31,14 @@ if (cliArgs.includes('--help') || cliArgs.includes('-h')) {
   console.log(`Usage: npm run benchmark -- [options]
 
 Options:
-  --encoder <name>    Encoder to benchmark: aom (default), svt-av1, or ab-av1
-  --cpu-used <N>      Encoder preset/cpu-used value (default: 3)
-  --vmaf <N>          Target VMAF score (default: 93)
-  --preset <name>     Test a single preset: safe, balanced, aggressive, or max
-  --grid              Test a custom worker×thread grid instead of presets
-  --sample <name>     Filter sample files by name substring
-  --help, -h          Show this help
+  --encoder <name>      Encoder to benchmark: aom (default), svt-av1, or ab-av1
+  --cpu-used <N>        Encoder preset/cpu-used value (default: 3)
+  --vmaf <N>            Target VMAF score (default: 93)
+  --downscale <res>     Downscale before encoding: 720p, 1080p, or 1440p (off by default)
+  --preset <name>       Test a single preset: safe, balanced, aggressive, or max
+  --grid                Test a custom worker×thread grid instead of presets
+  --sample <name>       Filter sample files by name substring
+  --help, -h            Show this help
 
 Environment:
   TDARR_CONTAINER     Docker container name (default: tdarr-node)
@@ -46,6 +50,7 @@ Examples:
   npm run benchmark -- --encoder ab-av1 --cpu-used 3   # ab-av1 (single-process)
   npm run benchmark -- --preset aggressive             # test one preset only
   npm run benchmark -- --grid --encoder aom            # custom worker×thread grid
+  npm run benchmark -- --downscale 720p                 # benchmark with downscale pre-filter
   npm run benchmark -- --sample jurassic               # only use matching samples
 
 Encoder flags match the plugin defaults (buildAomFlags/buildSvtFlags from encoderFlags.js).
@@ -73,6 +78,10 @@ const cpuUsed = (() => {
 const targetVmaf = (() => {
   const idx = cliArgs.indexOf('--vmaf');
   return idx !== -1 && cliArgs[idx + 1] ? cliArgs[idx + 1] : '93';
+})();
+const downscaleRes = (() => {
+  const idx = cliArgs.indexOf('--downscale');
+  return idx !== -1 && cliArgs[idx + 1] ? cliArgs[idx + 1] : null;
 })();
 
 // ---------------------------------------------------------------------------
@@ -179,11 +188,18 @@ async function benchAv1an(samplePath, config) {
   const containerSample = `/samples/${path.basename(samplePath)}`;
   const tempDir = `${BENCH_TEMP}/${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
-  const vpyLines = [
+  const vpyParts = [
     'import vapoursynth as vs',
     'core = vs.core',
-    `core.lsmas.LWLibavSource(source=\\"${containerSample}\\").set_output()`,
-  ].join('\\n');
+    `src = core.lsmas.LWLibavSource(source=\\"${containerSample}\\")`,
+  ];
+  if (downscaleRes) {
+    for (const line of buildVsDownscaleLines(downscaleRes)) {
+      vpyParts.push(line);
+    }
+  }
+  vpyParts.push('src.set_output()');
+  const vpyLines = vpyParts.join('\\n');
 
   const encFlags = encoderArg === 'aom'
     ? buildAomFlags(Number(cpuUsed), config.tpw, '')
@@ -191,7 +207,7 @@ async function benchAv1an(samplePath, config) {
 
   const av1anEncoder = encoderArg === 'aom' ? 'aom' : 'svt-av1';
 
-  const cmd = [
+  const av1anCmdParts = [
     `mkdir -p ${tempDir} &&`,
     `printf '${vpyLines}\\n' > ${tempDir}/bench.vpy &&`,
     `av1an -i ${tempDir}/bench.vpy -o ${tempDir}/out.mkv --temp ${tempDir}/work`,
@@ -201,8 +217,13 @@ async function benchAv1an(samplePath, config) {
     `--sc-downscale-height 540 --chunk-order long-to-short`,
     `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
     `--verbose --resume`,
-    `-v "${encFlags}"`,
-  ].join(' ');
+  ];
+  if (downscaleRes) {
+    const vmafResArgs = buildAv1anVmafResArgs(downscaleRes);
+    if (vmafResArgs.length) av1anCmdParts.push(vmafResArgs.join(' '));
+  }
+  av1anCmdParts.push(`-v "${encFlags}"`);
+  const cmd = av1anCmdParts.join(' ');
 
   const stats = startDockerStats();
   const startMs = Date.now();
@@ -238,16 +259,20 @@ async function benchAbAv1(samplePath, config) {
   const tempDir = `${BENCH_TEMP}/ab-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
   const svtFlags = buildAbAv1SvtFlags(config.svtLp, 24);
-  const cmd = [
+  const abCmdParts = [
     `mkdir -p ${tempDir} &&`,
     `ab-av1 auto-encode`,
     `-i ${containerSample} -o ${tempDir}/out.mkv`,
     `--encoder libsvtav1 --preset ${cpuUsed}`,
     `--min-vmaf ${targetVmaf} --min-crf 10 --max-crf 50`,
     `--vmaf "n_threads=${config.vmafThreads || 4}:model=path=/usr/local/share/vmaf/vmaf_v0.6.1.json"`,
-    svtFlags,
-    `--verbose`,
-  ].join(' ');
+  ];
+  if (downscaleRes) {
+    const dsArgs = buildAbAv1DownscaleArgs(downscaleRes);
+    if (dsArgs.length) abCmdParts.push(dsArgs.join(' '));
+  }
+  abCmdParts.push(svtFlags, `--verbose`);
+  const cmd = abCmdParts.join(' ');
 
   const stats = startDockerStats();
   const startMs = Date.now();
