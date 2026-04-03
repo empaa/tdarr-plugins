@@ -235,10 +235,16 @@ async function benchAv1an(samplePath, config) {
   const cpuSamples = [];
   const memSamples = [];
 
-  // Measure actual bytes on disk (encode dir has in-progress + completed chunks)
-  const encodeDir = `${workDir}/encode`;
-  const readBytesScript = `du -sb ${encodeDir} 2>/dev/null | cut -f1 || echo 0`;
-  const readChunksScript = `ls ${encodeDir}/*.ivf 2>/dev/null | wc -l || echo 0`;
+  // Measure total bytes in work dir (captures all encoder output regardless of format/structure)
+  const readBytesScript = `du -sb ${tempDir} 2>/dev/null | cut -f1 || echo 0`;
+  const readChunksScript = `find ${workDir} -name 'done.json' -exec python3 -c "import json,sys; print(len(json.load(open(sys.argv[1])).get('done',{})))" {} \\; 2>/dev/null || echo 0`;
+
+  // Capture baseline dir size before encoding starts (scenes.json, vpy, etc)
+  let baselineBytes = 0;
+  try {
+    const bl = await dockerExec(readBytesScript, { timeout: 5000 });
+    baselineBytes = parseInt(bl.stdout.trim(), 10) || 0;
+  } catch (_) {}
 
   // Progress + stats monitor, kills encode when duration reached
   let timedOut = false;
@@ -259,11 +265,10 @@ async function benchAv1an(samplePath, config) {
         }
       }
 
-      // Read actual encoded bytes on disk
+      // Read actual bytes on disk minus baseline
       const bytesCheck = await dockerExec(readBytesScript, { timeout: 5000 });
-      const encBytes = parseInt(bytesCheck.stdout.trim(), 10) || 0;
-      const chunksCheck = await dockerExec(readChunksScript, { timeout: 5000 });
-      const doneChunks = parseInt(chunksCheck.stdout.trim(), 10) || 0;
+      const totalBytes = parseInt(bytesCheck.stdout.trim(), 10) || 0;
+      const encBytes = Math.max(0, totalBytes - baselineBytes);
       const encMiB = (encBytes / (1024 * 1024)).toFixed(1);
 
       const elapsedSec = (Date.now() - startMs) / 1000;
@@ -293,12 +298,13 @@ async function benchAv1an(samplePath, config) {
     ? cpuSamples.reduce((s, v) => s + v, 0) / cpuSamples.length : 0;
   const peakMem = memSamples.length > 0 ? Math.max(...memSamples) : 0;
 
-  // Read final encoded bytes from disk
+  // Read final encoded bytes from disk (minus baseline)
   let encBytes = 0;
   let doneChunks = 0;
   try {
     const bytesResult = await dockerExec(readBytesScript, { timeout: 8000 });
-    encBytes = parseInt(bytesResult.stdout.trim(), 10) || 0;
+    const totalBytes = parseInt(bytesResult.stdout.trim(), 10) || 0;
+    encBytes = Math.max(0, totalBytes - baselineBytes);
     const chunksResult = await dockerExec(readChunksScript, { timeout: 8000 });
     doneChunks = parseInt(chunksResult.stdout.trim(), 10) || 0;
   } catch (_) {}
@@ -348,8 +354,8 @@ async function benchAbAv1(samplePath, config) {
   const memSamples = [];
   let timedOut = false;
 
-  // Read output file size inside container
-  const readSizeScript = `stat -c %s ${tempDir}/out.mkv 2>/dev/null || echo 0`;
+  // Read total bytes written by ab-av1 (output file + any temp files)
+  const readSizeScript = `du -sb ${tempDir} 2>/dev/null | cut -f1 || echo 0`;
 
   const statsInterval = setInterval(async () => {
     try {
