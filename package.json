@@ -8,7 +8,8 @@
     "deploy": "./build.sh --deploy",
     "test": "node test/run.js",
     "test:smoke": "node test/run.js --smoke",
-    "test:e2e": "node test/run.js --e2e"
+    "test:e2e": "node test/run.js --e2e",
+    "benchmark": "node test/benchmark.js"
   },
   "devDependencies": {
     "esbuild": "^0.25"
