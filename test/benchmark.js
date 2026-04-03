@@ -35,6 +35,7 @@ Options:
   --cpu-used <N>        Encoder preset/cpu-used value (default: 3)
   --vmaf <N>            Target VMAF score (default: 93)
   --downscale <res>     Downscale before encoding: 720p, 1080p, or 1440p (off by default)
+  --chunks <N>          Stop av1an after N chunks complete (default: 5, 0=full encode)
   --preset <name>       Test a single preset: safe, balanced, aggressive, or max
   --grid                Test a custom worker×thread grid instead of presets
   --sample <name>       Filter sample files by name substring
@@ -82,6 +83,10 @@ const targetVmaf = (() => {
 const downscaleRes = (() => {
   const idx = cliArgs.indexOf('--downscale');
   return idx !== -1 && cliArgs[idx + 1] ? cliArgs[idx + 1] : null;
+})();
+const chunkLimit = (() => {
+  const idx = cliArgs.indexOf('--chunks');
+  return idx !== -1 && cliArgs[idx + 1] ? Number(cliArgs[idx + 1]) : 5;
 })();
 
 // ---------------------------------------------------------------------------
@@ -287,8 +292,33 @@ async function benchAv1an(samplePath, config) {
   const stats = startDockerStats(startMs);
   activeStats = stats;
 
+  // Monitor done.json and kill av1an after chunkLimit chunks
+  let chunkMonitor = null;
+  let stoppedByLimit = false;
+  const doneJsonPath = `${tempDir}/work/done.json`;
+
+  if (chunkLimit > 0) {
+    chunkMonitor = setInterval(async () => {
+      try {
+        const check = await dockerExec(
+          `cat ${doneJsonPath} 2>/dev/null | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0`,
+          { timeout: 5000 },
+        );
+        const done = parseInt(check.stdout.trim(), 10) || 0;
+        if (done >= chunkLimit) {
+          stoppedByLimit = true;
+          process.stdout.write(`    Chunk limit reached (${done}/${chunkLimit}) — stopping encode\n`);
+          spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
+            'pkill -f "av1an|aomenc|SvtAv1EncApp" 2>/dev/null; true',
+          ]);
+        }
+      } catch (_) {}
+    }, 5000);
+  }
+
   const result = await dockerExec(cmd, { timeout: 1800000, live: true });
 
+  if (chunkMonitor) clearInterval(chunkMonitor);
   const elapsed = Date.now() - startMs;
   const { avgCpu, peakMem } = stats.stop();
   activeStats = null;
@@ -309,8 +339,8 @@ async function benchAv1an(samplePath, config) {
     avgCpu: avgCpu.toFixed(0),
     peakMem: peakMem.toFixed(1),
     time: formatMs(elapsed),
-    exitCode: result.code,
-    oom: peakMem > 0 && result.code !== 0 && peakMem > 50,
+    exitCode: stoppedByLimit ? 0 : result.code,
+    oom: peakMem > 0 && result.code !== 0 && !stoppedByLimit && peakMem > 50,
   };
 }
 
