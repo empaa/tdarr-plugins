@@ -92,7 +92,7 @@ Returns: `{ workers, threadsPerWorker, svtLp, vmafThreads, strategy }`
 
 `test/benchmark.js`, invoked via `npm run benchmark`.
 
-Runs locally — no Tdarr instance needed. Calls av1an/ab-av1 directly via `processManager.js`.
+Requires a running Tdarr instance (same as e2e tests). The benchmark reuses the e2e test infrastructure (`test/lib/tdarrApi.js`) to create flows with different `thread_strategy` inputs, scan sample files, and poll job completion. All encoding happens inside the Tdarr container where av1an, ab-av1, and ffmpeg are installed.
 
 ### Sample Files
 
@@ -130,14 +130,14 @@ Grid auto-generates combinations based on available threads, filtering out combo
 ### Output
 
 ```
-┌─────────────┬─────────┬────────┬──────┬────────┬─────────┐
-│ Config      │ Workers │ Threads│ FPS  │ CPU %  │ Time    │
-├─────────────┼─────────┼────────┼──────┼────────┼─────────┤
-│ safe        │ 8       │ 4      │ 2.1  │ 42%    │ 4m 12s  │
-│ balanced    │ 12      │ 2      │ 3.8  │ 71%    │ 2m 21s  │
-│ aggressive  │ 16      │ 2      │ 4.9  │ 88%    │ 1m 49s  │
-│ max         │ 20      │ 1      │ 5.2  │ 96%    │ 1m 42s  │
-└─────────────┴─────────┴────────┴──────┴────────┴─────────┘
+┌─────────────┬─────────┬────────┬──────┬────────┬─────────┬──────────┐
+│ Config      │ Workers │ Threads│ FPS  │ CPU %  │ Time    │ Peak RAM │
+├─────────────┼─────────┼────────┼──────┼────────┼─────────┼──────────┤
+│ safe        │ 8       │ 4      │ 2.1  │ 42%    │ 4m 12s  │  6.1 GiB │
+│ balanced    │ 12      │ 2      │ 3.8  │ 71%    │ 2m 21s  │  8.4 GiB │
+│ aggressive  │ 16      │ 2      │ 4.9  │ 88%    │ 1m 49s  │ 11.2 GiB │
+│ max         │ 20      │ 1      │ 5.2  │ 96%    │ 1m 42s  │ 14.2 GiB │
+└─────────────┴─────────┴────────┴──────┴────────┴─────────┴──────────┘
 
 Recommended: aggressive
 Paste into plugin: {"workers": 16, "threadsPerWorker": 2, "vmafThreads": 12}
@@ -145,10 +145,12 @@ Paste into plugin: {"workers": 16, "threadsPerWorker": 2, "vmafThreads": 12}
 
 ### Metrics Collection
 
-- **CPU%**: periodic `os.cpus()` sampling every 1s during encode
-- **Memory**: `process.memoryUsage()` + child process RSS
-- **FPS**: reuse `progressTracker.js` helpers from av1an tracker
-- **Wall-clock**: simple timer
+- **Wall-clock**: time from job start to completion via Tdarr API polling
+- **FPS**: extracted from Tdarr job progress updates during polling
+- **CPU% and Memory**: `docker stats` sampled in parallel during encode, capturing container-level CPU and memory usage from the host side. Detects OOM risk — if memory peaks near container limit, the config is flagged as unsafe.
+- Container name/ID configurable via `TDARR_CONTAINER` env var (defaults to auto-detection)
+
+**OOM detection:** If a benchmark run is killed by the OOM killer (job fails + memory was near limit), the result row shows `OOM` instead of metrics and the config is excluded from recommendations.
 
 ---
 
