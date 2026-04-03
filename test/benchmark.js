@@ -235,19 +235,10 @@ async function benchAv1an(samplePath, config) {
   const cpuSamples = [];
   const memSamples = [];
 
-  // Script to read total encoded bytes and chunks from done.json
-  const readDoneScript = `python3 -c "
-import json, os, sys
-done_f = os.path.join('${workDir}', 'done.json')
-if not os.path.exists(done_f): print('0|0'); sys.exit(0)
-try:
-    done = json.load(open(done_f))
-    done_map = done.get('done', {})
-    enc_bytes = sum(e.get('size_bytes', 0) for e in done_map.values())
-    done_chunks = len(done_map)
-    print(f'{done_chunks}|{enc_bytes}')
-except: print('0|0')
-" 2>/dev/null || echo 0|0`;
+  // Measure actual bytes on disk (encode dir has in-progress + completed chunks)
+  const encodeDir = `${workDir}/encode`;
+  const readBytesScript = `du -sb ${encodeDir} 2>/dev/null | cut -f1 || echo 0`;
+  const readChunksScript = `ls ${encodeDir}/*.ivf 2>/dev/null | wc -l || echo 0`;
 
   // Progress + stats monitor, kills encode when duration reached
   let timedOut = false;
@@ -268,9 +259,11 @@ except: print('0|0')
         }
       }
 
-      // Read current progress
-      const check = await dockerExec(readDoneScript, { timeout: 5000 });
-      const [doneChunks, encBytes] = check.stdout.trim().split('|').map((v) => parseInt(v, 10) || 0);
+      // Read actual encoded bytes on disk
+      const bytesCheck = await dockerExec(readBytesScript, { timeout: 5000 });
+      const encBytes = parseInt(bytesCheck.stdout.trim(), 10) || 0;
+      const chunksCheck = await dockerExec(readChunksScript, { timeout: 5000 });
+      const doneChunks = parseInt(chunksCheck.stdout.trim(), 10) || 0;
       const encMiB = (encBytes / (1024 * 1024)).toFixed(1);
 
       const elapsedSec = (Date.now() - startMs) / 1000;
@@ -300,14 +293,14 @@ except: print('0|0')
     ? cpuSamples.reduce((s, v) => s + v, 0) / cpuSamples.length : 0;
   const peakMem = memSamples.length > 0 ? Math.max(...memSamples) : 0;
 
-  // Read final encoded bytes
+  // Read final encoded bytes from disk
   let encBytes = 0;
   let doneChunks = 0;
   try {
-    const final = await dockerExec(readDoneScript, { timeout: 8000 });
-    const parts = final.stdout.trim().split('|').map((v) => parseInt(v, 10) || 0);
-    doneChunks = parts[0];
-    encBytes = parts[1];
+    const bytesResult = await dockerExec(readBytesScript, { timeout: 8000 });
+    encBytes = parseInt(bytesResult.stdout.trim(), 10) || 0;
+    const chunksResult = await dockerExec(readChunksScript, { timeout: 8000 });
+    doneChunks = parseInt(chunksResult.stdout.trim(), 10) || 0;
   } catch (_) {}
 
   const encodeTimeSec = encodeTimeMs / 1000;
