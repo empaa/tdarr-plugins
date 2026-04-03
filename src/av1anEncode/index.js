@@ -103,7 +103,7 @@ const plugin = async (args) => {
   const { createProcessManager } = require('../shared/processManager');
   const { createLogger, humanSize } = require('../shared/logger');
   const { detectHdrMeta, buildAomFlags, buildSvtFlags, calculateThreadBudget } = require('../shared/encoderFlags');
-  const { buildVsDownscaleLines, buildAv1anVmafResArgs } = require('../shared/downscale');
+  const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
 
@@ -155,7 +155,13 @@ const plugin = async (args) => {
   const inputPath = file._id;
   const stream = (file.ffProbeData && file.ffProbeData.streams && file.ffProbeData.streams[0]) || {};
   const height = stream.height || 0;
+  const sourceWidth = stream.width || 0;
   const availableThreads = os.cpus().length;
+
+  const doDownscale = downscaleEnabled && shouldDownscale(sourceWidth, downscaleRes);
+  if (downscaleEnabled && !doDownscale) {
+    jobLog(`Downscale skipped: source ${sourceWidth}px is already at or below ${downscaleRes} target`);
+  }
 
   const { hdrAom, hdrSvt } = detectHdrMeta(stream);
 
@@ -179,7 +185,7 @@ const plugin = async (args) => {
   jobLog('='.repeat(64));
   jobLog(`AV1AN ENCODE  encoder=${encoder}  preset=${encPreset}`);
   jobLog(`  input      : ${inputPath}`);
-  jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${downscaleEnabled ? ` -> ${downscaleRes}` : ''}`);
+  jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${doDownscale ? ` -> ${downscaleRes}` : ''}`);
   jobLog(`  target     : VMAF ${targetVmaf}  QP-range ${qpRange}`);
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
   jobLog(`  threads    : cpu=${availableThreads}  workers=${maxWorkers}  threads/worker=${threadsPerWorker}  vmaf-threads=${vmafThreads}  strategy=${threadStrategy}`);
@@ -203,12 +209,12 @@ const plugin = async (args) => {
     'core = vs.core',
     `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
   ];
-  if (downscaleEnabled) {
+  if (doDownscale) {
     vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
   }
   vpyLines.push('src.set_output()');
   fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
-  dbg(`[vs] .vpy written${downscaleEnabled ? ` (Lanczos3 -> ${downscaleRes})` : ' (passthrough)'}`);
+  dbg(`[vs] .vpy written${doDownscale ? ` (Lanczos3 -> ${downscaleRes})` : ' (passthrough)'}`);
 
   if (!fs.existsSync(lwiCache)) {
     updateWorker({ status: 'Indexing' });
@@ -239,7 +245,7 @@ const plugin = async (args) => {
     '--verbose',
   ];
 
-  if (downscaleEnabled) {
+  if (doDownscale) {
     av1anArgs.push(...buildAv1anVmafResArgs(downscaleRes));
   }
 

@@ -7,6 +7,12 @@ const RESOLUTION_PRESETS = {
   '1440p': { width: 2560, height: 1440 },
 };
 
+const shouldDownscale = (sourceWidth, resolution) => {
+  const preset = RESOLUTION_PRESETS[resolution];
+  if (!preset) return false;
+  return sourceWidth > preset.width;
+};
+
 const buildVsDownscaleLines = (resolution) => {
   const preset = RESOLUTION_PRESETS[resolution];
   if (!preset) return [];
@@ -35,6 +41,7 @@ const buildAbAv1DownscaleArgs = (resolution) => {
 
 module.exports = {
   RESOLUTION_PRESETS,
+  shouldDownscale,
   buildVsDownscaleLines,
   buildAv1anVmafResArgs,
   buildAbAv1DownscaleArgs,

@@ -103,7 +103,7 @@ const plugin = async (args) => {
   const { createProcessManager } = require('../shared/processManager');
   const { createLogger, humanSize } = require('../shared/logger');
   const { detectHdrMeta, buildAbAv1SvtFlags, calculateThreadBudget } = require('../shared/encoderFlags');
-  const { buildAbAv1DownscaleArgs } = require('../shared/downscale');
+  const { shouldDownscale, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { createAbAv1Tracker } = require('../shared/progressTracker');
 
   const inputs = args.inputs || {};
@@ -146,7 +146,13 @@ const plugin = async (args) => {
   const inputPath = file._id;
   const stream = (file.ffProbeData && file.ffProbeData.streams && file.ffProbeData.streams[0]) || {};
   const height = stream.height || 0;
+  const sourceWidth = stream.width || 0;
   const availableThreads = os.cpus().length;
+
+  const doDownscale = downscaleEnabled && shouldDownscale(sourceWidth, downscaleRes);
+  if (downscaleEnabled && !doDownscale) {
+    jobLog(`Downscale skipped: source ${sourceWidth}px is already at or below ${downscaleRes} target`);
+  }
 
   detectHdrMeta(stream);
 
@@ -177,7 +183,7 @@ const plugin = async (args) => {
   jobLog('='.repeat(64));
   jobLog(`AB-AV1 ENCODE  preset=${encPreset}  vmaf=${targetVmaf}  crf=${minCrf}-${maxCrf}`);
   jobLog(`  input      : ${inputPath}`);
-  jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${downscaleEnabled ? ` -> ${downscaleRes}` : ''}`);
+  jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${doDownscale ? ` -> ${downscaleRes}` : ''}`);
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
   jobLog(`  threads    : cpu=${availableThreads}  lp=${svtLp}  strategy=${threadStrategy}`);
   jobLog(`  svt flags  : ${svtFlags}`);
@@ -198,7 +204,7 @@ const plugin = async (args) => {
     '--verbose',
   ];
 
-  if (downscaleEnabled) {
+  if (doDownscale) {
     abArgs.push(...buildAbAv1DownscaleArgs(downscaleRes));
   }
 
