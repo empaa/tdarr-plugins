@@ -563,7 +563,7 @@ async function main() {
         `printf '${vpyLines}\\n' > ${warmupDir}/vs/bench.vpy &&`,
         `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
         `-c mkvmerge -e ${encoderArg === 'aom' ? 'aom' : 'svt-av1'}`,
-        `--workers 1 --split-method ffmpeg --sc-downscale-height 540`,
+        `--workers 1 --sc-downscale-height 540`,
         `--target-quality ${targetVmaf} --qp-range 10-50`,
         `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
         `--verbose`,
