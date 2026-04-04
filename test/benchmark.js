@@ -304,6 +304,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
 
   clearInterval(progressMonitor);
   process.stdout.write('\n');
+  const chunkFps = await parseChunkFps(workDir);
   const encodeTimeMs = Date.now() - startMs;
 
   const avgCpu = cpuSamples.length > 0
@@ -338,6 +339,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
     oom: peakMem > 0 && result.code !== 0 && !timedOut && peakMem > 50,
     fps,
     totalFrames: realityMode ? totalFrames : null,
+    chunkFps,
   };
 }
 
@@ -448,18 +450,39 @@ function formatMs(ms) {
 }
 
 function printTable(results) {
-  const headers = ['Config', 'Workers', 'Threads', 'VMAF-T', 'MiB/min', 'Total MiB', 'CPU %', 'Peak RAM', 'Status'];
-  const rows = results.map((r) => [
-    r.label,
-    String(r.workers),
-    String(r.threads),
-    String(r.vmafThreads),
-    r.mibPerMin,
-    r.totalMiB,
-    `${r.avgCpu}%`,
-    `${r.peakMem} GiB`,
-    r.oom ? 'OOM' : r.exitCode === 0 ? 'OK' : `exit ${r.exitCode}`,
-  ]);
+  const hasReality = results.some((r) => r.fps != null);
+  const hasChunkFps = results.some((r) => r.chunkFps != null);
+
+  const headers = ['Config', 'Workers', 'Threads', 'VMAF-T'];
+  if (hasReality) headers.push('FPS', 'Frames');
+  if (hasChunkFps) headers.push('Chunk FPS (min/med/max)');
+  headers.push('MiB/min', 'Total MiB', 'CPU %', 'Peak RAM', 'Time', 'Status');
+
+  const rows = results.map((r) => {
+    const row = [
+      r.label,
+      String(r.workers),
+      String(r.threads),
+      String(r.vmafThreads),
+    ];
+    if (hasReality) {
+      row.push(r.fps || '-', r.totalFrames != null ? String(r.totalFrames) : '-');
+    }
+    if (hasChunkFps) {
+      row.push(r.chunkFps
+        ? `${r.chunkFps.min.toFixed(1)} / ${r.chunkFps.median.toFixed(1)} / ${r.chunkFps.max.toFixed(1)}`
+        : '-');
+    }
+    row.push(
+      r.mibPerMin,
+      r.totalMiB,
+      `${r.avgCpu}%`,
+      `${r.peakMem} GiB`,
+      r.time,
+      r.oom ? 'OOM' : r.exitCode === 0 ? 'OK' : `exit ${r.exitCode}`,
+    );
+    return row;
+  });
 
   const widths = headers.map((h, i) =>
     Math.max(h.length, ...rows.map((r) => r[i].length))
@@ -490,6 +513,15 @@ function printTable(results) {
     } else {
       console.log(`Set Thread Strategy to "custom" and paste into Thread Overrides:`);
       console.log(`{"threadsPerWorker":${best.threads}}`);
+    }
+  }
+
+  if (hasReality) {
+    const bestFps = results
+      .filter((r) => !r.oom && r.exitCode === 0 && r.fps != null)
+      .sort((a, b) => parseFloat(b.fps) - parseFloat(a.fps))[0];
+    if (bestFps) {
+      console.log(`\nFastest (reality): ${bestFps.label} at ${bestFps.fps} fps`);
     }
   }
 }
@@ -550,6 +582,44 @@ async function probeFrameCount(containerPath) {
   const result = await dockerExec(cmd, { timeout: 60000 });
   const frames = parseInt(result.stdout.trim(), 10);
   return isNaN(frames) ? 0 : frames;
+}
+
+async function parseChunkFps(workDir) {
+  const logDir = `${workDir}/log`;
+  const lsResult = await dockerExec(`ls ${logDir}/ 2>/dev/null`, { timeout: 5000 });
+  if (lsResult.code !== 0) return null;
+
+  const logFiles = lsResult.stdout.trim().split('\n').filter((f) => f.startsWith('av1an.log'));
+  if (logFiles.length === 0) return null;
+
+  const allFps = [];
+  for (const lf of logFiles) {
+    const catResult = await dockerExec(`cat ${logDir}/${lf}`, { timeout: 10000 });
+    if (catResult.code !== 0) continue;
+
+    const lines = catResult.stdout.split('\n');
+    for (const line of lines) {
+      if (/finished/i.test(line)) {
+        const m = line.match(/(\d+(?:\.\d+)?)\s*fps/i);
+        if (m) allFps.push(parseFloat(m[1]));
+      }
+    }
+  }
+
+  if (allFps.length === 0) return null;
+
+  const sorted = [...allFps].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+
+  return {
+    min: sorted[0],
+    median,
+    max: sorted[sorted.length - 1],
+    count: sorted.length,
+  };
 }
 
 // ---------------------------------------------------------------------------
