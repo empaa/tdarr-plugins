@@ -234,17 +234,24 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   const av1anEncoder = encoderArg === 'aom' ? 'aom' : 'svt-av1';
 
   // Reuse warmup's work dir (has cached scenes) — clean encode output between runs
+  // av1an requires scenes.json + done.json with {"frames": N, "done": {}} + --resume
+  // to skip scene detection. The frames count must match scenes.json.
   const av1anCmdParts = [
     `rm -rf ${warmupDir}/work ${warmupDir}/out.mkv 2>/dev/null;`,
     `mkdir -p ${warmupDir}/work &&`,
     `cp ${warmupDir}/scenes_backup.json ${warmupDir}/work/scenes.json &&`,
+    `python3 -c "
+import json
+s = json.load(open('${warmupDir}/work/scenes.json'))
+json.dump({'frames': s.get('frames', 0), 'done': {}}, open('${warmupDir}/work/done.json', 'w'))
+" &&`,
     `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
     `-c mkvmerge -e ${av1anEncoder}`,
     `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
     `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
     `--sc-downscale-height 540 --chunk-order long-to-short`,
     `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
-    `--verbose`,
+    `--verbose --resume`,
   ];
   if (downscaleRes) {
     const vmafResArgs = buildAv1anVmafResArgs(downscaleRes);
