@@ -145,7 +145,7 @@ function cleanup() {
   if (activeProc) activeProc.kill('SIGKILL');
   // Kill av1an, ab-av1, aomenc, SvtAv1EncApp, and ffmpeg inside the container
   spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
-    'pkill -9 -f "av1an|ab-av1|aomenc|SvtAv1EncApp|ffmpeg" 2>/dev/null; true',
+    'pkill -9 -f "av1an|ab-av1|aomenc|SvtAv1EncApp|ffmpeg|vspipe" 2>/dev/null; true',
   ]);
   spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
     `rm -rf ${BENCH_TEMP} 2>/dev/null; true`,
@@ -859,9 +859,9 @@ async function main() {
 
       // Kill any lingering encode processes and clean up between configs
       spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
-        'pkill -9 -f "av1an|aomenc|SvtAv1EncApp|mkvmerge" 2>/dev/null; true',
+        'pkill -9 -f "av1an|aomenc|SvtAv1EncApp|mkvmerge|ffmpeg|vspipe" 2>/dev/null; true',
       ]);
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 5000));
       await dockerExec(`rm -rf ${BENCH_TEMP}/*/work/done.json ${BENCH_TEMP}/*/work/encode/ ${BENCH_TEMP}/*/out.mkv ${BENCH_TEMP}/ab-*/out.mkv 2>/dev/null; true`);
 
       const result = isAbAv1
