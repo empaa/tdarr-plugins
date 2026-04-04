@@ -630,7 +630,11 @@ async function main() {
   console.log(`System: ${threads} threads`);
   console.log(`Container: ${CONTAINER}`);
   console.log(`Encoder: ${encoderArg}, cpu-used/preset: ${cpuUsed}, target-vmaf: ${targetVmaf}`)
-  console.log(`Test duration: ${testDuration}s per config`);
+  if (realitySeconds) {
+    console.log(`Mode: reality (${realitySeconds}s trimmed from middle, encode to completion)`);
+  } else {
+    console.log(`Mode: duration (${testDuration}s per config, kill after limit)`);
+  }
   console.log('');
 
   // Verify container is running
@@ -812,7 +816,8 @@ async function main() {
       const detail = isAbAv1
         ? `lp=${config.svtLp}`
         : `workers=${config.workers} threads=${config.tpw} vmaf=${config.vmafThreads}`;
-      console.log(`\nRunning: ${config.label} (${detail}) for ${testDuration}s...`);
+      const modeStr = realitySeconds ? `reality ${realitySeconds}s` : `${testDuration}s`;
+      console.log(`\nRunning: ${config.label} (${detail}) — ${modeStr}...`);
 
       // Clean encode output but keep cached scenes/warmup
       await dockerExec(`rm -rf ${BENCH_TEMP}/*/work/done.json ${BENCH_TEMP}/*/work/encode/ ${BENCH_TEMP}/*/out.mkv ${BENCH_TEMP}/ab-*/out.mkv 2>/dev/null; true`);
@@ -826,7 +831,11 @@ async function main() {
           });
 
       results.push(result);
-      console.log(`  -> ${result.mibPerMin} MiB/min (${result.totalMiB} MiB total), ${result.avgCpu}% CPU, ${result.peakMem} GiB RAM${result.oom ? ' [OOM]' : ''}`);
+      const fpsStr = result.fps ? `, ${result.fps} fps` : '';
+      const chunkStr = result.chunkFps
+        ? `, chunks: ${result.chunkFps.min.toFixed(1)}/${result.chunkFps.median.toFixed(1)}/${result.chunkFps.max.toFixed(1)} fps`
+        : '';
+      console.log(`  -> ${result.mibPerMin} MiB/min (${result.totalMiB} MiB)${fpsStr}${chunkStr}, ${result.avgCpu}% CPU, ${result.peakMem} GiB RAM${result.oom ? ' [OOM]' : ''}`);
     }
 
     console.log('');
