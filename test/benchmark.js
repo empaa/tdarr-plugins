@@ -312,6 +312,12 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
 
   clearInterval(progressMonitor);
   process.stdout.write('\n');
+
+  if (result.code !== 0 && !timedOut) {
+    const errTail = (result.stderr || result.stdout || '').trim().slice(-500);
+    if (errTail) console.error(`    Encode failed (exit ${result.code}):\n    ${errTail.split('\n').join('\n    ')}`);
+  }
+
   const chunkFps = await parseChunkFps(workDir);
   const encodeTimeMs = Date.now() - startMs;
 
@@ -319,11 +325,17 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
     ? cpuSamples.reduce((s, v) => s + v, 0) / cpuSamples.length : 0;
   const peakMem = memSamples.length > 0 ? Math.max(...memSamples) : 0;
 
-  // Read final encoded bytes from disk (minus baseline)
+  // Read final encoded bytes — check output file first (av1an cleans chunks after muxing),
+  // fall back to encode dir for in-progress measurement
   let encBytes = 0;
   try {
-    const bytesResult = await dockerExec(readBytesScript, { timeout: 8000 });
-    encBytes = parseInt(bytesResult.stdout.trim(), 10) || 0;
+    const outFileScript = `stat -c%s ${warmupDir}/out.mkv 2>/dev/null || echo 0`;
+    const outResult = await dockerExec(outFileScript, { timeout: 8000 });
+    encBytes = parseInt(outResult.stdout.trim(), 10) || 0;
+    if (encBytes === 0) {
+      const bytesResult = await dockerExec(readBytesScript, { timeout: 8000 });
+      encBytes = parseInt(bytesResult.stdout.trim(), 10) || 0;
+    }
   } catch (_) {}
 
   const encodeTimeSec = encodeTimeMs / 1000;
