@@ -240,11 +240,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
     `rm -rf ${warmupDir}/work ${warmupDir}/out.mkv 2>/dev/null;`,
     `mkdir -p ${warmupDir}/work &&`,
     `cp ${warmupDir}/scenes_backup.json ${warmupDir}/work/scenes.json &&`,
-    `python3 -c "
-import json
-s = json.load(open('${warmupDir}/work/scenes.json'))
-json.dump({'frames': s.get('frames', 0), 'done': {}}, open('${warmupDir}/work/done.json', 'w'))
-" &&`,
+    `echo '{"frames":0,"done":{},"audio_done":false}' > ${warmupDir}/work/done.json &&`,
     `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
     `-c mkvmerge -e ${av1anEncoder}`,
     `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
