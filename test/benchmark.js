@@ -237,15 +237,14 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   const av1anCmdParts = [
     `rm -rf ${warmupDir}/work ${warmupDir}/out.mkv 2>/dev/null;`,
     `mkdir -p ${warmupDir}/work &&`,
-    `cp ${warmupDir}/scenes_backup.json ${warmupDir}/work/scenes.json 2>/dev/null; true;`,
-    `echo '{"frames":0,"done":{},"audio_done":false}' > ${warmupDir}/work/done.json &&`,
+    `cp ${warmupDir}/scenes_backup.json ${warmupDir}/work/scenes.json 2>/dev/null; true &&`,
     `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
     `-c mkvmerge -e ${av1anEncoder}`,
     `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
     `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
     `--sc-downscale-height 540 --chunk-order long-to-short`,
     `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
-    `--verbose --resume`,
+    `--verbose`,
   ];
   if (downscaleRes) {
     const vmafResArgs = buildAv1anVmafResArgs(downscaleRes);
