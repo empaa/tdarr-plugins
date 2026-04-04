@@ -128,10 +128,10 @@ const capSvtLpByPreset = (lp, encPreset) => {
 };
 
 const THREAD_PRESETS = {
-  safe:        { aomTpwRatio: 4,  aomTpwMin: 4, svtWorkerFill: 0.5,  svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
-  balanced:    { aomTpwRatio: 10, aomTpwMin: 1, svtWorkerFill: 0.9,  svtLpMax: 20, vmafThreadDiv: 2, halve4kHdr: false },
-  aggressive:  { aomTpwRatio: 16, aomTpwMin: 1, svtWorkerFill: 1.0,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
-  max:         { aomTpwRatio: 32, aomTpwMin: 1, svtWorkerFill: 1.0,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
+  safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 0.5,  svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
+  balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 0.9,  svtLpMax: 20, vmafThreadDiv: 2, halve4kHdr: false },
+  aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 1.0,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
+  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 1.5,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
 };
 
 const resolveThreadStrategy = (strategyName, overrides) => {
@@ -149,8 +149,8 @@ const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
   let threadsPerWorker, maxWorkers;
 
   if (encoder === 'aom') {
-    threadsPerWorker = Math.max(preset.aomTpwMin, Math.floor(availableThreads / preset.aomTpwRatio));
-    maxWorkers = Math.max(1, Math.floor(availableThreads / threadsPerWorker));
+    maxWorkers = Math.max(1, Math.floor(availableThreads / preset.aomWorkerDiv));
+    threadsPerWorker = Math.max(1, Math.floor(availableThreads * preset.aomOversub / maxWorkers));
   } else {
     // SVT-AV1: use capped lp, then fill workers by strategy aggressiveness
     let lp = Math.min(preset.svtLpMax, availableThreads);

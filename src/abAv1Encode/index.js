@@ -78,7 +78,7 @@ const details = () => ({
       type: 'string',
       defaultValue: 'safe',
       inputUI: { type: 'dropdown', options: ['safe', 'balanced', 'aggressive', 'max', 'custom'] },
-      tooltip: 'Controls SVT-AV1 thread parallelism (lp). safe=current defaults. balanced=~70% CPU. aggressive=~90% CPU. max=saturate all cores. custom=use thread_overrides JSON.',
+      tooltip: 'Controls SVT-AV1 thread parallelism (lp). safe=current defaults. balanced=~70% CPU. aggressive=saturate all cores. max=heavy oversubscription. custom=use thread_overrides JSON.',
     },
     {
       label: 'Thread Overrides (JSON)',
