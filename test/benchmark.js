@@ -482,6 +482,19 @@ function printTable(results) {
 }
 
 // ---------------------------------------------------------------------------
+// Legacy thread budget (replicates old plugin formula — oversubscribed)
+// ---------------------------------------------------------------------------
+function legacyThreadBudget(availableThreads) {
+  const budget = availableThreads * 2;
+  const maxWorkers = Math.max(1, Math.floor(availableThreads / 4));
+  const threadsPerWorker = Math.min(
+    availableThreads,
+    Math.max(4, Math.floor(budget / (maxWorkers / 2)))
+  );
+  return { maxWorkers, threadsPerWorker, svtLp: threadsPerWorker, vmafThreads: 8 };
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -534,11 +547,15 @@ async function main() {
     configs = generateGrid(threads);
     console.log(`\nGrid mode: ${configs.length} configurations to test\n`);
   } else {
-    const presets = presetFilter ? [presetFilter] : PRESETS;
+    const presets = presetFilter || PRESETS;
     configs = presets.map((name) => {
+      if (name === 'legacy') {
+        const b = legacyThreadBudget(threads);
+        return { workers: b.maxWorkers, tpw: b.threadsPerWorker, svtLp: b.svtLp, vmafThreads: b.vmafThreads, label: 'legacy' };
+      }
       const p = THREAD_PRESETS[name];
       if (!p) {
-        console.error(`ERROR: unknown preset "${name}". Available: ${PRESETS.join(', ')}`);
+        console.error(`ERROR: unknown preset "${name}". Available: ${PRESETS.join(', ')}, legacy`);
         process.exit(1);
       }
       const encoder = encoderArg === 'ab-av1' ? 'svt-av1' : encoderArg;
