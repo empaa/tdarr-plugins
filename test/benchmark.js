@@ -277,11 +277,16 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       const encMiB = (encBytes / (1024 * 1024)).toFixed(1);
 
       const elapsedSec = (Date.now() - startMs) / 1000;
-      const remaining = Math.max(0, testDuration - elapsedSec);
       const elapsed = formatMs(Date.now() - startMs);
-      const cpuStr = cpuSamples.length > 0 ? `  CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
-      const memStr = memSamples.length > 0 ? `  RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
-      process.stdout.write(`    [${elapsed}] ${encMiB} MiB encoded  ${formatMs(remaining * 1000)} left${cpuStr}${memStr}\n`);
+      const cpuStr = cpuSamples.length > 0 ? cpuSamples[cpuSamples.length - 1].toFixed(0) + '%' : '-';
+      const memStr = memSamples.length > 0 ? memSamples[memSamples.length - 1].toFixed(1) + ' GiB' : '-';
+
+      if (realityMode) {
+        process.stdout.write(`\r    [${elapsed}] workers: ${config.workers} | encoded: ${encMiB} MiB | cpu: ${cpuStr} | ram: ${memStr}    `);
+      } else {
+        const remaining = Math.max(0, testDuration - elapsedSec);
+        process.stdout.write(`\r    [${elapsed}] workers: ${config.workers} | encoded: ${encMiB} MiB | ${formatMs(remaining * 1000)} left | cpu: ${cpuStr} | ram: ${memStr}    `);
+      }
 
       // Time limit
       if (!realityMode && elapsedSec >= testDuration) {
@@ -295,9 +300,10 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   }, 10000);
 
   const execTimeout = realityMode ? 7200000 : (testDuration + 60) * 1000;
-  const result = await dockerExec(cmd, { timeout: execTimeout, live: !realityMode });
+  const result = await dockerExec(cmd, { timeout: execTimeout, live: false });
 
   clearInterval(progressMonitor);
+  process.stdout.write('\n');
   const encodeTimeMs = Date.now() - startMs;
 
   const avgCpu = cpuSamples.length > 0
@@ -382,11 +388,11 @@ async function benchAbAv1(samplePath, config, crf) {
       const encMiB = (encBytes / (1024 * 1024)).toFixed(1);
 
       const elapsedSec = (Date.now() - startMs) / 1000;
-      const remaining = Math.max(0, testDuration - elapsedSec);
       const elapsed = formatMs(Date.now() - startMs);
-      const cpuStr = cpuSamples.length > 0 ? `  CPU: ${cpuSamples[cpuSamples.length - 1].toFixed(0)}%` : '';
-      const memStr = memSamples.length > 0 ? `  RAM: ${memSamples[memSamples.length - 1].toFixed(1)} GiB` : '';
-      process.stdout.write(`    [${elapsed}] ${encMiB} MiB encoded  ${formatMs(remaining * 1000)} left${cpuStr}${memStr}\n`);
+      const cpuStr = cpuSamples.length > 0 ? cpuSamples[cpuSamples.length - 1].toFixed(0) + '%' : '-';
+      const memStr = memSamples.length > 0 ? memSamples[memSamples.length - 1].toFixed(1) + ' GiB' : '-';
+      const remaining = Math.max(0, testDuration - elapsedSec);
+      process.stdout.write(`\r    [${elapsed}] encoded: ${encMiB} MiB | ${formatMs(remaining * 1000)} left | cpu: ${cpuStr} | ram: ${memStr}    `);
 
       if (elapsedSec >= testDuration) {
         timedOut = true;
@@ -398,9 +404,10 @@ async function benchAbAv1(samplePath, config, crf) {
     } catch (_) {}
   }, 10000);
 
-  const result = await dockerExec(cmd, { timeout: (testDuration + 60) * 1000, live: true });
+  const result = await dockerExec(cmd, { timeout: (testDuration + 60) * 1000, live: false });
 
   clearInterval(statsInterval);
+  process.stdout.write('\n');
   const encodeTimeMs = Date.now() - startMs;
   const avgCpu = cpuSamples.length > 0
     ? cpuSamples.reduce((s, v) => s + v, 0) / cpuSamples.length : 0;
