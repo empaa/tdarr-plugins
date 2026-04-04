@@ -36,7 +36,8 @@ Options:
   --vmaf <N>            Target VMAF score (default: 93)
   --downscale <res>     Downscale before encoding: 720p, 1080p, or 1440p (off by default)
   --duration <sec>      How long to run each test in seconds (default: 120)
-  --preset <name>       Test a single preset: safe, balanced, aggressive, or max
+  --preset <name>       Preset(s) to test (repeatable): safe, balanced, aggressive, max, legacy
+  --reality <sec>       Trim sample to N seconds (from middle) and encode to completion
   --grid                Test a custom worker×thread grid instead of presets
   --sample <name>       Filter sample files by name substring
   --help, -h            Show this help
@@ -53,6 +54,7 @@ Examples:
   npm run benchmark -- --grid --encoder aom            # custom worker×thread grid
   npm run benchmark -- --downscale 720p                 # benchmark with downscale pre-filter
   npm run benchmark -- --sample jurassic               # only use matching samples
+  npm run benchmark -- --reality 30 --preset legacy --preset max --encoder aom
 
 Encoder flags match the plugin defaults (buildAomFlags/buildSvtFlags from encoderFlags.js).
 Sample files go in test/samples/ (.mkv, .mp4, .ts).`);
@@ -61,8 +63,11 @@ Sample files go in test/samples/ (.mkv, .mp4, .ts).`);
 
 const gridMode = cliArgs.includes('--grid');
 const presetFilter = (() => {
-  const idx = cliArgs.indexOf('--preset');
-  return idx !== -1 && cliArgs[idx + 1] ? cliArgs[idx + 1] : null;
+  const presets = [];
+  for (let i = 0; i < cliArgs.length; i++) {
+    if (cliArgs[i] === '--preset' && cliArgs[i + 1]) presets.push(cliArgs[++i]);
+  }
+  return presets.length > 0 ? presets : null;
 })();
 const sampleFilter = (() => {
   const idx = cliArgs.indexOf('--sample');
@@ -88,6 +93,16 @@ const testDuration = (() => {
   const idx = cliArgs.indexOf('--duration');
   return idx !== -1 && cliArgs[idx + 1] ? Number(cliArgs[idx + 1]) : 120;
 })();
+
+const realitySeconds = (() => {
+  const idx = cliArgs.indexOf('--reality');
+  return idx !== -1 && cliArgs[idx + 1] ? Number(cliArgs[idx + 1]) : null;
+})();
+
+if (realitySeconds != null && cliArgs.includes('--duration')) {
+  console.error('ERROR: --reality and --duration are mutually exclusive');
+  process.exit(1);
+}
 
 // ---------------------------------------------------------------------------
 // Grid generation
