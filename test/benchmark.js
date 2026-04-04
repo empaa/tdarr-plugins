@@ -20,7 +20,7 @@ const CONTAINER = process.env.TDARR_CONTAINER || 'tdarr-node';
 const SAMPLES_DIR = path.join(__dirname, 'samples');
 const BENCH_TEMP = '/tmp/bench';
 
-const PRESETS = ['safe', 'balanced', 'aggressive', 'max', 'insane'];
+const PRESETS = ['safe', 'balanced', 'aggressive', 'max'];
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -36,7 +36,7 @@ Options:
   --vmaf <N>            Target VMAF score (default: 93)
   --downscale <res>     Downscale before encoding: 720p, 1080p, or 1440p (off by default)
   --duration <sec>      How long to run each test in seconds (default: 120)
-  --preset <name>       Preset(s) to test (repeatable): safe, balanced, aggressive, max, insane, legacy
+  --preset <name>       Preset(s) to test (repeatable): safe, balanced, aggressive, max, legacy
   --reality <sec>       Trim sample to N seconds (from middle) and encode to completion
   --grid                Test a custom worker×thread grid instead of presets
   --sample <name>       Filter sample files by name substring
