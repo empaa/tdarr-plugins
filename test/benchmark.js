@@ -215,8 +215,8 @@ function parseMemGiB(str) {
 // ---------------------------------------------------------------------------
 // Benchmark runners
 // ---------------------------------------------------------------------------
-async function benchAv1an(samplePath, config) {
-  const containerSample = `/samples/${path.basename(samplePath)}`;
+async function benchAv1an(samplePath, config, { realityMode = false, activeSample = null, totalFrames = 0 } = {}) {
+  const containerSample = activeSample || `/samples/${path.basename(samplePath)}`;
   const warmupDir = `${BENCH_TEMP}/warmup`;
 
   const encFlags = encoderArg === 'aom'
@@ -284,7 +284,7 @@ async function benchAv1an(samplePath, config) {
       process.stdout.write(`    [${elapsed}] ${encMiB} MiB encoded  ${formatMs(remaining * 1000)} left${cpuStr}${memStr}\n`);
 
       // Time limit
-      if (elapsedSec >= testDuration) {
+      if (!realityMode && elapsedSec >= testDuration) {
         timedOut = true;
         process.stdout.write(`    Time limit reached (${testDuration}s) — stopping encode\n`);
         spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
@@ -294,7 +294,8 @@ async function benchAv1an(samplePath, config) {
     } catch (_) {}
   }, 10000);
 
-  const result = await dockerExec(cmd, { timeout: (testDuration + 60) * 1000, live: true });
+  const execTimeout = realityMode ? 7200000 : (testDuration + 60) * 1000;
+  const result = await dockerExec(cmd, { timeout: execTimeout, live: !realityMode });
 
   clearInterval(progressMonitor);
   const encodeTimeMs = Date.now() - startMs;
@@ -314,6 +315,9 @@ async function benchAv1an(samplePath, config) {
   const mibPerMin = encBytes > 0 && encodeTimeSec > 0
     ? (encBytes / (1024 * 1024)) / (encodeTimeSec / 60) : 0;
 
+  const fps = realityMode && totalFrames > 0 && encodeTimeSec > 0
+    ? (totalFrames / encodeTimeSec).toFixed(1) : null;
+
   return {
     label: config.label,
     workers: config.workers,
@@ -326,6 +330,8 @@ async function benchAv1an(samplePath, config) {
     time: formatMs(encodeTimeMs),
     exitCode: timedOut ? 0 : result.code,
     oom: peakMem > 0 && result.code !== 0 && !timedOut && peakMem > 50,
+    fps,
+    totalFrames: realityMode ? totalFrames : null,
   };
 }
 
@@ -495,6 +501,51 @@ function legacyThreadBudget(availableThreads) {
 }
 
 // ---------------------------------------------------------------------------
+// Reality mode helpers
+// ---------------------------------------------------------------------------
+async function trimSampleForReality(containerSample, seconds) {
+  const tag = `reality_${seconds}s`;
+  const ext = path.extname(containerSample);
+  const base = containerSample.replace(ext, '');
+  const trimmedPath = `${base}_${tag}${ext}`;
+
+  // Check cache
+  const cacheCheck = await dockerExec(`test -f ${trimmedPath} && echo yes || echo no`, { timeout: 5000 });
+  if (cacheCheck.stdout.trim() === 'yes') {
+    console.log(`  Using cached trimmed sample: ${path.basename(trimmedPath)}`);
+    return trimmedPath;
+  }
+
+  // Probe duration
+  const probeCmd = `ffprobe -v error -show_entries format=duration -of csv=p=0 ${containerSample}`;
+  const probeResult = await dockerExec(probeCmd, { timeout: 15000 });
+  const duration = parseFloat(probeResult.stdout.trim());
+  if (isNaN(duration) || duration <= 0) {
+    console.error('ERROR: could not probe sample duration');
+    process.exit(1);
+  }
+
+  const start = Math.max(0, (duration / 2) - (seconds / 2));
+  console.log(`  Trimming ${seconds}s from middle (start=${start.toFixed(1)}s of ${duration.toFixed(1)}s)...`);
+
+  const trimCmd = `ffmpeg -y -ss ${start.toFixed(3)} -i ${containerSample} -t ${seconds} -c copy ${trimmedPath}`;
+  const trimResult = await dockerExec(trimCmd, { timeout: 60000 });
+  if (trimResult.code !== 0) {
+    console.error('ERROR: ffmpeg trim failed:', trimResult.stderr.slice(-300));
+    process.exit(1);
+  }
+
+  return trimmedPath;
+}
+
+async function probeFrameCount(containerPath) {
+  const cmd = `ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 ${containerPath}`;
+  const result = await dockerExec(cmd, { timeout: 60000 });
+  const frames = parseInt(result.stdout.trim(), 10);
+  return isNaN(frames) ? 0 : frames;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -572,10 +623,15 @@ async function main() {
     console.log(`Sample: ${path.basename(sample)}`);
     console.log('='.repeat(60));
 
+    let activeSample = `/samples/${path.basename(sample)}`;
+    if (realitySeconds) {
+      activeSample = await trimSampleForReality(activeSample, realitySeconds);
+    }
+
     // Warmup: run scene detection once so all benchmark runs use cached scenes
     if (!isAbAv1) {
       console.log('\nWarmup: running scene detection (will be cached for all configs)...');
-      const containerSample = `/samples/${path.basename(sample)}`;
+      const containerSample = activeSample;
       const warmupDir = `${BENCH_TEMP}/warmup`;
       const vpyParts = [
         'import vapoursynth as vs',
@@ -628,7 +684,7 @@ async function main() {
     let abAv1Crf = null;
     if (isAbAv1) {
       console.log('\nWarmup: running CRF search (will use found CRF for all configs)...');
-      const containerSample = `/samples/${path.basename(sample)}`;
+      const containerSample = activeSample;
       const warmupDir = `${BENCH_TEMP}/ab-warmup`;
 
       // Use first config's svtLp for the search (doesn't affect CRF result much)
@@ -675,9 +731,22 @@ async function main() {
       // Clean encode output but keep cached scenes/warmup
       await dockerExec(`rm -rf ${BENCH_TEMP}/*/work/done.json ${BENCH_TEMP}/*/work/encode/ ${BENCH_TEMP}/*/out.mkv ${BENCH_TEMP}/ab-*/out.mkv 2>/dev/null; true`);
 
+      let totalFrames = 0;
+      if (realitySeconds && !isAbAv1) {
+        totalFrames = await probeFrameCount(activeSample);
+        if (totalFrames === 0) {
+          console.error('ERROR: could not determine frame count of trimmed sample');
+          process.exit(1);
+        }
+      }
+
       const result = isAbAv1
         ? await benchAbAv1(sample, config, abAv1Crf)
-        : await benchAv1an(sample, config);
+        : await benchAv1an(sample, config, {
+            realityMode: !!realitySeconds,
+            activeSample,
+            totalFrames,
+          });
 
       results.push(result);
       console.log(`  -> ${result.mibPerMin} MiB/min (${result.totalMiB} MiB total), ${result.avgCpu}% CPU, ${result.peakMem} GiB RAM${result.oom ? ' [OOM]' : ''}`);
