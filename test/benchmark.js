@@ -235,8 +235,9 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
 
   // Reuse warmup's work dir (has cached scenes) — clean encode output between runs
   const av1anCmdParts = [
-    `rm -rf ${warmupDir}/work/encode ${warmupDir}/work/done.json ${warmupDir}/out.mkv 2>/dev/null;`,
+    `rm -rf ${warmupDir}/work/encode ${warmupDir}/work/done.json ${warmupDir}/work/log ${warmupDir}/out.mkv 2>/dev/null;`,
     `mkdir -p ${warmupDir}/work &&`,
+    `cp ${warmupDir}/scenes_backup.json ${warmupDir}/work/scenes.json 2>/dev/null; true;`,
     `echo '{"frames":0,"done":{},"audio_done":false}' > ${warmupDir}/work/done.json &&`,
     `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
     `-c mkvmerge -e ${av1anEncoder}`,
@@ -779,6 +780,8 @@ async function main() {
         }
       }
       await warmupProc.catch(() => {});
+      // Back up scenes.json — av1an may clean work/ after a completed encode
+      await dockerExec(`cp ${warmupDir}/work/scenes.json ${warmupDir}/scenes_backup.json 2>/dev/null; true`);
       console.log('    Scenes cached.\n');
     }
 
