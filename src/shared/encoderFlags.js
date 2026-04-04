@@ -130,8 +130,8 @@ const capSvtLpByPreset = (lp, encPreset) => {
 const THREAD_PRESETS = {
   safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 0.5,  svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
   balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 0.9,  svtLpMax: 20, vmafThreadDiv: 2, halve4kHdr: false },
-  aggressive:  { aomWorkerDiv: 4, aomOversub: 3.0, svtWorkerFill: 1.0,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
-  max:         { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 1.0,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
+  aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 1.0,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
+  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 1.0,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
 };
 
 const resolveThreadStrategy = (strategyName, overrides) => {
