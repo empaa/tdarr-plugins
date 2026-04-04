@@ -50,8 +50,9 @@ Encodes a trimmed clip from start to finish instead of killing after a duration.
 
 **Flow:**
 
-1. Trim sample to N seconds with ffmpeg: `ffmpeg -i sample.mkv -t <seconds> -c copy trimmed.mkv`
-2. Cache trimmed file alongside sample (e.g. `sample_reality_30s.mkv`) — reuse across runs
+1. Probe sample duration, compute start offset: `start = (duration / 2) - (seconds / 2)`
+2. Trim from the middle with ffmpeg: `ffmpeg -ss <start> -i sample.mkv -t <seconds> -c copy trimmed.mkv`
+3. Cache trimmed file alongside sample (e.g. `sample_reality_30s.mkv`) — reuse across runs
 3. Run scene detection on trimmed file as warmup (cached across runs, same as today)
 4. Encode the full trimmed clip — no kill timer, av1an runs to completion
 5. Measure: FPS = total frames / encode wall time (scene detection time excluded)
