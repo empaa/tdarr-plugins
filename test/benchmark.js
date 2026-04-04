@@ -720,6 +720,16 @@ async function main() {
       }
     }
 
+    let totalFrames = 0;
+    if (realitySeconds && !isAbAv1) {
+      totalFrames = await probeFrameCount(activeSample);
+      if (totalFrames === 0) {
+        console.error('ERROR: could not determine frame count of trimmed sample');
+        process.exit(1);
+      }
+      console.log(`  Trimmed sample: ${totalFrames} frames\n`);
+    }
+
     const results = [];
     for (const config of configs) {
       const detail = isAbAv1
@@ -727,18 +737,8 @@ async function main() {
         : `workers=${config.workers} threads=${config.tpw} vmaf=${config.vmafThreads}`;
       console.log(`\nRunning: ${config.label} (${detail}) for ${testDuration}s...`);
 
-      // Clean encode output but keep cached scenes
       // Clean encode output but keep cached scenes/warmup
       await dockerExec(`rm -rf ${BENCH_TEMP}/*/work/done.json ${BENCH_TEMP}/*/work/encode/ ${BENCH_TEMP}/*/out.mkv ${BENCH_TEMP}/ab-*/out.mkv 2>/dev/null; true`);
-
-      let totalFrames = 0;
-      if (realitySeconds && !isAbAv1) {
-        totalFrames = await probeFrameCount(activeSample);
-        if (totalFrames === 0) {
-          console.error('ERROR: could not determine frame count of trimmed sample');
-          process.exit(1);
-        }
-      }
 
       const result = isAbAv1
         ? await benchAbAv1(sample, config, abAv1Crf)
