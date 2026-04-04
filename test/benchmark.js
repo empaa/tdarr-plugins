@@ -312,7 +312,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   }, 10000);
 
   const execTimeout = realityMode ? 7200000 : (testDuration + 60) * 1000;
-  const result = await dockerExec(cmd, { timeout: execTimeout, live: false });
+  const result = await dockerExec(cmd, { timeout: execTimeout, live: true });
 
   clearInterval(progressMonitor);
   process.stdout.write('\n');
