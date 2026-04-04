@@ -851,7 +851,11 @@ async function main() {
       const modeStr = realitySeconds ? `reality ${realitySeconds}s` : `${testDuration}s`;
       console.log(`\nRunning: ${config.label} (${detail}) — ${modeStr}...`);
 
-      // Clean encode output but keep cached scenes/warmup
+      // Kill any lingering encode processes and clean up between configs
+      spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
+        'pkill -9 -f "av1an|aomenc|SvtAv1EncApp|mkvmerge" 2>/dev/null; true',
+      ]);
+      await new Promise((r) => setTimeout(r, 2000));
       await dockerExec(`rm -rf ${BENCH_TEMP}/*/work/done.json ${BENCH_TEMP}/*/work/encode/ ${BENCH_TEMP}/*/out.mkv ${BENCH_TEMP}/ab-*/out.mkv 2>/dev/null; true`);
 
       const result = isAbAv1
