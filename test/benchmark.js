@@ -237,7 +237,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   const av1anCmdParts = [
     `rm -rf ${warmupDir}/work ${warmupDir}/out.mkv 2>/dev/null;`,
     `mkdir -p ${warmupDir}/work &&`,
-    `cp ${warmupDir}/scenes_backup.json ${warmupDir}/work/scenes.json 2>/dev/null; true &&`,
+    `cp ${warmupDir}/scenes_backup.json ${warmupDir}/work/scenes.json &&`,
     `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
     `-c mkvmerge -e ${av1anEncoder}`,
     `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
@@ -767,10 +767,12 @@ async function main() {
 
       // Wait for scenes.json to appear, then kill
       const warmupProc = dockerExec(warmupCmd, { timeout: 300000, live: true });
-      while (true) {
+      let scenesFound = false;
+      for (let attempt = 0; attempt < 100; attempt++) {
         await new Promise((r) => setTimeout(r, 3000));
         const check = await dockerExec(`test -f ${warmupDir}/work/scenes.json && echo yes || echo no`, { timeout: 5000 });
         if (check.stdout.trim() === 'yes') {
+          scenesFound = true;
           process.stdout.write('    Scene detection complete — killing warmup encode\n');
           spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
             'pkill -f "av1an|aomenc|SvtAv1EncApp" 2>/dev/null; true',
@@ -779,8 +781,12 @@ async function main() {
         }
       }
       await warmupProc.catch(() => {});
+      if (!scenesFound) {
+        console.error('ERROR: scene detection timed out (5 min) — no scenes.json produced');
+        process.exit(1);
+      }
       // Back up scenes.json — av1an may clean work/ after a completed encode
-      await dockerExec(`cp ${warmupDir}/work/scenes.json ${warmupDir}/scenes_backup.json 2>/dev/null; true`);
+      await dockerExec(`cp ${warmupDir}/work/scenes.json ${warmupDir}/scenes_backup.json`);
       console.log('    Scenes cached.\n');
     }
 
