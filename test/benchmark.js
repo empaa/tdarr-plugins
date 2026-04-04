@@ -359,7 +359,7 @@ async function benchAbAv1(samplePath, config, crf) {
   const abCmdParts = [
     `mkdir -p ${tempDir} &&`,
     `ab-av1 encode`,
-    `-i ${containerSample} -o ${tempDir}/out.mkv`,
+    `-i "${containerSample}" -o ${tempDir}/out.mkv`,
     `--encoder libsvtav1 --preset ${cpuUsed}`,
     `--crf ${crf}`,
   ];
@@ -557,14 +557,14 @@ async function trimSampleForReality(containerSample, seconds) {
   const trimmedPath = `${base}_${tag}${ext}`;
 
   // Check cache
-  const cacheCheck = await dockerExec(`test -f ${trimmedPath} && echo yes || echo no`, { timeout: 5000 });
+  const cacheCheck = await dockerExec(`test -f "${trimmedPath}" && echo yes || echo no`, { timeout: 5000 });
   if (cacheCheck.stdout.trim() === 'yes') {
     console.log(`  Using cached trimmed sample: ${path.basename(trimmedPath)}`);
     return trimmedPath;
   }
 
   // Probe duration
-  const probeCmd = `ffprobe -v error -show_entries format=duration -of csv=p=0 ${containerSample}`;
+  const probeCmd = `ffprobe -v error -show_entries format=duration -of csv=p=0 "${containerSample}"`;
   const probeResult = await dockerExec(probeCmd, { timeout: 15000 });
   const duration = parseFloat(probeResult.stdout.trim());
   if (isNaN(duration) || duration <= 0) {
@@ -575,7 +575,7 @@ async function trimSampleForReality(containerSample, seconds) {
   const start = Math.max(0, (duration / 2) - (seconds / 2));
   console.log(`  Trimming ${seconds}s from middle (start=${start.toFixed(1)}s of ${duration.toFixed(1)}s)...`);
 
-  const trimCmd = `ffmpeg -y -ss ${start.toFixed(3)} -i ${containerSample} -t ${seconds} -c copy ${trimmedPath}`;
+  const trimCmd = `ffmpeg -y -ss ${start.toFixed(3)} -i "${containerSample}" -t ${seconds} -c copy "${trimmedPath}"`;
   const trimResult = await dockerExec(trimCmd, { timeout: 60000 });
   if (trimResult.code !== 0) {
     console.error('ERROR: ffmpeg trim failed:', trimResult.stderr.slice(-300));
@@ -586,7 +586,7 @@ async function trimSampleForReality(containerSample, seconds) {
 }
 
 async function probeFrameCount(containerPath) {
-  const cmd = `ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 ${containerPath}`;
+  const cmd = `ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "${containerPath}"`;
   const result = await dockerExec(cmd, { timeout: 60000 });
   const frames = parseInt(result.stdout.trim(), 10);
   return isNaN(frames) ? 0 : frames;
@@ -782,7 +782,7 @@ async function main() {
       const crfSearchParts = [
         `mkdir -p ${warmupDir} &&`,
         `ab-av1 crf-search`,
-        `-i ${containerSample}`,
+        `-i "${containerSample}"`,
         `--encoder libsvtav1 --preset ${cpuUsed}`,
         `--min-vmaf ${targetVmaf} --min-crf 10 --max-crf 50`,
         `--vmaf "n_threads=4:model=path=/usr/local/share/vmaf/vmaf_v0.6.1.json"`,
