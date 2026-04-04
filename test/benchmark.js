@@ -103,6 +103,14 @@ if (realitySeconds != null && cliArgs.includes('--duration')) {
   console.error('ERROR: --reality and --duration are mutually exclusive');
   process.exit(1);
 }
+if (realitySeconds != null && realitySeconds <= 0) {
+  console.error('ERROR: --reality must be a positive number of seconds');
+  process.exit(1);
+}
+if (realitySeconds != null && encoderArg === 'ab-av1') {
+  console.error('ERROR: --reality is not supported with ab-av1 (only av1an encoders)');
+  process.exit(1);
+}
 
 // ---------------------------------------------------------------------------
 // Grid generation
