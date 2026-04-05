@@ -5,7 +5,7 @@
       "target_vmaf": "93",
       "preset": "6",
       "grain_synth": "true",
-      "thread_strategy": "balanced"
+      "thread_strategy": "aggressive"
     }
   },
   {
@@ -14,7 +14,7 @@
       "target_vmaf": "93",
       "preset": "6",
       "grain_synth": "false",
-      "thread_strategy": "balanced"
+      "thread_strategy": "aggressive"
     }
   }
 ]
