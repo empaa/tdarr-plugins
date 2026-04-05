@@ -552,12 +552,12 @@ function printTable(results) {
   const hasEncodeFps = results.some((r) => r.encodeFps != null);
 
   const headers = ['Config', 'Workers', 'Threads', 'VMAF-T'];
-  if (hasReality) headers.push('FPS', 'Frames');
   if (hasEncodeFps) headers.push('Enc FPS');
   if (hasChunkFps) headers.push('Chunk FPS (min/med/max)');
-  headers.push('MiB/min', 'Total MiB', 'CPU %', 'Peak RAM', 'Time');
+  if (!hasReality) headers.push('MiB/min');
+  headers.push('Total MiB', 'CPU %', 'Peak RAM');
   if (hasEncodeTime) headers.push('Enc Time');
-  headers.push('Status');
+  headers.push('Time', 'Status');
 
   const rows = results.map((r) => {
     const row = [
@@ -566,9 +566,6 @@ function printTable(results) {
       r.threads != null ? String(r.threads) : 'auto',
       r.vmafThreads != null ? String(r.vmafThreads) : 'auto',
     ];
-    if (hasReality) {
-      row.push(r.fps || '-', r.totalFrames != null ? String(r.totalFrames) : '-');
-    }
     if (hasEncodeFps) {
       row.push(r.encodeFps || '-');
     }
@@ -577,15 +574,15 @@ function printTable(results) {
         ? `${r.chunkFps.min.toFixed(1)} / ${r.chunkFps.median.toFixed(1)} / ${r.chunkFps.max.toFixed(1)}`
         : '-');
     }
+    if (!hasReality) row.push(r.mibPerMin);
     row.push(
-      r.mibPerMin,
       r.totalMiB,
       `${r.avgCpu}%`,
       `${r.peakMem} GiB`,
-      r.time,
     );
     if (hasEncodeTime) row.push(r.encodeTime || '-');
     row.push(
+      r.time,
       r.oom ? 'OOM' : r.exitCode === 0 ? 'OK' : `exit ${r.exitCode}`,
     );
     return row;
@@ -604,14 +601,16 @@ function printTable(results) {
   rows.forEach((r) => console.log(fmt(r)));
   console.log(sep);
 
-  // Recommendation
-  const best = results
-    .filter((r) => !r.oom && r.exitCode === 0)
-    .sort((a, b) => parseFloat(b.mibPerMin) - parseFloat(a.mibPerMin))[0];
+  // Recommendation — encode FPS is the primary metric in reality mode
+  const ok = results.filter((r) => !r.oom && r.exitCode === 0);
+  const best = hasEncodeFps
+    ? ok.filter((r) => r.encodeFps != null).sort((a, b) => parseFloat(b.encodeFps) - parseFloat(a.encodeFps))[0]
+    : ok.sort((a, b) => parseFloat(b.mibPerMin) - parseFloat(a.mibPerMin))[0];
 
   if (best) {
+    const metric = hasEncodeFps ? `${best.encodeFps} encode fps` : `${best.mibPerMin} MiB/min`;
     const isPreset = PRESETS.includes(best.label);
-    console.log(`\nRecommended: ${best.label}`);
+    console.log(`\nRecommended: ${best.label} (${metric})`);
     if (isPreset) {
       console.log(`Set Thread Strategy to "${best.label}" in the plugin settings.`);
     } else if (best.workers !== '-') {
@@ -620,15 +619,6 @@ function printTable(results) {
     } else {
       console.log(`Set Thread Strategy to "custom" and paste into Thread Overrides:`);
       console.log(`{"threadsPerWorker":${best.threads}}`);
-    }
-  }
-
-  if (hasReality) {
-    const bestFps = results
-      .filter((r) => !r.oom && r.exitCode === 0 && r.fps != null)
-      .sort((a, b) => parseFloat(b.fps) - parseFloat(a.fps))[0];
-    if (bestFps) {
-      console.log(`\nFastest (reality): ${bestFps.label} at ${bestFps.fps} fps`);
     }
   }
 }
