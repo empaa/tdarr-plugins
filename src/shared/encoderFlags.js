@@ -138,19 +138,36 @@ const buildAbAv1SvtFlags = (lp, grainParam) => {
 };
 
 const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
-  const grainFlags = grainParam > 0
-    ? `--enc denoise-noise-level=${grainParam}`
-    : '--enc enable-dnl-denoising=0';
-  return [
-    '--enc end-usage=q', `--enc cpu-used=${preset}`, `--enc threads=${threadsPerWorker}`,
-    '--enc tune=ssim', '--enc enable-fwd-kf=0', '--enc disable-kf=1', '--enc kf-max-dist=9999',
-    '--enc enable-qm=1', '--enc bit-depth=10', '--enc lag-in-frames=48',
-    '--enc tile-columns=0', '--enc tile-rows=0', '--enc sb-size=dynamic',
-    '--enc deltaq-mode=0', '--enc aq-mode=0', '--enc arnr-strength=1', '--enc arnr-maxframes=4',
-    '--enc enable-chroma-deltaq=1', grainFlags,
-    '--enc disable-trellis-quant=0', '--enc quant-b-adapt=1',
-    '--enc enable-keyframe-filtering=1',
-  ].filter(Boolean).join(' ');
+  // ffmpeg-native libaom-av1 options (exposed directly by ffmpeg)
+  const ffmpegArgs = [
+    `--enc cpu-used=${preset}`,
+    '--enc tune=ssim',
+    `--enc lag-in-frames=48`,
+    '--enc tile-columns=0',
+    '--enc tile-rows=0',
+    '--enc aq-mode=0',
+    '--enc arnr-strength=1',
+    `--enc arnr-max-frames=4`,
+    grainParam > 0 ? `--enc denoise-noise-level=${grainParam}` : '',
+  ].filter(Boolean);
+
+  // Raw aomenc params not exposed by ffmpeg — passed via aom-params
+  const aomParams = [
+    'end-usage=q',
+    'enable-fwd-kf=0',
+    'disable-kf=1',
+    'kf-max-dist=9999',
+    'enable-qm=1',
+    'sb-size=dynamic',
+    'deltaq-mode=0',
+    'enable-chroma-deltaq=1',
+    'disable-trellis-quant=0',
+    'quant-b-adapt=1',
+    'enable-keyframe-filtering=1',
+    grainParam <= 0 ? 'enable-dnl-denoising=0' : '',
+  ].filter(Boolean).join(':');
+
+  return [...ffmpegArgs, `--enc aom-params=${aomParams}`].join(' ');
 };
 
 // SVT-AV1 effective thread limits per encoder preset.
