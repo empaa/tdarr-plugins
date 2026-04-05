@@ -181,7 +181,7 @@ function dockerExec(cmd, { timeout = 600000, live = false } = {}) {
     // av1an uses \r for progress bars — split on both \n and \r
     const splitLines = (str) => str.split(/[\r\n]+/).filter(Boolean);
     // Skip noisy/empty lines
-    const SKIP = /^\s*$/;
+    const SKIP = /^\s*$|Creating lwi index file/;
 
     proc.stdout.on('data', (d) => {
       stdout += d;
