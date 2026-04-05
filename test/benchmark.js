@@ -156,7 +156,7 @@ function cleanup() {
     'pkill -9 -f "av1an|ab-av1|aomenc|SvtAv1EncApp|ffmpeg|vspipe" 2>/dev/null; true',
   ]);
   spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
-    `rm -rf ${BENCH_TEMP} 2>/dev/null; true`,
+    `rm -rf ${BENCH_TEMP} /samples 2>/dev/null; true`,
   ]);
   console.log('Cleanup done.');
   process.exit(1);
@@ -1094,8 +1094,8 @@ async function main() {
     printTable(results);
   }
 
-  // Final cleanup
-  await dockerExec(`rm -rf ${BENCH_TEMP}`);
+  // Final cleanup — remove temp files and copied samples from container
+  await dockerExec(`rm -rf ${BENCH_TEMP} /samples`);
   console.log('\nDone.');
 }
 
