@@ -306,7 +306,15 @@ const plugin = async (args) => {
       jobLog(line);
     }
 
-    // Parse "crf <N>" results -- keep updating to get the final chosen value
+    // Parse "crf N successful" -- definitive result from ab-av1
+    const successMatch = line.match(/crf\s+([\d.]+)\s+successful/i);
+    if (successMatch) {
+      foundCrf = parseFloat(successMatch[1]);
+      dbg(`[crf-search] success: crf=${foundCrf}`);
+      return;
+    }
+
+    // Parse "crf N VMAF X" results -- fallback, keep updating to last meeting target
     const crfMatch = line.match(/crf\s+([\d.]+)\s+.*VMAF\s+([\d.]+)/i);
     if (crfMatch) {
       const crf = parseFloat(crfMatch[1]);
