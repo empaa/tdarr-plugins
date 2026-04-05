@@ -294,10 +294,13 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   // Measure encoded bytes — av1an writes chunks to work/encode/
   const readBytesScript = `du -sb ${workDir}/encode 2>/dev/null | cut -f1 || echo 0`;
 
-  // Progress + stats monitor, kills encode when duration reached
+  // Progress + stats monitor, kills encode when duration reached.
+  // Polls every 2s until encoding starts (to catch the exact start time),
+  // then switches to 10s intervals for the rest.
   let timedOut = false;
+  let monitorTimer = null;
 
-  const progressMonitor = setInterval(async () => {
+  const monitorTick = async () => {
     try {
       // One-shot docker stats
       const ds = spawnSync('docker', [
@@ -321,9 +324,11 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       // Track when encoding actually starts (first bytes appear)
       if (encodeStartMs === null && encBytes > 0) {
         encodeStartMs = Date.now();
+        // Switch from fast polling (2s) to normal interval (10s)
+        clearInterval(monitorTimer);
+        monitorTimer = setInterval(monitorTick, 10000);
       }
 
-      const elapsedSec = (Date.now() - startMs) / 1000;
       const elapsed = formatMs(Date.now() - startMs);
       const cpuStr = cpuSamples.length > 0 ? cpuSamples[cpuSamples.length - 1].toFixed(0) + '%' : '-';
       const memStr = memSamples.length > 0 ? memSamples[memSamples.length - 1].toFixed(1) + ' GiB' : '-';
@@ -349,14 +354,17 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
         ]);
       }
     } catch (_) {}
-  }, 10000);
+  };
+
+  // Start with fast 2s polling to catch encode start precisely
+  monitorTimer = setInterval(monitorTick, 2000);
 
   // Extra time for scene detection when no warmup, plus encode duration, plus muxing buffer
   const sceneDetectionBuffer = noWarmup ? 300 : 60;
   const execTimeout = realityMode ? 7200000 : (testDuration + sceneDetectionBuffer) * 1000;
   const result = await dockerExec(cmd, { timeout: execTimeout, live: true });
 
-  clearInterval(progressMonitor);
+  clearInterval(monitorTimer);
   process.stdout.write('\n');
 
   if (result.code !== 0 && !timedOut) {
