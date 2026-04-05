@@ -1,6 +1,6 @@
 [
   {
-    "name": "aom grain-synth",
+    "name": "aom grain-synth on",
     "inputs": {
       "encoder": "aom",
       "target_vmaf": "93",
@@ -11,13 +11,35 @@
     }
   },
   {
-    "name": "svt-av1 grain-synth",
+    "name": "svt-av1 grain-synth on",
     "inputs": {
       "encoder": "svt-av1",
       "target_vmaf": "93",
       "preset": "6",
       "max_encoded_percent": "100",
       "grain_synth": "true",
+      "thread_strategy": "balanced"
+    }
+  },
+  {
+    "name": "aom grain-synth off",
+    "inputs": {
+      "encoder": "aom",
+      "target_vmaf": "93",
+      "preset": "6",
+      "max_encoded_percent": "100",
+      "grain_synth": "false",
+      "thread_strategy": "balanced"
+    }
+  },
+  {
+    "name": "svt-av1 grain-synth off",
+    "inputs": {
+      "encoder": "svt-av1",
+      "target_vmaf": "93",
+      "preset": "6",
+      "max_encoded_percent": "100",
+      "grain_synth": "false",
       "thread_strategy": "balanced"
     }
   }

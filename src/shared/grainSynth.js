@@ -125,9 +125,11 @@ const estimateNoise = (inputPath, durationSec, totalFrames, vspipeBin, lwiCache,
 
   let output = '';
   try {
-    const args = ['-p', vpyPath, '-'];
+    const args = ['-p', vpyPath, '--'];
     dbg(`[grain] estimating noise: vspipe ${args.join(' ')}`);
 
+    // '--' tells vspipe to process all frames without writing output.
+    // SIGMA values are printed to stderr by the ModifyFrame callback.
     const result = cp.spawnSync(vspipeBin, args, {
       timeout: 120000,
       maxBuffer: 10 * 1024 * 1024,
