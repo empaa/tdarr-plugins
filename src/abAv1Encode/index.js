@@ -76,9 +76,9 @@ const details = () => ({
       label: 'Thread Strategy',
       name: 'thread_strategy',
       type: 'string',
-      defaultValue: 'safe',
-      inputUI: { type: 'dropdown', options: ['safe', 'balanced', 'aggressive', 'max', 'custom'] },
-      tooltip: 'Controls SVT-AV1 thread parallelism (lp). safe=current defaults. balanced=~70% CPU. aggressive=saturate all cores. max=heavy oversubscription. custom=use thread_overrides JSON.',
+      defaultValue: 'auto',
+      inputUI: { type: 'dropdown', options: ['auto', 'safe', 'balanced', 'aggressive', 'max', 'custom'] },
+      tooltip: 'Controls SVT-AV1 thread parallelism (lp). auto=let ab-av1/SVT-AV1 decide. safe=conservative defaults. balanced=~70% CPU. aggressive=saturate all cores. max=heavy oversubscription. custom=use thread_overrides JSON.',
     },
     {
       label: 'Thread Overrides (JSON)',
@@ -169,11 +169,14 @@ const plugin = async (args) => {
 
   detectHdrMeta(stream);
 
+  const isAutoThreads = threadStrategy === 'auto';
   const is4kHdr = height >= 2160 && stream.color_transfer === 'smpte2084';
-  const { svtLp, vmafThreads } = calculateThreadBudget(
-    availableThreads, 'svt-av1', is4kHdr,
-    { strategy: threadStrategy, ...threadOverrides, singleProcess: true, encPreset },
-  );
+  const { svtLp, vmafThreads } = isAutoThreads
+    ? { svtLp: null, vmafThreads: null }
+    : calculateThreadBudget(
+      availableThreads, 'svt-av1', is4kHdr,
+      { strategy: threadStrategy, ...threadOverrides, singleProcess: true, encPreset },
+    );
 
   const abWorkDir = path.join(args.workDir, 'ab-av1-work');
   const outputPath = path.join(args.workDir, 'ab-av1-output.mkv');
@@ -206,7 +209,9 @@ const plugin = async (args) => {
   const sampleFrames = Math.round(srcFps * 4);
   const lookahead = Math.min(40, Math.max(8, Math.floor(sampleFrames * 0.25)));
 
-  const svtFlags = buildAbAv1SvtFlags(svtLp, lookahead, grainParam);
+  const svtFlags = isAutoThreads
+    ? buildAbAv1SvtFlags(0, lookahead, grainParam).replace(/--svt lp=\d+\s*/, '')
+    : buildAbAv1SvtFlags(svtLp, lookahead, grainParam);
 
   const sourceSizeGb = (() => {
     try { return fs.statSync(inputPath).size / (1024 ** 3); } catch (_) { return 0; }
@@ -217,7 +222,7 @@ const plugin = async (args) => {
   jobLog(`  input      : ${inputPath}`);
   jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${doDownscale ? ` -> ${downscaleRes}` : ''}`);
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
-  jobLog(`  threads    : cpu=${availableThreads}  lp=${svtLp}  strategy=${threadStrategy}`);
+  jobLog(`  threads    : cpu=${availableThreads}  lp=${isAutoThreads ? 'auto' : svtLp}  strategy=${threadStrategy}`);
   jobLog(`  svt flags  : ${svtFlags}`);
   if (grainSynthEnabled) {
     jobLog(`  grain      : ${grainParam > 0 ? `enabled (film-grain=${grainParam})` : 'enabled (clean source, skipped)'}`);

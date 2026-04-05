@@ -76,9 +76,9 @@ const details = () => ({
       label: 'Thread Strategy',
       name: 'thread_strategy',
       type: 'string',
-      defaultValue: 'safe',
-      inputUI: { type: 'dropdown', options: ['safe', 'balanced', 'aggressive', 'max', 'custom'] },
-      tooltip: 'Controls thread/worker budget. safe=current conservative defaults. balanced=~70% CPU. aggressive=saturate all cores (4x oversub). max=heavy oversubscription (6x). custom=use thread_overrides JSON.',
+      defaultValue: 'auto',
+      inputUI: { type: 'dropdown', options: ['auto', 'safe', 'balanced', 'aggressive', 'max', 'custom'] },
+      tooltip: 'Controls thread/worker budget. auto=let av1an decide. safe=conservative defaults. balanced=~70% CPU. aggressive=saturate all cores (4x oversub). max=heavy oversubscription (6x). custom=use thread_overrides JSON.',
     },
     {
       label: 'Thread Overrides (JSON)',
@@ -176,11 +176,14 @@ const plugin = async (args) => {
 
   const { hdrAom, hdrSvt } = detectHdrMeta(stream);
 
+  const isAutoThreads = threadStrategy === 'auto';
   const is4kHdr = height >= 2160 && stream.color_transfer === 'smpte2084';
-  const { maxWorkers, threadsPerWorker, svtLp, vmafThreads } = calculateThreadBudget(
-    availableThreads, encoder, is4kHdr,
-    { strategy: threadStrategy, ...threadOverrides, encPreset },
-  );
+  const { maxWorkers, threadsPerWorker, svtLp, vmafThreads } = isAutoThreads
+    ? { maxWorkers: null, threadsPerWorker: null, svtLp: null, vmafThreads: null }
+    : calculateThreadBudget(
+      availableThreads, encoder, is4kHdr,
+      { strategy: threadStrategy, ...threadOverrides, encPreset },
+    );
 
   const workBase = path.join(args.workDir, 'av1an-work');
   const vsDir = path.join(workBase, 'vs');
@@ -211,9 +214,16 @@ const plugin = async (args) => {
     }
   }
 
-  const encFlags = encoder === 'aom'
-    ? buildAomFlags(encPreset, threadsPerWorker, hdrAom, grainParam)
-    : buildSvtFlags(encPreset, svtLp, hdrSvt, grainParam);
+  let encFlags;
+  if (isAutoThreads) {
+    encFlags = encoder === 'aom'
+      ? buildAomFlags(encPreset, 0, hdrAom, grainParam).replace(/--threads=\d+\s*/, '')
+      : buildSvtFlags(encPreset, 0, hdrSvt, grainParam).replace(/--lp \d+\s*/, '');
+  } else {
+    encFlags = encoder === 'aom'
+      ? buildAomFlags(encPreset, threadsPerWorker, hdrAom, grainParam)
+      : buildSvtFlags(encPreset, svtLp, hdrSvt, grainParam);
+  }
 
   jobLog('='.repeat(64));
   jobLog(`AV1AN ENCODE  encoder=${encoder}  preset=${encPreset}`);
@@ -221,7 +231,7 @@ const plugin = async (args) => {
   jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${doDownscale ? ` -> ${downscaleRes}` : ''}`);
   jobLog(`  target     : VMAF ${targetVmaf}  QP-range ${qpRange}`);
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
-  jobLog(`  threads    : cpu=${availableThreads}  workers=${maxWorkers}  threads/worker=${threadsPerWorker}  vmaf-threads=${vmafThreads}  strategy=${threadStrategy}`);
+  jobLog(`  threads    : cpu=${availableThreads}  workers=${isAutoThreads ? 'auto' : maxWorkers}  threads/worker=${isAutoThreads ? 'auto' : threadsPerWorker}  vmaf-threads=${isAutoThreads ? 'auto' : vmafThreads}  strategy=${threadStrategy}`);
   jobLog(`  enc flags  : ${encFlags}`);
   if (grainSynthEnabled) {
     jobLog(`  grain      : ${grainParam > 0 ? `enabled (film-grain=${grainParam})` : 'enabled (clean source, skipped)'}`);
@@ -268,11 +278,11 @@ const plugin = async (args) => {
     '-e', encoder,
     '--sc-downscale-height', '540',
     '--scaler', 'lanczos',
-    '--workers', String(maxWorkers),
+    ...(isAutoThreads ? [] : ['--workers', String(maxWorkers)]),
     '--qp-range', qpRange,
     '--target-quality', String(targetVmaf),
     '--vmaf-path', vmafModel,
-    '--vmaf-threads', String(vmafThreads),
+    ...(isAutoThreads ? [] : ['--vmaf-threads', String(vmafThreads)]),
     '--probes', '6',
     '--chunk-order', 'long-to-short',
     '--keep',

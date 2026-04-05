@@ -7,7 +7,7 @@
       "preset": "6",
       "max_encoded_percent": "100",
       "grain_synth": "true",
-      "thread_strategy": "aggressive"
+      "thread_strategy": "auto"
     }
   },
   {
@@ -18,7 +18,7 @@
       "preset": "6",
       "max_encoded_percent": "100",
       "grain_synth": "true",
-      "thread_strategy": "aggressive"
+      "thread_strategy": "auto"
     }
   },
   {
@@ -29,7 +29,7 @@
       "preset": "6",
       "max_encoded_percent": "100",
       "grain_synth": "false",
-      "thread_strategy": "aggressive"
+      "thread_strategy": "auto"
     }
   },
   {
@@ -40,7 +40,7 @@
       "preset": "6",
       "max_encoded_percent": "100",
       "grain_synth": "false",
-      "thread_strategy": "aggressive"
+      "thread_strategy": "auto"
     }
   }
 ]
