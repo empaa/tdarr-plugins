@@ -41,6 +41,7 @@ Options:
   --reality <sec>       Trim sample to N seconds (from middle) and encode to completion
   --grain               Enable VapourSynth grain estimation (auto-detects film grain level)
   --no-warmup           Skip scene cache warmup, each run does fresh scene detection + encode
+                        (default for --reality mode; use --warmup to override)
   --grid                Test a custom worker×thread grid instead of presets
   --sample <name>       Filter sample files by name substring
   --help, -h            Show this help
@@ -103,7 +104,7 @@ const realitySeconds = (() => {
   return idx !== -1 && cliArgs[idx + 1] ? Number(cliArgs[idx + 1]) : null;
 })();
 const grainEnabled = cliArgs.includes('--grain');
-const noWarmup = cliArgs.includes('--no-warmup');
+const noWarmup = cliArgs.includes('--no-warmup') || (realitySeconds != null && !cliArgs.includes('--warmup'));
 
 if (realitySeconds != null && cliArgs.includes('--duration')) {
   console.error('ERROR: --reality and --duration are mutually exclusive');
@@ -362,16 +363,19 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
     ? cpuSamples.reduce((s, v) => s + v, 0) / cpuSamples.length : 0;
   const peakMem = memSamples.length > 0 ? Math.max(...memSamples) : 0;
 
-  // Read final encoded bytes — check output file first (av1an cleans chunks after muxing),
-  // fall back to encode dir for in-progress measurement
+  // Read final output file size
   let encBytes = 0;
   try {
     const outFileScript = `stat -c%s ${runDir}/out.mkv 2>/dev/null || echo 0`;
     const outResult = await dockerExec(outFileScript, { timeout: 8000 });
     encBytes = parseInt(outResult.stdout.trim(), 10) || 0;
-    if (encBytes === 0) {
+    if (encBytes > 0) {
+      console.log(`    Output file: ${runDir}/out.mkv (${(encBytes / (1024 * 1024)).toFixed(1)} MiB)`);
+    } else {
+      // Fall back to encode dir for in-progress measurement
       const bytesResult = await dockerExec(readBytesScript, { timeout: 8000 });
       encBytes = parseInt(bytesResult.stdout.trim(), 10) || 0;
+      console.log(`    Output file not found, using encode dir: ${(encBytes / (1024 * 1024)).toFixed(1)} MiB`);
     }
   } catch (_) {}
 
