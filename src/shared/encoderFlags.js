@@ -74,20 +74,26 @@ const detectHdrMeta = (stream) => {
   return { prim, trans, matrix, chroma, hdrAom, hdrSvt };
 };
 
-const buildAomFlags = (preset, threadsPerWorker, hdrAom) => {
+const buildAomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
+  const grainFlags = grainParam > 0
+    ? `--denoise-noise-level=${grainParam}`
+    : '--enable-dnl-denoising=0';
   return [
     '--end-usage=q', `--cpu-used=${preset}`, `--threads=${threadsPerWorker}`,
     '--tune=ssim', '--enable-fwd-kf=0', '--disable-kf', '--kf-max-dist=9999',
     '--enable-qm=1', '--bit-depth=10', '--lag-in-frames=48',
     '--tile-columns=0', '--tile-rows=0', '--sb-size=dynamic',
     '--deltaq-mode=0', '--aq-mode=0', '--arnr-strength=1', '--arnr-maxframes=4',
-    '--enable-chroma-deltaq=1', '--enable-dnl-denoising=0',
+    '--enable-chroma-deltaq=1', grainFlags,
     '--disable-trellis-quant=0', '--quant-b-adapt=1',
     '--enable-keyframe-filtering=1', hdrAom,
   ].filter(Boolean).join(' ');
 };
 
-const buildSvtFlags = (preset, svtLp, hdrSvt) => {
+const buildSvtFlags = (preset, svtLp, hdrSvt, grainParam) => {
+  const grainFlags = grainParam > 0
+    ? [`--film-grain ${grainParam}`, '--film-grain-denoise 1']
+    : [];
   return [
     '--rc 0', `--preset ${preset}`, '--tune 1', '--input-depth 10',
     '--lookahead 48', '--keyint -1', '--irefresh-type 2',
@@ -97,10 +103,14 @@ const buildSvtFlags = (preset, svtLp, hdrSvt) => {
     '--chroma-qm-min 8', '--chroma-qm-max 15',
     '--tf-strength 1', '--sharpness 1', '--tile-columns 1',
     '--scm 0', `--lp ${svtLp}`, hdrSvt,
+    ...grainFlags,
   ].filter(Boolean).join(' ');
 };
 
-const buildAbAv1SvtFlags = (lp, lookahead) => {
+const buildAbAv1SvtFlags = (lp, lookahead, grainParam) => {
+  const grainFlags = grainParam > 0
+    ? [`--svt film-grain=${grainParam}`, '--svt film-grain-denoise=1']
+    : [];
   return [
     '--svt tune=1', '--svt enable-variance-boost=1',
     '--svt variance-boost-strength=2', '--svt variance-octile=6',
@@ -110,6 +120,7 @@ const buildAbAv1SvtFlags = (lp, lookahead) => {
     '--svt tf-strength=1', '--svt tile-columns=1', '--svt enable-overlays=1',
     `--svt lookahead=${lookahead}`, '--keyint 10s', '--scd true',
     `--svt lp=${lp}`,
+    ...grainFlags,
   ].join(' ');
 };
 
