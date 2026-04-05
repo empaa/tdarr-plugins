@@ -1,4 +1,4 @@
-# Auto Grain Synthesis Design
+# Auto Grain Synthesis Design (v2 — VapourSynth)
 
 ## Goal
 
@@ -15,37 +15,130 @@ AV1 has a built-in film grain synthesis spec. Both SVT-AV1 (`--film-grain`) and 
 5. Grain parameters are embedded in the bitstream header
 6. The decoder regenerates matching grain at playback
 
-The grain synthesis adds essentially zero to file size since the decoder generates it from model parameters + shared Gaussian noise samples.
+Both encoders use the same 0-50 scale.
 
-Both encoders use the same 0-50 scale, divided by 10 internally to produce a Wiener filter factor (0-5.0). The denoising strength scales quadratically with this factor.
+## Why VapourSynth Instead of ffmpeg
+
+The v1 design used ffmpeg signalstats YDIF for noise estimation. Testing against the tdarr test server revealed that ffmpeg does not output usable sigma values — YDIF is an average absolute temporal luma difference that doesn't reliably correlate with actual noise sigma, especially across different content types.
+
+VapourSynth provides precise per-frame plane statistics via `std.PlaneStats`, and `vspipe` is already a runtime dependency for the av1an plugin's source pipeline.
 
 ## Approach
 
-Encoder-native grain synthesis with automatic noise detection. No external denoising (BM3D, MVTools, etc.) — the encoder's built-in Wiener filter handles denoising, and its grain analysis pipeline models and reconstructs the noise.
+Temporal frame differencing via VapourSynth built-ins. No extra VS plugins required — only `std.Expr`, `std.PlaneStats`, `std.ShufflePlanes`, and `std.ModifyFrame`.
 
-The feature is a single toggle: on or off. When on, noise is estimated from the source and the appropriate encoder parameters are set automatically.
+The feature remains a single toggle: on or off. When on, noise is estimated from the source and the appropriate encoder parameters are set automatically.
 
-## New Shared Module: `src/shared/grainSynth.js`
+## Noise Estimation Method
 
-### Responsibilities
+### Algorithm
 
-1. **Estimate noise** — sample frames from the source via ffmpeg signalstats, compute noise sigma
-2. **Map sigma to encoder param** — interpolate through a tunable control-point curve
-3. **Return encoder flags** — encoder-specific flag strings for the caller
+1. Load source via `lsmas.LWLibavSource` (reuses the `.lwi` index cache)
+2. Extract luma plane (`std.ShufflePlanes`, `planes=0`, `colorfamily=GRAY`)
+3. Sample 4 regions of ~50 frames each, evenly spaced across the video (at 15%, 35%, 55%, 75% of total frames — avoids start/end which often have logos, credits, black)
+4. For each region, compute per-frame absolute temporal difference: `std.Expr([frame_n, frame_n+1], 'x y - abs')`
+5. Run `std.PlaneStats` on each diff frame
+6. `std.ModifyFrame` callback prints `SIGMA:<value>` to stderr for each frame
+7. Splice the 4 regions and `set_output()`
 
-### Noise Estimation
+### MAD-to-Sigma Conversion
 
-Run ffmpeg signalstats on ~200 frames sampled from the middle of the source file:
+`PlaneStatsAverage` returns the mean absolute deviation (MAD) of the diff frame, normalized to 0.0–1.0. Convert to noise sigma:
 
 ```
-ffmpeg -ss <mid_timestamp> -i <input> -frames:v 200 -vf signalstats -f null - 2>&1
+sigma = PlaneStatsAverage × 255 × √(π/2) / √2
+      = PlaneStatsAverage × 255 × 1.2533 / 1.4142
 ```
 
-Parse per-frame `YHUMED` (luma temporal difference median) or `YHUMEDAVG` values from stderr output — these correlate with noise energy in flat regions. Average across sampled frames to produce a single sigma estimate. The exact metric and any normalization will be validated during implementation by comparing signalstats output against known-noisy and known-clean test samples. The estimation takes 2-5 seconds — negligible compared to encode time.
+- `× 255`: convert from normalized to 8-bit pixel scale (always 255, regardless of source bit depth — PlaneStatsAverage is already normalized, and 8-bit scale keeps sigma in a familiar range)
+- `× √(π/2)` (≈ 1.2533): convert MAD to standard deviation for Gaussian noise
+- `/ √2` (≈ 1.4142): correct for differencing two identically-noisy frames (noise variance doubles, so sigma scales by √2)
 
-The result is logged to `av1-debug.log` for inspection.
+### Aggregation
 
-### Sigma-to-Parameter Mapping
+Collect all per-frame sigma values (~200 total across 4 regions), take the **median**. The median is robust to:
+- Scene changes (outlier high values)
+- Static black frames (outlier low values)
+- Motion-heavy sections (high values filtered by multi-point sampling + median)
+
+### Generated .vpy Script
+
+The script is generated dynamically at runtime (same pattern as the existing av1an source script). Example structure:
+
+```python
+import vapoursynth as vs
+import sys
+
+core = vs.core
+src = core.lsmas.LWLibavSource(source='<input>', cachefile='<lwi_path>')
+src = core.std.ShufflePlanes(src, planes=0, colorfamily=vs.GRAY)
+
+# Sample 4 regions of 50 frames each
+clips = []
+for start in [<pos1>, <pos2>, <pos3>, <pos4>]:
+    region = src[start:start+51]
+    base = region[:-1]
+    shifted = region[1:]
+    diff = core.std.Expr([base, shifted], expr=['x y - abs'])
+    diff = core.std.PlaneStats(diff)
+    clips.append(diff)
+
+out = core.std.Splice(clips)
+
+def _print_stats(n, f):
+    avg = f.props['PlaneStatsAverage']
+    sigma = avg * 255.0 * 1.2533 / 1.4142
+    print(f'SIGMA:{sigma:.4f}', file=sys.stderr, flush=True)
+    return f
+
+out = core.std.ModifyFrame(out, out, _print_stats)
+out.set_output()
+```
+
+### Execution
+
+```
+vspipe -p noise_estimate.vpy - 2>&1
+```
+
+Progress mode (`-p`), output piped to null, sigma values captured from stderr.
+
+## Updated Module: `src/shared/grainSynth.js`
+
+### New Signature
+
+```
+estimateNoise(inputPath, durationSec, totalFrames, vspipeBin, lwiCache, dbg)
+```
+
+- `inputPath` — source video file
+- `durationSec` — total duration (for logging)
+- `totalFrames` — total frame count (for calculating sample positions)
+- `vspipeBin` — path to vspipe binary
+- `lwiCache` — path to shared `.lwi` index file
+- `dbg` — debug logger function
+
+### Flow
+
+1. Calculate 4 sample start positions at 15%, 35%, 55%, 75% of `totalFrames`
+2. Generate `.vpy` script with those positions, 50 frames each
+3. Write to `noise_estimate.vpy` in the same directory as `.lwi` cache
+4. `spawnSync(vspipeBin, ['-p', vpyPath, '-'], { timeout: 60000 })`
+5. Parse `SIGMA:<value>` lines from output
+6. Take median as final sigma
+7. Map through `mapSigmaToGrainParam()` curve
+8. Clean up temp `.vpy` file
+9. Return `{ sigma, grainParam }`
+
+### Error Handling
+
+If vspipe fails or no SIGMA values are parsed, return `{ sigma: 0, grainParam: 0 }` — grain synthesis is silently skipped. Errors are logged via `dbg()`.
+
+### .lwi Index Reuse
+
+The noise estimation creates/reuses the `.lwi` index at the provided path. In `av1anEncode`, this is the same `.lwi` the encode step uses — so the encode step's separate indexing step is skipped if it already exists. In `abAv1Encode`, the `.lwi` is created during estimation but not reused (ab-av1 doesn't use VapourSynth).
+
+## Sigma-to-Parameter Mapping (Unchanged)
 
 Linear interpolation between tunable control points:
 
@@ -58,99 +151,49 @@ Linear interpolation between tunable control points:
 | 10            | 25                                       |
 | 15+           | 50 (capped)                              |
 
-The control points live in a config object at the top of the module. These are initial values to be refined through test encodes.
-
-Clean sources (sigma < 2) skip grain processing entirely — no encoder flags added, current behavior preserved.
-
-### Flag Output
-
-The module exports a function that takes `{ encoder, sigma }` and returns the flags to append:
-
-**aomenc:**
-- `--denoise-noise-level=<N>` (replaces current `--enable-dnl-denoising=0`)
-
-**SVT-AV1 (av1an):**
-- `--film-grain <N> --film-grain-denoise 1`
-
-**SVT-AV1 (ab-av1):**
-- `--svt film-grain=<N>` + `--svt film-grain-denoise=1`
-
-When grain synthesis is disabled or source is clean, aomenc keeps `--enable-dnl-denoising=0` (current behavior), and SVT-AV1 gets no grain flags.
+These are initial values calibrated against YDIF. May need retuning after test encodes with the new VS-based sigma values, since the measurement method changed.
 
 ## Plugin Changes
 
 ### av1anEncode
 
-Pipeline placement:
-
 ```
-probe -> downscale check -> [NEW: noise estimation] -> build encoder flags -> av1an encode -> mux
+probe -> [noise estimation via VS] -> build encoder flags -> [.lwi already cached] -> av1an encode -> mux
 ```
 
-- `grainSynth.estimate(inputPath)` called after probing, before flag construction
-- Result passed to `buildAomFlags()` / `buildSvtFlags()` which incorporate grain params
-- New FlowPlugin input: **Grain Synthesis** (boolean, default false)
+- `estimateNoise` called with `totalFrames, BIN.vspipe, lwiCache`
+- Reuses existing `vsDir` and `lwiCache` paths
+- `.lwi` index from estimation is reused by encode — the separate "Indexing" step can be skipped if `.lwi` exists
 
 ### abAv1Encode
 
-Same estimation step, same shared module:
-
 ```
-probe -> [NEW: noise estimation] -> build ab-av1 flags -> ab-av1 encode
+probe -> [noise estimation via VS] -> build ab-av1 flags -> ab-av1 encode
 ```
 
-- Result passed to `buildAbAv1SvtFlags()` which adds `--svt film-grain=<N>` flags
-- New FlowPlugin input: **Grain Synthesis** (boolean, default false)
+- Add `vspipe` to binary resolution (`findBin('vspipe', '/usr/local/bin/vspipe', '/usr/bin/vspipe')`)
+- Create `vsDir` + `lwiCache` path in work directory
+- `estimateNoise` called with `totalFrames, vspipeBin, lwiCache`
 
-## Encoder Flag Changes
+## Encoder Flag Integration (Unchanged)
 
-### aomenc (grain enabled + noise detected)
+Encoder flags are set via `grainParam` passed to existing flag builders:
 
-Remove:
-- `--enable-dnl-denoising=0`
+- **aomenc:** `--denoise-noise-level=<N>` (or `--enable-dnl-denoising=0` when skipped)
+- **SVT-AV1 via av1an:** `--film-grain <N> --film-grain-denoise 1`
+- **SVT-AV1 via ab-av1:** `--svt film-grain=<N>` + `--svt film-grain-denoise=1`
 
-Add:
-- `--denoise-noise-level=<N>`
+## Tdarr FlowPlugin UI (Unchanged)
 
-### aomenc (grain disabled or clean source)
-
-No change from current behavior:
-- `--enable-dnl-denoising=0`
-
-### SVT-AV1 via av1an (grain enabled + noise detected)
-
-Add:
-- `--film-grain <N>`
-- `--film-grain-denoise 1`
-
-### SVT-AV1 via ab-av1 (grain enabled + noise detected)
-
-Add:
-- `--svt film-grain=<N>`
-- `--svt film-grain-denoise=1`
-
-## Tdarr FlowPlugin UI
-
-One new boolean input on both plugins:
+One boolean input on both plugins:
 
 - **Name:** Grain Synthesis
 - **Default:** false
 - **Tooltip:** "Automatically detect noise, denoise during encoding, and synthesize matching grain at playback. Saves bitrate on noisy sources with no visual penalty."
 
-No other user-facing controls. Detection and parameter selection are fully automatic.
+## Dependencies on Sibling Repo
 
-## What This Does NOT Include
-
-- No external denoising (BM3D, MVTools) — encoder-native Wiener filter handles it
-- No manual grain level override — fully automatic when enabled
-- No VapourSynth changes — noise estimation uses ffmpeg signalstats
-- No new binary dependencies — ffmpeg signalstats is built-in
-
-## Expected Impact
-
-- **Clean sources (sigma < 2):** No change, skipped entirely
-- **Moderate grain (sigma 4-6):** ~10-20% bitrate savings at same VMAF
-- **Heavy grain (sigma > 10):** ~20-40%+ bitrate savings, grain reconstructed at playback
+`vspipe` and `lsmas` are already shipped in the tdarr-av1 Docker images. No new binaries required. `abAv1Encode` newly depends on `vspipe` at runtime (only when grain synth is enabled).
 
 ## Testing Plan
 
@@ -158,9 +201,12 @@ No other user-facing controls. Detection and parameter selection are fully autom
 2. Compare file sizes at equivalent VMAF targets
 3. Subjective visual comparison of synthesized grain vs original
 4. Verify clean sources are correctly detected and skipped
-5. Tune the control-point curve based on results
-6. Test both encoders (aomenc, SVT-AV1) and both plugins (av1an, ab-av1)
+5. Compare VS sigma values against known-noisy test samples to validate accuracy
+6. Tune the control-point curve based on results
+7. Test both encoders (aomenc, SVT-AV1) and both plugins (av1an, ab-av1)
 
-## Dependencies on Sibling Repo
+## Expected Impact
 
-None. No new binaries or VapourSynth plugins required. ffmpeg signalstats is built into ffmpeg which is already present.
+- **Clean sources (sigma < 2):** No change, skipped entirely
+- **Moderate grain (sigma 4-6):** ~10-20% bitrate savings at same VMAF
+- **Heavy grain (sigma > 10):** ~20-40%+ bitrate savings, grain reconstructed at playback
