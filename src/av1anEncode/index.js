@@ -88,6 +88,14 @@ const details = () => ({
       inputUI: { type: 'text' },
       tooltip: 'Only used when Thread Strategy is "custom". JSON: {"workers":16,"threadsPerWorker":2,"vmafThreads":12}. Omitted keys fall back to aggressive preset.',
     },
+    {
+      label: 'Grain Synthesis',
+      name: 'grain_synth',
+      type: 'boolean',
+      defaultValue: 'false',
+      inputUI: { type: 'switch' },
+      tooltip: 'Automatically detect noise, denoise during encoding, and synthesize matching grain at playback. Saves bitrate on noisy sources with no visual penalty.',
+    },
   ],
   outputs: [
     { number: 1, tooltip: 'Encode succeeded -- output file is the encoded video+audio MKV' },
@@ -106,6 +114,7 @@ const plugin = async (args) => {
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
+  const { estimateNoise } = require('../shared/grainSynth');
 
   const inputs = args.inputs || {};
   const encoder           = String(inputs.encoder || 'svt-av1');
@@ -125,6 +134,8 @@ const plugin = async (args) => {
       threadOverridesError = e.message;
     }
   }
+
+  const grainSynthEnabled = inputs.grain_synth === true || inputs.grain_synth === 'true';
 
   const findBin = (name, ...paths) => paths.find((p) => fs.existsSync(p))
     || (() => { throw new Error(`Required binary not found: ${name} (checked ${paths.join(', ')})`); })();
@@ -171,9 +182,22 @@ const plugin = async (args) => {
     { strategy: threadStrategy, ...threadOverrides, encPreset },
   );
 
+  let grainParam = 0;
+  if (grainSynthEnabled) {
+    const durationSec = parseFloat(stream.duration || '0')
+      || (file.ffProbeData && file.ffProbeData.format && parseFloat(file.ffProbeData.format.duration)) || 0;
+    const result = estimateNoise(inputPath, durationSec, BIN.ffmpeg, dbg);
+    grainParam = result.grainParam;
+    if (grainParam > 0) {
+      jobLog(`[grain] detected noise sigma=${result.sigma.toFixed(2)} -> film-grain=${grainParam}`);
+    } else {
+      jobLog('[grain] source is clean (sigma < 2), skipping grain synthesis');
+    }
+  }
+
   const encFlags = encoder === 'aom'
-    ? buildAomFlags(encPreset, threadsPerWorker, hdrAom)
-    : buildSvtFlags(encPreset, svtLp, hdrSvt);
+    ? buildAomFlags(encPreset, threadsPerWorker, hdrAom, grainParam)
+    : buildSvtFlags(encPreset, svtLp, hdrSvt, grainParam);
 
   const workBase = path.join(args.workDir, 'av1an-work');
   const vsDir = path.join(workBase, 'vs');
@@ -190,6 +214,9 @@ const plugin = async (args) => {
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
   jobLog(`  threads    : cpu=${availableThreads}  workers=${maxWorkers}  threads/worker=${threadsPerWorker}  vmaf-threads=${vmafThreads}  strategy=${threadStrategy}`);
   jobLog(`  enc flags  : ${encFlags}`);
+  if (grainSynthEnabled) {
+    jobLog(`  grain      : ${grainParam > 0 ? `enabled (film-grain=${grainParam})` : 'enabled (clean source, skipped)'}`);
+  }
   jobLog('='.repeat(64));
 
   const sourceSizeGb = (() => {
