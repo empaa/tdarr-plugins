@@ -461,7 +461,7 @@ async function benchAbAv1(samplePath, config, crf, grainParam = 0) {
   const containerSample = `/samples/${path.basename(samplePath)}`;
   const tempDir = `${BENCH_TEMP}/ab-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
-  const svtFlags = buildAbAv1SvtFlags(config.svtLp, 24, grainParam);
+  const svtFlags = buildAbAv1SvtFlags(config.svtLp, grainParam);
   console.log(`    SVT flags: ${svtFlags}`);
   const abCmdParts = [
     `mkdir -p ${tempDir} &&`,
@@ -1023,7 +1023,7 @@ async function main() {
 
       // Use first config's svtLp for the search (doesn't affect CRF result much)
       const warmupLp = configs[0].svtLp;
-      const warmupSvtFlags = buildAbAv1SvtFlags(warmupLp, 24);
+      const warmupSvtFlags = buildAbAv1SvtFlags(warmupLp, 0);
       const crfSearchParts = [
         `mkdir -p ${warmupDir} &&`,
         `ab-av1 crf-search`,
