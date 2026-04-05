@@ -21,7 +21,7 @@ const CONTAINER = process.env.TDARR_CONTAINER || 'tdarr-node';
 const SAMPLES_DIR = path.join(__dirname, 'samples');
 const BENCH_TEMP = '/tmp/bench';
 
-const PRESETS = ['safe', 'balanced', 'aggressive', 'max'];
+const PRESETS = ['safe', 'balanced', 'aggressive', 'max', 'auto'];
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -235,12 +235,24 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   const containerSample = activeSample || `/samples/${path.basename(samplePath)}`;
   const warmupDir = `${BENCH_TEMP}/warmup`;
 
-  const encFlags = encoderArg === 'aom'
-    ? buildAomFlags(Number(cpuUsed), config.tpw, '', grainParam)
-    : buildSvtFlags(Number(cpuUsed), config.svtLp, '', grainParam);
+  let encFlags;
+  if (config.auto) {
+    // Auto mode: build flags without thread params, let av1an/encoder decide
+    encFlags = encoderArg === 'aom'
+      ? buildAomFlags(Number(cpuUsed), 0, '', grainParam).replace(/--threads=\d+\s*/, '')
+      : buildSvtFlags(Number(cpuUsed), 0, '', grainParam).replace(/--lp \d+\s*/, '');
+  } else {
+    encFlags = encoderArg === 'aom'
+      ? buildAomFlags(Number(cpuUsed), config.tpw, '', grainParam)
+      : buildSvtFlags(Number(cpuUsed), config.svtLp, '', grainParam);
+  }
 
   const av1anEncoder = encoderArg === 'aom' ? 'aom' : 'svt-av1';
   console.log(`    Encoder flags: ${encFlags}`);
+
+  const workerArgs = config.auto
+    ? ''
+    : `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`;
 
   let av1anCmdParts;
   if (noWarmup) {
@@ -251,7 +263,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       `mkdir -p ${runDir}/work &&`,
       `av1an -i "${containerSample}" -o ${runDir}/out.mkv --temp ${runDir}/work`,
       `-c mkvmerge -e ${av1anEncoder}`,
-      `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
+      workerArgs,
       `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
       `--sc-downscale-height 540 --chunk-order long-to-short`,
       `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
@@ -268,7 +280,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       `echo '{"frames":0,"done":{},"audio_done":false}' > ${warmupDir}/work/done.json &&`,
       `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
       `-c mkvmerge -e ${av1anEncoder}`,
-      `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
+      workerArgs,
       `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
       `--sc-downscale-height 540 --chunk-order long-to-short`,
       `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
@@ -550,9 +562,9 @@ function printTable(results) {
   const rows = results.map((r) => {
     const row = [
       r.label,
-      String(r.workers),
-      String(r.threads),
-      String(r.vmafThreads),
+      r.workers != null ? String(r.workers) : 'auto',
+      r.threads != null ? String(r.threads) : 'auto',
+      r.vmafThreads != null ? String(r.vmafThreads) : 'auto',
     ];
     if (hasReality) {
       row.push(r.fps || '-', r.totalFrames != null ? String(r.totalFrames) : '-');
@@ -890,6 +902,9 @@ async function main() {
   } else {
     const presets = presetFilter || PRESETS;
     configs = presets.map((name) => {
+      if (name === 'auto') {
+        return { workers: null, tpw: null, svtLp: null, vmafThreads: null, label: 'auto', auto: true };
+      }
       if (name === 'legacy') {
         const b = legacyThreadBudget(threads);
         return { workers: b.maxWorkers, tpw: b.threadsPerWorker, svtLp: b.svtLp, vmafThreads: b.vmafThreads, label: 'legacy' };
@@ -1041,9 +1056,11 @@ async function main() {
 
     const results = [];
     for (const config of configs) {
-      const detail = isAbAv1
-        ? `lp=${config.svtLp}`
-        : `workers=${config.workers} threads=${config.tpw} vmaf=${config.vmafThreads}`;
+      const detail = config.auto
+        ? 'av1an auto'
+        : isAbAv1
+          ? `lp=${config.svtLp}`
+          : `workers=${config.workers} threads=${config.tpw} vmaf=${config.vmafThreads}`;
       const modeStr = realitySeconds ? `reality ${realitySeconds}s` : `${testDuration}s`;
       console.log(`\nRunning: ${config.label} (${detail}) — ${modeStr}...`);
 
