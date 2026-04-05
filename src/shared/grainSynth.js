@@ -63,14 +63,18 @@ const estimateNoise = (inputPath, durationSec, ffmpegBin, dbg) => {
       encoding: 'utf8',
     });
     stderr = (result.stderr || '') + (result.stdout || '');
+    if (result.error || result.status !== 0) {
+      dbg(`[grain] ffmpeg signalstats exited ${result.status || 'unknown'}: ${(result.stderr || '').slice(0, 200)}`);
+      return { sigma: 0, grainParam: 0 };
+    }
   } catch (err) {
     dbg(`[grain] ffmpeg signalstats failed: ${err.message}`);
     return { sigma: 0, grainParam: 0 };
   }
 
-  // Parse YHUMED (luma temporal difference median) values from signalstats output.
-  // Each frame produces a line like: [Parsed_signalstats_0 @ ...] YHUMED=4.00 ...
-  const humedRegex = /YHUMED=(\d+(?:\.\d+)?)/g;
+  // Parse YDIF (average absolute temporal luma difference between successive frames) as a noise proxy.
+  // Each frame produces a line like: [Parsed_signalstats_0 @ ...] YDIF=4.00 ...
+  const humedRegex = /YDIF=(\d+(?:\.\d+)?)/g;
   const values = [];
   let match;
   while ((match = humedRegex.exec(stderr)) !== null) {
@@ -78,11 +82,11 @@ const estimateNoise = (inputPath, durationSec, ffmpegBin, dbg) => {
   }
 
   if (values.length === 0) {
-    dbg('[grain] no YHUMED values found in signalstats output');
+    dbg('[grain] no YDIF values found in signalstats output');
     return { sigma: 0, grainParam: 0 };
   }
 
-  // Use median of YHUMED values as sigma estimate (robust to scene changes)
+  // Use median of YDIF values as sigma estimate (robust to scene changes)
   values.sort((a, b) => a - b);
   const mid = Math.floor(values.length / 2);
   const sigma = values.length % 2 === 0
