@@ -38,6 +38,7 @@ Options:
   --downscale <res>     Downscale before encoding: 720p, 1080p, or 1440p (off by default)
   --duration <sec>      How long to run each test in seconds (default: 120)
   --preset <name>       Preset(s) to test (repeatable): safe, balanced, aggressive, max, legacy
+  --custom <json>       Custom config (repeatable): '{"workers":12,"threadsPerWorker":6,"vmafThreads":16}'
   --reality <sec>       Trim sample to N seconds (from middle) and encode to completion
   --grain               Enable VapourSynth grain estimation (auto-detects film grain level)
   --no-warmup           Skip scene cache warmup, each run does fresh scene detection + encode
@@ -74,6 +75,24 @@ const presetFilter = (() => {
     if (cliArgs[i] === '--preset' && cliArgs[i + 1]) presets.push(cliArgs[++i]);
   }
   return presets.length > 0 ? presets : null;
+})();
+const customConfigs = (() => {
+  const configs = [];
+  for (let i = 0; i < cliArgs.length; i++) {
+    if (cliArgs[i] === '--custom' && cliArgs[i + 1]) {
+      try {
+        const c = JSON.parse(cliArgs[++i]);
+        const w = c.workers;
+        const t = c.threadsPerWorker || c.tpw || 1;
+        const v = c.vmafThreads || 16;
+        configs.push({ workers: w, tpw: t, svtLp: t, vmafThreads: v, label: `${w}w×${t}t` });
+      } catch (e) {
+        console.error(`ERROR: invalid --custom JSON: ${e.message}`);
+        process.exit(1);
+      }
+    }
+  }
+  return configs;
 })();
 const sampleFilter = (() => {
   const idx = cliArgs.indexOf('--sample');
@@ -909,6 +928,7 @@ async function main() {
       const b = calculateThreadBudget(threads, encoder, false, { strategy: name, singleProcess, encPreset: Number(cpuUsed) });
       return { workers: b.maxWorkers, tpw: b.threadsPerWorker, svtLp: b.svtLp, vmafThreads: b.vmafThreads, label: name };
     });
+    if (customConfigs.length > 0) configs.push(...customConfigs);
     console.log(`\nPreset mode: testing ${configs.map((c) => c.label).join(', ')}\n`);
   }
 
