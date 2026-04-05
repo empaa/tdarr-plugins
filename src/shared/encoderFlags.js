@@ -139,24 +139,22 @@ const buildAbAv1SvtFlags = (lp, grainParam) => {
 
 const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
   // ffmpeg-native libaom-av1 options (exposed directly by ffmpeg)
+  // Note: cpu-used and keyframe control are handled by ab-av1 natively
+  // (--preset maps to -cpu-used, --keyint maps to -g)
   const ffmpegArgs = [
-    `--enc cpu-used=${preset}`,
     '--enc tune=ssim',
-    `--enc lag-in-frames=48`,
+    '--enc lag-in-frames=48',
     '--enc tile-columns=0',
     '--enc tile-rows=0',
     '--enc aq-mode=0',
     '--enc arnr-strength=1',
-    `--enc arnr-max-frames=4`,
+    '--enc arnr-max-frames=4',
     grainParam > 0 ? `--enc denoise-noise-level=${grainParam}` : '',
   ].filter(Boolean);
 
   // Raw aomenc params not exposed by ffmpeg — passed via aom-params
+  // Note: end-usage omitted — ab-av1 uses CRF mode natively
   const aomParams = [
-    'end-usage=q',
-    'enable-fwd-kf=0',
-    'disable-kf=1',
-    'kf-max-dist=9999',
     'enable-qm=1',
     'sb-size=dynamic',
     'deltaq-mode=0',
