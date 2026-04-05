@@ -718,13 +718,14 @@ async function estimateGrainInContainer(containerSample) {
 
   const grainDir = `${BENCH_TEMP}/grain`;
   const vpyContent = vpyLines.join('\n');
-  const cmd = [
-    `mkdir -p ${grainDir} &&`,
-    `cat > ${grainDir}/noise.vpy << 'VPYEOF'\n${vpyContent}\nVPYEOF`,
-    `&& vspipe -p ${grainDir}/noise.vpy --`,
-  ].join(' ');
 
-  const result = await dockerExec(cmd, { timeout: 180000 });
+  // Write the .vpy script via base64 to avoid heredoc/escaping issues in bash -c
+  const vpyB64 = Buffer.from(vpyContent, 'utf8').toString('base64');
+  const writeCmd = `mkdir -p ${grainDir} && echo '${vpyB64}' | base64 -d > ${grainDir}/noise.vpy`;
+  await dockerExec(writeCmd, { timeout: 10000 });
+
+  // Run vspipe separately so we get clean exit code and stderr
+  const result = await dockerExec(`vspipe -p ${grainDir}/noise.vpy --`, { timeout: 180000 });
 
   if (result.code !== 0) {
     const errTail = (result.stderr || result.stdout || '').trim().slice(-500);
