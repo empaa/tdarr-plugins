@@ -236,6 +236,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
     : buildSvtFlags(Number(cpuUsed), config.svtLp, '', grainParam);
 
   const av1anEncoder = encoderArg === 'aom' ? 'aom' : 'svt-av1';
+  console.log(`    Encoder flags: ${encFlags}`);
 
   // Reuse warmup's work dir (has cached scenes) — clean encode output between runs
   // av1an requires scenes.json + done.json with {"frames": N, "done": {}} + --resume
@@ -377,6 +378,7 @@ async function benchAbAv1(samplePath, config, crf, grainParam = 0) {
   const tempDir = `${BENCH_TEMP}/ab-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
   const svtFlags = buildAbAv1SvtFlags(config.svtLp, 24, grainParam);
+  console.log(`    SVT flags: ${svtFlags}`);
   const abCmdParts = [
     `mkdir -p ${tempDir} &&`,
     `ab-av1 encode`,
