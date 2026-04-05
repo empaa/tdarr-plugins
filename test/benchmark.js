@@ -41,7 +41,8 @@ Options:
   --reality <sec>       Trim sample to N seconds (from middle) and encode to completion
   --grain               Enable VapourSynth grain estimation (auto-detects film grain level)
   --no-warmup           Skip scene cache warmup, each run does fresh scene detection + encode
-                        (default for --reality mode; use --warmup to override)
+                        (default; use --warmup to force cached scene detection)
+  --warmup              Use shared scene cache warmup (faster but may skew results)
   --grid                Test a custom worker×thread grid instead of presets
   --sample <name>       Filter sample files by name substring
   --help, -h            Show this help
@@ -104,7 +105,7 @@ const realitySeconds = (() => {
   return idx !== -1 && cliArgs[idx + 1] ? Number(cliArgs[idx + 1]) : null;
 })();
 const grainEnabled = cliArgs.includes('--grain');
-const noWarmup = cliArgs.includes('--no-warmup') || (realitySeconds != null && !cliArgs.includes('--warmup'));
+const noWarmup = cliArgs.includes('--no-warmup') || !cliArgs.includes('--warmup');
 
 if (realitySeconds != null && cliArgs.includes('--duration')) {
   console.error('ERROR: --reality and --duration are mutually exclusive');
@@ -327,17 +328,22 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       const cpuStr = cpuSamples.length > 0 ? cpuSamples[cpuSamples.length - 1].toFixed(0) + '%' : '-';
       const memStr = memSamples.length > 0 ? memSamples[memSamples.length - 1].toFixed(1) + ' GiB' : '-';
 
+      // Duration timer starts from first encoded bytes, not from command start
+      const encElapsedSec = encodeStartMs ? (Date.now() - encodeStartMs) / 1000 : 0;
+
       if (realityMode) {
         process.stdout.write(`\r    [${elapsed}] workers: ${config.workers} | encoded: ${encMiB} MiB | cpu: ${cpuStr} | ram: ${memStr}    `);
-      } else {
-        const remaining = Math.max(0, testDuration - elapsedSec);
+      } else if (encodeStartMs) {
+        const remaining = Math.max(0, testDuration - encElapsedSec);
         process.stdout.write(`\r    [${elapsed}] workers: ${config.workers} | encoded: ${encMiB} MiB | ${formatMs(remaining * 1000)} left | cpu: ${cpuStr} | ram: ${memStr}    `);
+      } else {
+        process.stdout.write(`\r    [${elapsed}] workers: ${config.workers} | scene detection... | cpu: ${cpuStr} | ram: ${memStr}    `);
       }
 
-      // Time limit
-      if (!realityMode && elapsedSec >= testDuration) {
+      // Time limit — only count time since encoding started
+      if (!realityMode && encodeStartMs && encElapsedSec >= testDuration) {
         timedOut = true;
-        process.stdout.write(`    Time limit reached (${testDuration}s) — stopping encode\n`);
+        process.stdout.write(`    Encode time limit reached (${testDuration}s) — stopping\n`);
         spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
           'pkill -f "av1an|aomenc|SvtAv1EncApp" 2>/dev/null; true',
         ]);
@@ -345,7 +351,9 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
     } catch (_) {}
   }, 10000);
 
-  const execTimeout = realityMode ? 7200000 : (testDuration + 60) * 1000;
+  // Extra time for scene detection when no warmup, plus encode duration, plus muxing buffer
+  const sceneDetectionBuffer = noWarmup ? 300 : 60;
+  const execTimeout = realityMode ? 7200000 : (testDuration + sceneDetectionBuffer) * 1000;
   const result = await dockerExec(cmd, { timeout: execTimeout, live: true });
 
   clearInterval(progressMonitor);
