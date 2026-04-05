@@ -90,38 +90,67 @@ const buildAomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
   ].filter(Boolean).join(' ');
 };
 
-const buildSvtFlags = (preset, svtLp, hdrSvt, grainParam) => {
-  const grainFlags = grainParam > 0
-    ? [`--film-grain ${grainParam}`, '--film-grain-denoise 1']
-    : [];
-  return [
-    '--rc 0', `--preset ${preset}`, '--tune 1', '--input-depth 10',
-    '--lookahead 48', '--keyint -1', '--irefresh-type 2',
-    '--enable-overlays 1', '--enable-variance-boost 1',
-    '--variance-boost-strength 2', '--variance-octile 6',
-    '--enable-qm 1', '--qm-min 0', '--qm-max 15',
-    '--chroma-qm-min 8', '--chroma-qm-max 15',
-    '--tf-strength 1', '--sharpness 1', '--tile-columns 1',
-    '--scm 0', `--lp ${svtLp}`, hdrSvt,
-    ...grainFlags,
-  ].filter(Boolean).join(' ');
+const svtConfig = (preset, lp, hdrSvt, grainParam) => {
+  const entries = [
+    ['rc', '0'],
+    ['preset', String(preset)],
+    ['tune', '1'],
+    ['input-depth', '10'],
+    ['lookahead', '48'],
+    ['keyint', '-1'],
+    ['irefresh-type', '2'],
+    ['enable-overlays', '1'],
+    ['enable-variance-boost', '1'],
+    ['variance-boost-strength', '2'],
+    ['variance-octile', '6'],
+    ['enable-qm', '1'],
+    ['qm-min', '0'],
+    ['qm-max', '15'],
+    ['chroma-qm-min', '8'],
+    ['chroma-qm-max', '15'],
+    ['tf-strength', '1'],
+    ['sharpness', '1'],
+    ['tile-columns', '1'],
+    ['scm', '0'],
+  ];
+  if (lp) entries.push(['lp', String(lp)]);
+  if (grainParam > 0) {
+    entries.push(['film-grain', String(grainParam)]);
+    entries.push(['film-grain-denoise', '1']);
+  }
+  return { entries, hdrSvt };
 };
 
-const buildAbAv1SvtFlags = (lp, lookahead, grainParam) => {
+const formatSvtForAv1an = ({ entries, hdrSvt }) =>
+  entries.map(([k, v]) => `--${k} ${v}`).concat(hdrSvt || []).filter(Boolean).join(' ');
+
+const formatSvtForAbAv1 = ({ entries }) =>
+  entries.map(([k, v]) => `--svt ${k}=${v}`).join(' ');
+
+const buildSvtFlags = (preset, svtLp, hdrSvt, grainParam) =>
+  formatSvtForAv1an(svtConfig(preset, svtLp, hdrSvt, grainParam));
+
+const buildAbAv1SvtFlags = (lp, grainParam) => {
+  const cfg = svtConfig(0, lp, '', grainParam);
+  const skip = new Set(['rc', 'preset', 'input-depth', 'keyint']);
+  const filtered = { entries: cfg.entries.filter(([k]) => !skip.has(k)), hdrSvt: '' };
+  return [formatSvtForAbAv1(filtered), '--keyint 10s', '--scd true'].join(' ');
+};
+
+const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
   const grainFlags = grainParam > 0
-    ? [`--svt film-grain=${grainParam}`, '--svt film-grain-denoise=1']
-    : [];
+    ? `--enc denoise-noise-level=${grainParam}`
+    : '--enc enable-dnl-denoising=0';
   return [
-    '--svt tune=1', '--svt enable-variance-boost=1',
-    '--svt variance-boost-strength=2', '--svt variance-octile=6',
-    '--svt enable-qm=1', '--svt qm-min=0', '--svt qm-max=15',
-    '--svt chroma-qm-min=8', '--svt chroma-qm-max=15',
-    '--svt irefresh-type=2', '--svt scm=0', '--svt sharpness=1',
-    '--svt tf-strength=1', '--svt tile-columns=1', '--svt enable-overlays=1',
-    `--svt lookahead=${lookahead}`, '--keyint 10s', '--scd true',
-    `--svt lp=${lp}`,
-    ...grainFlags,
-  ].join(' ');
+    '--enc end-usage=q', `--enc cpu-used=${preset}`, `--enc threads=${threadsPerWorker}`,
+    '--enc tune=ssim', '--enc enable-fwd-kf=0', '--enc disable-kf=1', '--enc kf-max-dist=9999',
+    '--enc enable-qm=1', '--enc bit-depth=10', '--enc lag-in-frames=48',
+    '--enc tile-columns=0', '--enc tile-rows=0', '--enc sb-size=dynamic',
+    '--enc deltaq-mode=0', '--enc aq-mode=0', '--enc arnr-strength=1', '--enc arnr-maxframes=4',
+    '--enc enable-chroma-deltaq=1', grainFlags,
+    '--enc disable-trellis-quant=0', '--enc quant-b-adapt=1',
+    '--enc enable-keyframe-filtering=1',
+  ].filter(Boolean).join(' ');
 };
 
 // SVT-AV1 effective thread limits per encoder preset.
@@ -143,7 +172,7 @@ const THREAD_PRESETS = {
   safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 0.5,  svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
   balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 0.9,  svtLpMax: 20, vmafThreadDiv: 2, halve4kHdr: false },
   aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 1.4,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
-  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 2.0,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
+  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 2.8,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
 };
 
 const resolveThreadStrategy = (strategyName, overrides) => {
@@ -200,6 +229,7 @@ module.exports = {
   buildAomFlags,
   buildSvtFlags,
   buildAbAv1SvtFlags,
+  buildAbAv1AomFlags,
   calculateThreadBudget,
   capSvtLpByPreset,
   THREAD_PRESETS,

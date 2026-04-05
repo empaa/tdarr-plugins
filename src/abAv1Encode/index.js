@@ -206,12 +206,9 @@ const plugin = async (args) => {
     }
   }
 
-  const sampleFrames = Math.round(srcFps * 4);
-  const lookahead = Math.min(40, Math.max(8, Math.floor(sampleFrames * 0.25)));
-
   const svtFlags = isAutoThreads
-    ? buildAbAv1SvtFlags(0, lookahead, grainParam).replace(/--svt lp=\d+\s*/, '')
-    : buildAbAv1SvtFlags(svtLp, lookahead, grainParam);
+    ? buildAbAv1SvtFlags(0, grainParam).replace(/--svt lp=\d+\s*/, '')
+    : buildAbAv1SvtFlags(svtLp, grainParam);
 
   const sourceSizeGb = (() => {
     try { return fs.statSync(inputPath).size / (1024 ** 3); } catch (_) { return 0; }

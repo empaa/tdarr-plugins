@@ -38,6 +38,7 @@ Options:
   --downscale <res>     Downscale before encoding: 720p, 1080p, or 1440p (off by default)
   --duration <sec>      How long to run each test in seconds (default: 120)
   --preset <name>       Preset(s) to test (repeatable): safe, balanced, aggressive, max, legacy
+  --custom <json>       Custom config (repeatable): '{"workers":12,"threadsPerWorker":6,"vmafThreads":16}'
   --reality <sec>       Trim sample to N seconds (from middle) and encode to completion
   --grain               Enable VapourSynth grain estimation (auto-detects film grain level)
   --no-warmup           Skip scene cache warmup, each run does fresh scene detection + encode
@@ -74,6 +75,24 @@ const presetFilter = (() => {
     if (cliArgs[i] === '--preset' && cliArgs[i + 1]) presets.push(cliArgs[++i]);
   }
   return presets.length > 0 ? presets : null;
+})();
+const customConfigs = (() => {
+  const configs = [];
+  for (let i = 0; i < cliArgs.length; i++) {
+    if (cliArgs[i] === '--custom' && cliArgs[i + 1]) {
+      try {
+        const c = JSON.parse(cliArgs[++i]);
+        const w = c.workers;
+        const t = c.threadsPerWorker || c.tpw || 1;
+        const v = c.vmafThreads || 16;
+        configs.push({ workers: w, tpw: t, svtLp: t, vmafThreads: v, label: `${w}w×${t}t` });
+      } catch (e) {
+        console.error(`ERROR: invalid --custom JSON: ${e.message}`);
+        process.exit(1);
+      }
+    }
+  }
+  return configs;
 })();
 const sampleFilter = (() => {
   const idx = cliArgs.indexOf('--sample');
@@ -181,7 +200,7 @@ function dockerExec(cmd, { timeout = 600000, live = false } = {}) {
     // av1an uses \r for progress bars — split on both \n and \r
     const splitLines = (str) => str.split(/[\r\n]+/).filter(Boolean);
     // Skip noisy/empty lines
-    const SKIP = /^\s*$/;
+    const SKIP = /^\s*$|Creating lwi index file/;
 
     proc.stdout.on('data', (d) => {
       stdout += d;
@@ -442,7 +461,7 @@ async function benchAbAv1(samplePath, config, crf, grainParam = 0) {
   const containerSample = `/samples/${path.basename(samplePath)}`;
   const tempDir = `${BENCH_TEMP}/ab-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
-  const svtFlags = buildAbAv1SvtFlags(config.svtLp, 24, grainParam);
+  const svtFlags = buildAbAv1SvtFlags(config.svtLp, grainParam);
   console.log(`    SVT flags: ${svtFlags}`);
   const abCmdParts = [
     `mkdir -p ${tempDir} &&`,
@@ -552,12 +571,12 @@ function printTable(results) {
   const hasEncodeFps = results.some((r) => r.encodeFps != null);
 
   const headers = ['Config', 'Workers', 'Threads', 'VMAF-T'];
-  if (hasReality) headers.push('FPS', 'Frames');
   if (hasEncodeFps) headers.push('Enc FPS');
   if (hasChunkFps) headers.push('Chunk FPS (min/med/max)');
-  headers.push('MiB/min', 'Total MiB', 'CPU %', 'Peak RAM', 'Time');
+  if (!hasReality) headers.push('MiB/min');
+  headers.push('Total MiB', 'CPU %', 'Peak RAM');
   if (hasEncodeTime) headers.push('Enc Time');
-  headers.push('Status');
+  headers.push('Time', 'Status');
 
   const rows = results.map((r) => {
     const row = [
@@ -566,9 +585,6 @@ function printTable(results) {
       r.threads != null ? String(r.threads) : 'auto',
       r.vmafThreads != null ? String(r.vmafThreads) : 'auto',
     ];
-    if (hasReality) {
-      row.push(r.fps || '-', r.totalFrames != null ? String(r.totalFrames) : '-');
-    }
     if (hasEncodeFps) {
       row.push(r.encodeFps || '-');
     }
@@ -577,15 +593,15 @@ function printTable(results) {
         ? `${r.chunkFps.min.toFixed(1)} / ${r.chunkFps.median.toFixed(1)} / ${r.chunkFps.max.toFixed(1)}`
         : '-');
     }
+    if (!hasReality) row.push(r.mibPerMin);
     row.push(
-      r.mibPerMin,
       r.totalMiB,
       `${r.avgCpu}%`,
       `${r.peakMem} GiB`,
-      r.time,
     );
     if (hasEncodeTime) row.push(r.encodeTime || '-');
     row.push(
+      r.time,
       r.oom ? 'OOM' : r.exitCode === 0 ? 'OK' : `exit ${r.exitCode}`,
     );
     return row;
@@ -604,14 +620,16 @@ function printTable(results) {
   rows.forEach((r) => console.log(fmt(r)));
   console.log(sep);
 
-  // Recommendation
-  const best = results
-    .filter((r) => !r.oom && r.exitCode === 0)
-    .sort((a, b) => parseFloat(b.mibPerMin) - parseFloat(a.mibPerMin))[0];
+  // Recommendation — encode FPS is the primary metric in reality mode
+  const ok = results.filter((r) => !r.oom && r.exitCode === 0);
+  const best = hasEncodeFps
+    ? ok.filter((r) => r.encodeFps != null).sort((a, b) => parseFloat(b.encodeFps) - parseFloat(a.encodeFps))[0]
+    : ok.sort((a, b) => parseFloat(b.mibPerMin) - parseFloat(a.mibPerMin))[0];
 
   if (best) {
+    const metric = hasEncodeFps ? `${best.encodeFps} encode fps` : `${best.mibPerMin} MiB/min`;
     const isPreset = PRESETS.includes(best.label);
-    console.log(`\nRecommended: ${best.label}`);
+    console.log(`\nRecommended: ${best.label} (${metric})`);
     if (isPreset) {
       console.log(`Set Thread Strategy to "${best.label}" in the plugin settings.`);
     } else if (best.workers !== '-') {
@@ -620,15 +638,6 @@ function printTable(results) {
     } else {
       console.log(`Set Thread Strategy to "custom" and paste into Thread Overrides:`);
       console.log(`{"threadsPerWorker":${best.threads}}`);
-    }
-  }
-
-  if (hasReality) {
-    const bestFps = results
-      .filter((r) => !r.oom && r.exitCode === 0 && r.fps != null)
-      .sort((a, b) => parseFloat(b.fps) - parseFloat(a.fps))[0];
-    if (bestFps) {
-      console.log(`\nFastest (reality): ${bestFps.label} at ${bestFps.fps} fps`);
     }
   }
 }
@@ -919,6 +928,7 @@ async function main() {
       const b = calculateThreadBudget(threads, encoder, false, { strategy: name, singleProcess, encPreset: Number(cpuUsed) });
       return { workers: b.maxWorkers, tpw: b.threadsPerWorker, svtLp: b.svtLp, vmafThreads: b.vmafThreads, label: name };
     });
+    if (customConfigs.length > 0) configs.push(...customConfigs);
     console.log(`\nPreset mode: testing ${configs.map((c) => c.label).join(', ')}\n`);
   }
 
@@ -1013,7 +1023,7 @@ async function main() {
 
       // Use first config's svtLp for the search (doesn't affect CRF result much)
       const warmupLp = configs[0].svtLp;
-      const warmupSvtFlags = buildAbAv1SvtFlags(warmupLp, 24);
+      const warmupSvtFlags = buildAbAv1SvtFlags(warmupLp, 0);
       const crfSearchParts = [
         `mkdir -p ${warmupDir} &&`,
         `ab-av1 crf-search`,
