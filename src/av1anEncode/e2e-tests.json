@@ -1,24 +1,23 @@
 [
   {
-    "name": "svt-av1 default",
+    "name": "aom grain-synth",
     "inputs": {
-      "encoder": "svt-av1",
+      "encoder": "aom",
       "target_vmaf": "93",
-      "preset": "8",
+      "preset": "6",
       "max_encoded_percent": "100",
-      "downscale_enabled": "true",
-      "downscale_resolution": "720p"
+      "grain_synth": "true",
+      "thread_strategy": "balanced"
     }
   },
   {
-    "name": "svt-av1 balanced strategy",
+    "name": "svt-av1 grain-synth",
     "inputs": {
       "encoder": "svt-av1",
       "target_vmaf": "93",
-      "preset": "8",
+      "preset": "6",
       "max_encoded_percent": "100",
-      "downscale_enabled": "true",
-      "downscale_resolution": "720p",
+      "grain_synth": "true",
       "thread_strategy": "balanced"
     }
   }

@@ -189,9 +189,9 @@ const plugin = async (args) => {
     const result = estimateNoise(inputPath, durationSec, BIN.ffmpeg, dbg);
     grainParam = result.grainParam;
     if (grainParam > 0) {
-      jobLog(`[grain] detected noise sigma=${result.sigma.toFixed(2)} -> film-grain=${grainParam}`);
+      jobLog(`[grain] detected noise=${result.noise.toFixed(2)} -> film-grain=${grainParam}`);
     } else {
-      jobLog('[grain] source is clean (sigma < 2), skipping grain synthesis');
+      jobLog('[grain] source is clean (noise < 2), skipping grain synthesis');
     }
   }
 

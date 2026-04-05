@@ -1,16 +1,10 @@
 [
   {
-    "name": "default",
+    "name": "grain-synth",
     "inputs": {
       "target_vmaf": "93",
-      "preset": "8"
-    }
-  },
-  {
-    "name": "balanced strategy",
-    "inputs": {
-      "target_vmaf": "93",
-      "preset": "8",
+      "preset": "6",
+      "grain_synth": "true",
       "thread_strategy": "balanced"
     }
   }
