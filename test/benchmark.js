@@ -717,14 +717,22 @@ async function estimateGrainInContainer(containerSample) {
   vpyLines.push('out.set_output()');
 
   const grainDir = `${BENCH_TEMP}/grain`;
-  const vpyScript = vpyLines.join('\\n');
+  const vpyContent = vpyLines.join('\n');
   const cmd = [
     `mkdir -p ${grainDir} &&`,
-    `printf '${vpyScript}\\n' > ${grainDir}/noise.vpy &&`,
-    `vspipe -p ${grainDir}/noise.vpy --`,
+    `cat > ${grainDir}/noise.vpy << 'VPYEOF'\n${vpyContent}\nVPYEOF`,
+    `&& vspipe -p ${grainDir}/noise.vpy --`,
   ].join(' ');
 
   const result = await dockerExec(cmd, { timeout: 180000 });
+
+  if (result.code !== 0) {
+    const errTail = (result.stderr || result.stdout || '').trim().slice(-500);
+    console.log(`  Grain estimation failed (exit ${result.code}):`);
+    if (errTail) console.log(`    ${errTail.split('\n').join('\n    ')}`);
+    return 0;
+  }
+
   const output = (result.stderr || '') + (result.stdout || '');
 
   // Parse SIGMA values
