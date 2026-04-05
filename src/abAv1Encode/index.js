@@ -140,6 +140,8 @@ const plugin = async (args) => {
   if (!BIN_AB_AV1) throw new Error('Required binary not found: ab-av1 (checked /usr/local/bin, /usr/bin)');
   const BIN_FFMPEG = ['/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg'].find((p) => fs.existsSync(p));
   if (!BIN_FFMPEG) throw new Error('Required binary not found: ffmpeg (checked /usr/local/bin, /usr/bin)');
+  const BIN_VSPIPE = ['/usr/local/bin/vspipe', '/usr/bin/vspipe'].find((p) => fs.existsSync(p));
+  if (!BIN_VSPIPE) throw new Error('Required binary not found: vspipe (checked /usr/local/bin, /usr/bin)');
   const vmafModel = '/usr/local/share/vmaf/vmaf_v0.6.1.json';
   if (!fs.existsSync(vmafModel)) throw new Error(`VMAF model not found: ${vmafModel}`);
 
@@ -175,11 +177,24 @@ const plugin = async (args) => {
     { strategy: threadStrategy, ...threadOverrides, singleProcess: true, encPreset },
   );
 
+  const abWorkDir = path.join(args.workDir, 'ab-av1-work');
+  const outputPath = path.join(args.workDir, 'ab-av1-output.mkv');
+  fs.mkdirSync(abWorkDir, { recursive: true });
+
+  const srcFps = (() => {
+    const r = stream.r_frame_rate || stream.avg_frame_rate || '24/1';
+    const parts = r.split('/').map(Number);
+    return parts[1] ? parts[0] / parts[1] : parts[0];
+  })();
+
   let grainParam = 0;
   if (grainSynthEnabled) {
     const durationSec = parseFloat(stream.duration || '0')
       || (file.ffProbeData && file.ffProbeData.format && parseFloat(file.ffProbeData.format.duration)) || 0;
-    const result = estimateNoise(inputPath, durationSec, BIN_FFMPEG, dbg);
+    const totalFrames = parseInt(stream.nb_frames || '0', 10)
+      || (durationSec > 0 && srcFps > 0 ? Math.round(durationSec * srcFps) : 0);
+    const lwiCache = path.join(abWorkDir, 'noise.lwi');
+    const result = estimateNoise(inputPath, durationSec, totalFrames, BIN_VSPIPE, lwiCache, dbg);
     grainParam = result.grainParam;
     if (grainParam > 0) {
       jobLog(`[grain] detected sigma=${result.sigma.toFixed(2)} -> film-grain=${grainParam}`);
@@ -188,19 +203,10 @@ const plugin = async (args) => {
     }
   }
 
-  const srcFps = (() => {
-    const r = stream.r_frame_rate || stream.avg_frame_rate || '24/1';
-    const parts = r.split('/').map(Number);
-    return parts[1] ? parts[0] / parts[1] : parts[0];
-  })();
   const sampleFrames = Math.round(srcFps * 4);
   const lookahead = Math.min(40, Math.max(8, Math.floor(sampleFrames * 0.25)));
 
   const svtFlags = buildAbAv1SvtFlags(svtLp, lookahead, grainParam);
-
-  const abWorkDir = path.join(args.workDir, 'ab-av1-work');
-  const outputPath = path.join(args.workDir, 'ab-av1-output.mkv');
-  fs.mkdirSync(abWorkDir, { recursive: true });
 
   const sourceSizeGb = (() => {
     try { return fs.statSync(inputPath).size / (1024 ** 3); } catch (_) { return 0; }

@@ -182,11 +182,27 @@ const plugin = async (args) => {
     { strategy: threadStrategy, ...threadOverrides, encPreset },
   );
 
+  const workBase = path.join(args.workDir, 'av1an-work');
+  const vsDir = path.join(workBase, 'vs');
+  const av1anTemp = path.join(workBase, 'work');
+  const outputPath = path.join(args.workDir, 'av1-output.mkv');
+  fs.mkdirSync(vsDir, { recursive: true });
+  fs.mkdirSync(av1anTemp, { recursive: true });
+
+  const lwiCache = path.join(vsDir, 'source.lwi');
+
   let grainParam = 0;
   if (grainSynthEnabled) {
     const durationSec = parseFloat(stream.duration || '0')
       || (file.ffProbeData && file.ffProbeData.format && parseFloat(file.ffProbeData.format.duration)) || 0;
-    const result = estimateNoise(inputPath, durationSec, BIN.ffmpeg, dbg);
+    const srcFpsForGrain = (() => {
+      const r = stream.r_frame_rate || stream.avg_frame_rate || '24/1';
+      const parts = r.split('/').map(Number);
+      return parts[1] ? parts[0] / parts[1] : parts[0];
+    })();
+    const totalFrames = parseInt(stream.nb_frames || '0', 10)
+      || (durationSec > 0 && srcFpsForGrain > 0 ? Math.round(durationSec * srcFpsForGrain) : 0);
+    const result = estimateNoise(inputPath, durationSec, totalFrames, BIN.vspipe, lwiCache, dbg);
     grainParam = result.grainParam;
     if (grainParam > 0) {
       jobLog(`[grain] detected sigma=${result.sigma.toFixed(2)} -> film-grain=${grainParam}`);
@@ -198,13 +214,6 @@ const plugin = async (args) => {
   const encFlags = encoder === 'aom'
     ? buildAomFlags(encPreset, threadsPerWorker, hdrAom, grainParam)
     : buildSvtFlags(encPreset, svtLp, hdrSvt, grainParam);
-
-  const workBase = path.join(args.workDir, 'av1an-work');
-  const vsDir = path.join(workBase, 'vs');
-  const av1anTemp = path.join(workBase, 'work');
-  const outputPath = path.join(args.workDir, 'av1-output.mkv');
-  fs.mkdirSync(vsDir, { recursive: true });
-  fs.mkdirSync(av1anTemp, { recursive: true });
 
   jobLog('='.repeat(64));
   jobLog(`AV1AN ENCODE  encoder=${encoder}  preset=${encPreset}`);
@@ -228,7 +237,6 @@ const plugin = async (args) => {
   const audioSizeGb = await probeAudioSize(inputPath, args.workDir, dbg, dbg);
 
   const vpyScript = path.join(vsDir, 'source.vpy');
-  const lwiCache = path.join(vsDir, 'source.lwi');
   const escPy = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
   let vpyLines = [
