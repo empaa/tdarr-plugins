@@ -40,6 +40,7 @@ Options:
   --preset <name>       Preset(s) to test (repeatable): safe, balanced, aggressive, max, legacy
   --reality <sec>       Trim sample to N seconds (from middle) and encode to completion
   --grain               Enable VapourSynth grain estimation (auto-detects film grain level)
+  --no-warmup           Skip scene cache warmup, each run does fresh scene detection + encode
   --grid                Test a custom worker×thread grid instead of presets
   --sample <name>       Filter sample files by name substring
   --help, -h            Show this help
@@ -102,6 +103,7 @@ const realitySeconds = (() => {
   return idx !== -1 && cliArgs[idx + 1] ? Number(cliArgs[idx + 1]) : null;
 })();
 const grainEnabled = cliArgs.includes('--grain');
+const noWarmup = cliArgs.includes('--no-warmup');
 
 if (realitySeconds != null && cliArgs.includes('--duration')) {
   console.error('ERROR: --reality and --duration are mutually exclusive');
@@ -238,23 +240,39 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   const av1anEncoder = encoderArg === 'aom' ? 'aom' : 'svt-av1';
   console.log(`    Encoder flags: ${encFlags}`);
 
-  // Reuse warmup's work dir (has cached scenes) — clean encode output between runs
-  // av1an requires scenes.json + done.json with {"frames": N, "done": {}} + --resume
-  // to skip scene detection. The frames count must match scenes.json.
-  const av1anCmdParts = [
-    `rm -rf ${warmupDir}/work ${warmupDir}/out.mkv 2>/dev/null;`,
-    `mkdir -p ${warmupDir}/work &&`,
-    `cp ${warmupDir}/scenes_backup.json ${warmupDir}/work/scenes.json &&`,
-    `cp ${warmupDir}/chunks_backup.json ${warmupDir}/work/chunks.json &&`,
-    `echo '{"frames":0,"done":{},"audio_done":false}' > ${warmupDir}/work/done.json &&`,
-    `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
-    `-c mkvmerge -e ${av1anEncoder}`,
-    `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
-    `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
-    `--sc-downscale-height 540 --chunk-order long-to-short`,
-    `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
-    `--verbose --resume`,
-  ];
+  let av1anCmdParts;
+  if (noWarmup) {
+    // Fresh run: no scene cache, av1an does scene detection + encode from scratch
+    const runDir = `${BENCH_TEMP}/run-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    av1anCmdParts = [
+      `rm -rf ${runDir} 2>/dev/null;`,
+      `mkdir -p ${runDir}/work &&`,
+      `av1an -i "${containerSample}" -o ${runDir}/out.mkv --temp ${runDir}/work`,
+      `-c mkvmerge -e ${av1anEncoder}`,
+      `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
+      `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
+      `--sc-downscale-height 540 --chunk-order long-to-short`,
+      `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
+      `--verbose`,
+    ];
+  } else {
+    // Reuse warmup's scene cache — clean encode output between runs
+    // av1an requires scenes.json + done.json with {"frames": N, "done": {}} + --resume
+    av1anCmdParts = [
+      `rm -rf ${warmupDir}/work ${warmupDir}/out.mkv 2>/dev/null;`,
+      `mkdir -p ${warmupDir}/work &&`,
+      `cp ${warmupDir}/scenes_backup.json ${warmupDir}/work/scenes.json &&`,
+      `cp ${warmupDir}/chunks_backup.json ${warmupDir}/work/chunks.json &&`,
+      `echo '{"frames":0,"done":{},"audio_done":false}' > ${warmupDir}/work/done.json &&`,
+      `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
+      `-c mkvmerge -e ${av1anEncoder}`,
+      `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`,
+      `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
+      `--sc-downscale-height 540 --chunk-order long-to-short`,
+      `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
+      `--verbose --resume`,
+    ];
+  }
   if (downscaleRes) {
     const vmafResArgs = buildAv1anVmafResArgs(downscaleRes);
     if (vmafResArgs.length) av1anCmdParts.push(vmafResArgs.join(' '));
@@ -263,7 +281,11 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   const cmd = av1anCmdParts.join(' ');
 
   const startMs = Date.now();
-  const workDir = `${warmupDir}/work`;
+  let encodeStartMs = null;  // timestamp when av1an starts encoding chunks
+  const runDir = noWarmup
+    ? `${BENCH_TEMP}/run-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`
+    : warmupDir;
+  const workDir = `${runDir}/work`;
   const cpuSamples = [];
   const memSamples = [];
 
@@ -293,6 +315,11 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       const bytesCheck = await dockerExec(readBytesScript, { timeout: 5000 });
       const encBytes = parseInt(bytesCheck.stdout.trim(), 10) || 0;
       const encMiB = (encBytes / (1024 * 1024)).toFixed(1);
+
+      // Track when encoding actually starts (first bytes appear)
+      if (encodeStartMs === null && encBytes > 0) {
+        encodeStartMs = Date.now();
+      }
 
       const elapsedSec = (Date.now() - startMs) / 1000;
       const elapsed = formatMs(Date.now() - startMs);
@@ -339,7 +366,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   // fall back to encode dir for in-progress measurement
   let encBytes = 0;
   try {
-    const outFileScript = `stat -c%s ${warmupDir}/out.mkv 2>/dev/null || echo 0`;
+    const outFileScript = `stat -c%s ${runDir}/out.mkv 2>/dev/null || echo 0`;
     const outResult = await dockerExec(outFileScript, { timeout: 8000 });
     encBytes = parseInt(outResult.stdout.trim(), 10) || 0;
     if (encBytes === 0) {
@@ -349,11 +376,15 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   } catch (_) {}
 
   const encodeTimeSec = encodeTimeMs / 1000;
+  const encodeOnlyMs = encodeStartMs ? (Date.now() - startMs) - (encodeStartMs - startMs) : null;
+  const encodeOnlySec = encodeOnlyMs ? encodeOnlyMs / 1000 : null;
   const mibPerMin = encBytes > 0 && encodeTimeSec > 0
     ? (encBytes / (1024 * 1024)) / (encodeTimeSec / 60) : 0;
 
   const fps = realityMode && totalFrames > 0 && encodeTimeSec > 0
     ? (totalFrames / encodeTimeSec).toFixed(1) : null;
+  const encodeFps = realityMode && totalFrames > 0 && encodeOnlySec > 0
+    ? (totalFrames / encodeOnlySec).toFixed(1) : null;
 
   return {
     label: config.label,
@@ -365,9 +396,11 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
     avgCpu: avgCpu.toFixed(0),
     peakMem: peakMem.toFixed(1),
     time: formatMs(encodeTimeMs),
+    encodeTime: encodeOnlyMs ? formatMs(encodeOnlyMs) : null,
     exitCode: timedOut ? 0 : result.code,
     oom: peakMem > 0 && result.code !== 0 && !timedOut && peakMem > 50,
     fps,
+    encodeFps,
     totalFrames: realityMode ? totalFrames : null,
     chunkFps,
   };
@@ -483,11 +516,16 @@ function formatMs(ms) {
 function printTable(results) {
   const hasReality = results.some((r) => r.fps != null);
   const hasChunkFps = results.some((r) => r.chunkFps != null);
+  const hasEncodeTime = results.some((r) => r.encodeTime != null);
+  const hasEncodeFps = results.some((r) => r.encodeFps != null);
 
   const headers = ['Config', 'Workers', 'Threads', 'VMAF-T'];
   if (hasReality) headers.push('FPS', 'Frames');
+  if (hasEncodeFps) headers.push('Enc FPS');
   if (hasChunkFps) headers.push('Chunk FPS (min/med/max)');
-  headers.push('MiB/min', 'Total MiB', 'CPU %', 'Peak RAM', 'Time', 'Status');
+  headers.push('MiB/min', 'Total MiB', 'CPU %', 'Peak RAM', 'Time');
+  if (hasEncodeTime) headers.push('Enc Time');
+  headers.push('Status');
 
   const rows = results.map((r) => {
     const row = [
@@ -498,6 +536,9 @@ function printTable(results) {
     ];
     if (hasReality) {
       row.push(r.fps || '-', r.totalFrames != null ? String(r.totalFrames) : '-');
+    }
+    if (hasEncodeFps) {
+      row.push(r.encodeFps || '-');
     }
     if (hasChunkFps) {
       row.push(r.chunkFps
@@ -510,6 +551,9 @@ function printTable(results) {
       `${r.avgCpu}%`,
       `${r.peakMem} GiB`,
       r.time,
+    );
+    if (hasEncodeTime) row.push(r.encodeTime || '-');
+    row.push(
       r.oom ? 'OOM' : r.exitCode === 0 ? 'OK' : `exit ${r.exitCode}`,
     );
     return row;
@@ -861,7 +905,7 @@ async function main() {
     }
 
     // Warmup: run scene detection once so all benchmark runs use cached scenes
-    if (!isAbAv1) {
+    if (!isAbAv1 && !noWarmup) {
       console.log('\nWarmup: running scene detection (will be cached for all configs)...');
       const containerSample = activeSample;
       const warmupDir = `${BENCH_TEMP}/warmup`;
@@ -1001,10 +1045,12 @@ async function main() {
 
       results.push(result);
       const fpsStr = result.fps ? `, ${result.fps} fps` : '';
+      const encFpsStr = result.encodeFps ? ` (encode-only: ${result.encodeFps} fps)` : '';
+      const encTimeStr = result.encodeTime ? `, encode: ${result.encodeTime}` : '';
       const chunkStr = result.chunkFps
         ? `, chunks: ${result.chunkFps.min.toFixed(1)}/${result.chunkFps.median.toFixed(1)}/${result.chunkFps.max.toFixed(1)} fps`
         : '';
-      console.log(`  -> ${result.mibPerMin} MiB/min (${result.totalMiB} MiB)${fpsStr}${chunkStr}, ${result.avgCpu}% CPU, ${result.peakMem} GiB RAM${result.oom ? ' [OOM]' : ''}`);
+      console.log(`  -> ${result.mibPerMin} MiB/min (${result.totalMiB} MiB)${fpsStr}${encFpsStr}${chunkStr}${encTimeStr}, ${result.avgCpu}% CPU, ${result.peakMem} GiB RAM${result.oom ? ' [OOM]' : ''}`);
     }
 
     console.log('');
