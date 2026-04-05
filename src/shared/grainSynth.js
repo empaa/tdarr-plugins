@@ -109,6 +109,8 @@ const estimateNoise = (inputPath, durationSec, totalFrames, vspipeBin, lwiCache,
   const maxStart = totalFrames - FRAMES_PER_REGION - 1;
   const starts = positions.map((p) => Math.min(Math.max(0, Math.floor(p * totalFrames)), maxStart));
 
+  dbg(`[grain] source: ${totalFrames} frames, ${durationSec.toFixed(1)}s`);
+
   const vpyPath = path.join(path.dirname(lwiCache), 'noise_estimate.vpy');
   const script = buildNoiseVpy(inputPath, lwiCache, starts);
 

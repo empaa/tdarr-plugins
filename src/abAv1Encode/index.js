@@ -140,8 +140,6 @@ const plugin = async (args) => {
   if (!BIN_AB_AV1) throw new Error('Required binary not found: ab-av1 (checked /usr/local/bin, /usr/bin)');
   const BIN_FFMPEG = ['/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg'].find((p) => fs.existsSync(p));
   if (!BIN_FFMPEG) throw new Error('Required binary not found: ffmpeg (checked /usr/local/bin, /usr/bin)');
-  const BIN_VSPIPE = ['/usr/local/bin/vspipe', '/usr/bin/vspipe'].find((p) => fs.existsSync(p));
-  if (!BIN_VSPIPE) throw new Error('Required binary not found: vspipe (checked /usr/local/bin, /usr/bin)');
   const vmafModel = '/usr/local/share/vmaf/vmaf_v0.6.1.json';
   if (!fs.existsSync(vmafModel)) throw new Error(`VMAF model not found: ${vmafModel}`);
 
@@ -189,6 +187,8 @@ const plugin = async (args) => {
 
   let grainParam = 0;
   if (grainSynthEnabled) {
+    const BIN_VSPIPE = ['/usr/local/bin/vspipe', '/usr/bin/vspipe'].find((p) => fs.existsSync(p));
+    if (!BIN_VSPIPE) throw new Error('Required binary not found: vspipe (checked /usr/local/bin, /usr/bin)');
     const durationSec = parseFloat(stream.duration || '0')
       || (file.ffProbeData && file.ffProbeData.format && parseFloat(file.ffProbeData.format.duration)) || 0;
     const totalFrames = parseInt(stream.nb_frames || '0', 10)
