@@ -124,7 +124,7 @@ const plugin = async (args) => {
   } = require('../shared/encoderFlags');
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
-  const { createAv1anTracker, createAbAv1Tracker } = require('../shared/progressTracker');
+  const { createAv1anTracker } = require('../shared/progressTracker');
   const { estimateNoise } = require('../shared/grainSynth');
 
   const inputs = args.inputs || {};
@@ -307,9 +307,9 @@ const plugin = async (args) => {
     }
 
     // Parse "crf <N>" results -- keep updating to get the final chosen value
-    const crfMatch = line.match(/crf\s+(\d+)\s+.*VMAF\s+([\d.]+)/i);
+    const crfMatch = line.match(/crf\s+([\d.]+)\s+.*VMAF\s+([\d.]+)/i);
     if (crfMatch) {
-      const crf = parseInt(crfMatch[1], 10);
+      const crf = parseFloat(crfMatch[1]);
       const vmaf = parseFloat(crfMatch[2]);
       dbg(`[crf-search] candidate crf=${crf} vmaf=${vmaf}`);
       if (vmaf >= targetVmaf) {
