@@ -125,12 +125,13 @@ const buildAbAv1SvtFlags = (lp, lookahead, grainParam) => {
 };
 
 // SVT-AV1 effective thread limits per encoder preset.
-// Lower presets have algorithmic dependencies that prevent parallelization.
-// See: https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/1843
+// SVT-AV1 benefits more from extra workers (av1an parallelism) than from
+// extra threads per worker. lp beyond ~6 shows diminishing returns, so we
+// cap low to maximize workers. Lower presets cap even tighter at 4.
 const SVT_LP_CAP_BY_PRESET = {
-  0: 4, 1: 4, 2: 6, 3: 6,
-  4: 8, 5: 12, 6: 16,
-  7: 32, 8: 32, 9: 32, 10: 32, 11: 32, 12: 32, 13: 32,
+  0: 6, 1: 6, 2: 6, 3: 6,
+  4: 6, 5: 6, 6: 6,
+  7: 6, 8: 6, 9: 6, 10: 6, 11: 6, 12: 6, 13: 6,
 };
 
 const capSvtLpByPreset = (lp, encPreset) => {
