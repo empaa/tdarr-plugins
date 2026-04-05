@@ -12,6 +12,7 @@ const {
 const {
   buildVsDownscaleLines, buildAv1anVmafResArgs, buildAbAv1DownscaleArgs,
 } = require('../src/shared/downscale');
+const { mapSigmaToGrainParam } = require('../src/shared/grainSynth');
 
 // ---------------------------------------------------------------------------
 // Config
@@ -38,6 +39,7 @@ Options:
   --duration <sec>      How long to run each test in seconds (default: 120)
   --preset <name>       Preset(s) to test (repeatable): safe, balanced, aggressive, max, legacy
   --reality <sec>       Trim sample to N seconds (from middle) and encode to completion
+  --grain               Enable VapourSynth grain estimation (auto-detects film grain level)
   --grid                Test a custom worker×thread grid instead of presets
   --sample <name>       Filter sample files by name substring
   --help, -h            Show this help
@@ -54,6 +56,7 @@ Examples:
   npm run benchmark -- --grid --encoder aom            # custom worker×thread grid
   npm run benchmark -- --downscale 720p                 # benchmark with downscale pre-filter
   npm run benchmark -- --sample jurassic               # only use matching samples
+  npm run benchmark -- --grain                          # benchmark with grain synthesis
   npm run benchmark -- --reality 30 --preset legacy --preset max --encoder aom
 
 Encoder flags match the plugin defaults (buildAomFlags/buildSvtFlags from encoderFlags.js).
@@ -98,6 +101,7 @@ const realitySeconds = (() => {
   const idx = cliArgs.indexOf('--reality');
   return idx !== -1 && cliArgs[idx + 1] ? Number(cliArgs[idx + 1]) : null;
 })();
+const grainEnabled = cliArgs.includes('--grain');
 
 if (realitySeconds != null && cliArgs.includes('--duration')) {
   console.error('ERROR: --reality and --duration are mutually exclusive');
@@ -223,13 +227,13 @@ function parseMemGiB(str) {
 // ---------------------------------------------------------------------------
 // Benchmark runners
 // ---------------------------------------------------------------------------
-async function benchAv1an(samplePath, config, { realityMode = false, activeSample = null, totalFrames = 0 } = {}) {
+async function benchAv1an(samplePath, config, { realityMode = false, activeSample = null, totalFrames = 0, grainParam = 0 } = {}) {
   const containerSample = activeSample || `/samples/${path.basename(samplePath)}`;
   const warmupDir = `${BENCH_TEMP}/warmup`;
 
   const encFlags = encoderArg === 'aom'
-    ? buildAomFlags(Number(cpuUsed), config.tpw, '')
-    : buildSvtFlags(Number(cpuUsed), config.svtLp, '');
+    ? buildAomFlags(Number(cpuUsed), config.tpw, '', grainParam)
+    : buildSvtFlags(Number(cpuUsed), config.svtLp, '', grainParam);
 
   const av1anEncoder = encoderArg === 'aom' ? 'aom' : 'svt-av1';
 
@@ -368,11 +372,11 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   };
 }
 
-async function benchAbAv1(samplePath, config, crf) {
+async function benchAbAv1(samplePath, config, crf, grainParam = 0) {
   const containerSample = `/samples/${path.basename(samplePath)}`;
   const tempDir = `${BENCH_TEMP}/ab-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
-  const svtFlags = buildAbAv1SvtFlags(config.svtLp, 24);
+  const svtFlags = buildAbAv1SvtFlags(config.svtLp, 24, grainParam);
   const abCmdParts = [
     `mkdir -p ${tempDir} &&`,
     `ab-av1 encode`,
@@ -648,6 +652,108 @@ async function parseChunkFps(workDir) {
 }
 
 // ---------------------------------------------------------------------------
+// Grain estimation (runs inside container via VapourSynth)
+// ---------------------------------------------------------------------------
+async function estimateGrainInContainer(containerSample) {
+  console.log('  Estimating grain level via VapourSynth...');
+
+  // Probe frame count and duration
+  const probeCmd = [
+    'ffprobe -v error -select_streams v:0',
+    '-show_entries stream=nb_frames,duration',
+    `-of csv=p=0 "${containerSample}"`,
+  ].join(' ');
+  const probeResult = await dockerExec(probeCmd, { timeout: 30000 });
+  const [framesStr, durStr] = probeResult.stdout.trim().split(',');
+  let totalFrames = parseInt(framesStr, 10) || 0;
+  let durationSec = parseFloat(durStr) || 0;
+
+  // Fallback: count frames if nb_frames unavailable
+  if (totalFrames === 0) {
+    totalFrames = await probeFrameCount(containerSample);
+  }
+  if (durationSec === 0) {
+    const durProbe = await dockerExec(
+      `ffprobe -v error -show_entries format=duration -of csv=p=0 "${containerSample}"`,
+      { timeout: 15000 },
+    );
+    durationSec = parseFloat(durProbe.stdout.trim()) || 0;
+  }
+
+  if (totalFrames < 60) {
+    console.log('  Grain estimation skipped (too few frames)');
+    return 0;
+  }
+
+  // Build VapourSynth noise estimation script (same logic as grainSynth.js)
+  const positions = [0.15, 0.35, 0.55, 0.75];
+  const fpr = 50; // FRAMES_PER_REGION
+  const maxStart = totalFrames - fpr - 1;
+  const starts = positions.map((p) => Math.min(Math.max(0, Math.floor(p * totalFrames)), maxStart));
+
+  const vpyLines = [
+    'import vapoursynth as vs',
+    'import sys',
+    'core = vs.core',
+    `clip = core.lsmas.LWLibavSource(source='${containerSample}')`,
+    'luma = core.std.ShufflePlanes(clip, planes=0, colorfamily=vs.GRAY)',
+  ];
+  for (let i = 0; i < starts.length; i++) {
+    vpyLines.push(`r${i} = luma[${starts[i]}:${starts[i] + fpr}]`);
+    vpyLines.push(`d${i} = core.std.Expr([r${i}[:-1], r${i}[1:]], expr=['x y - abs'])`);
+    vpyLines.push(`d${i} = core.std.PlaneStats(d${i})`);
+  }
+  const parts = starts.map((_, i) => `d${i}`);
+  vpyLines.push(`out = ${parts[0]}${parts.slice(1).map((p) => ' + ' + p).join('')}`);
+  vpyLines.push('');
+  vpyLines.push('def emit_sigma(n, f):');
+  vpyLines.push('    avg = f.props["PlaneStatsAverage"]');
+  vpyLines.push('    sigma = avg * 255.0 * 1.2533 / 1.4142');
+  vpyLines.push('    sys.stderr.write("SIGMA:{:.6f}\\n".format(sigma))');
+  vpyLines.push('    sys.stderr.flush()');
+  vpyLines.push('    return f');
+  vpyLines.push('');
+  vpyLines.push('out = core.std.ModifyFrame(out, out, emit_sigma)');
+  vpyLines.push('out.set_output()');
+
+  const grainDir = `${BENCH_TEMP}/grain`;
+  const vpyScript = vpyLines.join('\\n');
+  const cmd = [
+    `mkdir -p ${grainDir} &&`,
+    `printf '${vpyScript}\\n' > ${grainDir}/noise.vpy &&`,
+    `vspipe -p ${grainDir}/noise.vpy --`,
+  ].join(' ');
+
+  const result = await dockerExec(cmd, { timeout: 180000 });
+  const output = (result.stderr || '') + (result.stdout || '');
+
+  // Parse SIGMA values
+  const sigmaRegex = /SIGMA:([\d.]+)/g;
+  const values = [];
+  let match;
+  while ((match = sigmaRegex.exec(output)) !== null) {
+    const v = parseFloat(match[1]);
+    if (isFinite(v)) values.push(v);
+  }
+
+  if (values.length === 0) {
+    console.log('  Grain estimation: no SIGMA values detected, using grain=0');
+    return 0;
+  }
+
+  // Median
+  values.sort((a, b) => a - b);
+  const mid = Math.floor(values.length / 2);
+  const sigma = values.length % 2 === 0
+    ? (values[mid - 1] + values[mid]) / 2
+    : values[mid];
+
+  const grainParam = mapSigmaToGrainParam(sigma);
+  console.log(`  Grain estimation: sigma=${sigma.toFixed(2)} -> film-grain=${grainParam} (from ${values.length} frames)`);
+  return grainParam;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -659,6 +765,9 @@ async function main() {
     console.log(`Mode: reality (${realitySeconds}s trimmed from middle, encode to completion)`);
   } else {
     console.log(`Mode: duration (${testDuration}s per config, kill after limit)`);
+  }
+  if (grainEnabled) {
+    console.log('Grain: enabled (VapourSynth noise estimation per sample)');
   }
   console.log('');
 
@@ -732,6 +841,12 @@ async function main() {
     let activeSample = `/samples/${path.basename(sample)}`;
     if (realitySeconds) {
       activeSample = await trimSampleForReality(activeSample, realitySeconds);
+    }
+
+    // Grain estimation (once per sample, reused across all configs)
+    let grainParam = 0;
+    if (grainEnabled) {
+      grainParam = await estimateGrainInContainer(activeSample);
     }
 
     // Warmup: run scene detection once so all benchmark runs use cached scenes
@@ -865,11 +980,12 @@ async function main() {
       await dockerExec(`rm -rf ${BENCH_TEMP}/*/work/done.json ${BENCH_TEMP}/*/work/encode/ ${BENCH_TEMP}/*/out.mkv ${BENCH_TEMP}/ab-*/out.mkv 2>/dev/null; true`);
 
       const result = isAbAv1
-        ? await benchAbAv1(sample, config, abAv1Crf)
+        ? await benchAbAv1(sample, config, abAv1Crf, grainParam)
         : await benchAv1an(sample, config, {
             realityMode: !!realitySeconds,
             activeSample,
             totalFrames,
+            grainParam,
           });
 
       results.push(result);
