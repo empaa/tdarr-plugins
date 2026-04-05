@@ -356,8 +356,8 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
     } catch (_) {}
   };
 
-  // Start with fast 2s polling to catch encode start precisely
-  monitorTimer = setInterval(monitorTick, 2000);
+  // Start with fast 1s polling to catch encode start precisely
+  monitorTimer = setInterval(monitorTick, 1000);
 
   // Extra time for scene detection when no warmup, plus encode duration, plus muxing buffer
   const sceneDetectionBuffer = noWarmup ? 300 : 60;
