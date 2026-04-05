@@ -3,35 +3,35 @@
 
 const cp = require('child_process');
 
-// Control points for noise level -> --film-grain / --denoise-noise-level mapping.
-// Noise is measured as the YHIGH (90th percentile) of a blur-diff residual.
-// Clean synthetic content reads ~1, grainy Blu-ray reads ~5+.
+// Control points for sigma -> --film-grain / --denoise-noise-level mapping.
+// Sigma is estimated via ffmpeg signalstats YDIF (average absolute temporal
+// luma difference). Clean content reads ~0, moderate grain ~3, heavy ~6+.
 // Linear interpolation between points. Tune these based on test encodes.
 const GRAIN_CURVE = [
-  { noise: 2,  param: 4 },
-  { noise: 3,  param: 8 },
-  { noise: 5,  param: 15 },
-  { noise: 8,  param: 25 },
-  { noise: 12, param: 50 },
+  { sigma: 2,  param: 4 },
+  { sigma: 4,  param: 8 },
+  { sigma: 6,  param: 15 },
+  { sigma: 10, param: 25 },
+  { sigma: 15, param: 50 },
 ];
 
-const NOISE_SKIP_THRESHOLD = 2;
+const SIGMA_SKIP_THRESHOLD = 2;
 const SAMPLE_FRAMES = 200;
 
 /**
- * Interpolate noise level through the control-point curve.
- * Returns integer 0-50, or 0 if noise is below threshold.
+ * Interpolate sigma through the control-point curve.
+ * Returns integer 0-50, or 0 if sigma is below threshold.
  */
-const mapNoiseToGrainParam = (noise) => {
-  if (noise < NOISE_SKIP_THRESHOLD) return 0;
-  if (noise >= GRAIN_CURVE[GRAIN_CURVE.length - 1].noise) {
+const mapSigmaToGrainParam = (sigma) => {
+  if (sigma < SIGMA_SKIP_THRESHOLD) return 0;
+  if (sigma >= GRAIN_CURVE[GRAIN_CURVE.length - 1].sigma) {
     return GRAIN_CURVE[GRAIN_CURVE.length - 1].param;
   }
   for (let i = 0; i < GRAIN_CURVE.length - 1; i++) {
     const lo = GRAIN_CURVE[i];
     const hi = GRAIN_CURVE[i + 1];
-    if (noise >= lo.noise && noise < hi.noise) {
-      const t = (noise - lo.noise) / (hi.noise - lo.noise);
+    if (sigma >= lo.sigma && sigma < hi.sigma) {
+      const t = (sigma - lo.sigma) / (hi.sigma - lo.sigma);
       return Math.round(lo.param + t * (hi.param - lo.param));
     }
   }
@@ -39,29 +39,21 @@ const mapNoiseToGrainParam = (noise) => {
 };
 
 /**
- * Estimate noise level from the source file using ffmpeg blur-diff technique.
- * Blurs each frame with avgblur, diffs against original, measures the residual
- * with signalstats YHIGH (90th percentile of luma difference).
- * Clean content reads ~1, grainy film reads ~5+, heavy noise reads 8+.
- * Returns { noise, grainParam }.
+ * Estimate noise sigma from the source file using ffmpeg signalstats YDIF.
+ * YDIF measures average absolute temporal luma difference between successive
+ * frames. On static/slow content this correlates with noise level; the median
+ * across SAMPLE_FRAMES frames filters out motion-heavy outliers.
+ * Returns { sigma, grainParam }.
  */
 const estimateNoise = (inputPath, durationSec, ffmpegBin, dbg) => {
   const seekSec = Math.max(0, (durationSec || 0) / 2 - 5);
-
-  const vf = [
-    'split[a][b]',
-    '[b]avgblur=7[b]',
-    '[a][b]blend=all_mode=difference',
-    'signalstats',
-    'metadata=mode=print',
-  ].join(',');
 
   const args = [
     '-hide_banner',
     '-ss', String(Math.floor(seekSec)),
     '-i', inputPath,
     '-frames:v', String(SAMPLE_FRAMES),
-    '-vf', vf,
+    '-vf', 'signalstats,metadata=mode=print',
     '-f', 'null', '-',
   ];
 
@@ -76,39 +68,39 @@ const estimateNoise = (inputPath, durationSec, ffmpegBin, dbg) => {
     });
     output = (result.stderr || '') + (result.stdout || '');
     if (result.error || result.status !== 0) {
-      dbg(`[grain] ffmpeg noise estimation exited ${result.status || 'unknown'}: ${(result.stderr || '').slice(0, 200)}`);
-      return { noise: 0, grainParam: 0 };
+      dbg(`[grain] ffmpeg signalstats exited ${result.status || 'unknown'}: ${(result.stderr || '').slice(0, 200)}`);
+      return { sigma: 0, grainParam: 0 };
     }
   } catch (err) {
-    dbg(`[grain] ffmpeg noise estimation failed: ${err.message}`);
-    return { noise: 0, grainParam: 0 };
+    dbg(`[grain] ffmpeg signalstats failed: ${err.message}`);
+    return { sigma: 0, grainParam: 0 };
   }
 
-  // Parse YHIGH (90th percentile luma) from blur-diff residual.
-  // Output format: [Parsed_metadata_N @ ...] lavfi.signalstats.YHIGH=5
-  const yhighRegex = /lavfi\.signalstats\.YHIGH=(\d+(?:\.\d+)?)/g;
+  // Parse YDIF from signalstats metadata output.
+  // Format: [Parsed_metadata_N @ ...] lavfi.signalstats.YDIF=2.94262
+  const ydifRegex = /lavfi\.signalstats\.YDIF=(\d+(?:\.\d+)?)/g;
   const values = [];
   let match;
-  while ((match = yhighRegex.exec(output)) !== null) {
+  while ((match = ydifRegex.exec(output)) !== null) {
     values.push(parseFloat(match[1]));
   }
 
   if (values.length === 0) {
-    dbg('[grain] no YHIGH values found in noise estimation output');
-    return { noise: 0, grainParam: 0 };
+    dbg('[grain] no YDIF values found in signalstats output');
+    return { sigma: 0, grainParam: 0 };
   }
 
-  // Use median of YHIGH values (robust to scene changes and outliers)
+  // Use median of YDIF values as sigma estimate (robust to scene changes)
   values.sort((a, b) => a - b);
   const mid = Math.floor(values.length / 2);
-  const noise = values.length % 2 === 0
+  const sigma = values.length % 2 === 0
     ? (values[mid - 1] + values[mid]) / 2
     : values[mid];
 
-  const grainParam = mapNoiseToGrainParam(noise);
-  dbg(`[grain] noise=${noise.toFixed(2)} -> film-grain=${grainParam} (from ${values.length} frames)`);
+  const grainParam = mapSigmaToGrainParam(sigma);
+  dbg(`[grain] estimated sigma=${sigma.toFixed(2)} -> film-grain=${grainParam} (from ${values.length} frames)`);
 
-  return { noise, grainParam };
+  return { sigma, grainParam };
 };
 
-module.exports = { estimateNoise, mapNoiseToGrainParam, GRAIN_CURVE, NOISE_SKIP_THRESHOLD };
+module.exports = { estimateNoise, mapSigmaToGrainParam, GRAIN_CURVE, SIGMA_SKIP_THRESHOLD };
