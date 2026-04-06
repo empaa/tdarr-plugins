@@ -278,6 +278,7 @@ const plugin = async (args) => {
     '-e', encoder,
     '--sc-downscale-height', '540',
     '--scaler', 'lanczos',
+    '--chunk-method', 'hybrid',
     ...(isAutoThreads ? [] : ['--workers', String(maxWorkers)]),
     '--qp-range', qpRange,
     '--target-quality', String(targetVmaf),
