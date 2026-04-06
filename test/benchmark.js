@@ -199,14 +199,14 @@ function dockerExec(cmd, { timeout = 600000, live = false } = {}) {
 
     // av1an uses \r for progress bars — split on both \n and \r
     const splitLines = (str) => str.split(/[\r\n]+/).filter(Boolean);
-    // Skip noisy/empty lines
-    const SKIP = /^\s*$|Creating lwi index file/;
+    // Skip noisy/empty lines from av1an/encoder output
+    const SKIP = /^\s*$|Creating lwi index file|^Encoding:\s|^Svt\[|^source pipe|^ffmpeg pipe|SUMMARY|Total Frames|Frame Rate|Byte Count|Bitrate|Average Speed|Total Encoding|Total Execution|Average Latency|Max Latency|FRAME MISMATCH|frame.mismatch|Don't force output FPS/;
 
     proc.stdout.on('data', (d) => {
       stdout += d;
       if (live) {
         for (const line of splitLines(d.toString())) {
-          const clean = line.replace(/\x1b\[[0-9;]*m/g, '').trimEnd();
+          const clean = line.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trimEnd();
           if (clean && !SKIP.test(clean)) process.stdout.write(`    ${clean}\n`);
         }
       }
@@ -215,7 +215,7 @@ function dockerExec(cmd, { timeout = 600000, live = false } = {}) {
       stderr += d;
       if (live) {
         for (const line of splitLines(d.toString())) {
-          const clean = line.replace(/\x1b\[[0-9;]*m/g, '').trimEnd();
+          const clean = line.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trimEnd();
           if (clean && !SKIP.test(clean)) process.stdout.write(`    ${clean}\n`);
         }
       }
