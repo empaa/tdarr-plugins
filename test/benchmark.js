@@ -284,7 +284,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       `-c mkvmerge -e ${av1anEncoder}`,
       workerArgs,
       `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
-      `--sc-downscale-height 540 --chunk-order long-to-short --chunk-method hybrid`,
+      `--sc-downscale-height 540 --chunk-order long-to-short`,
       `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
       `--verbose`,
     ];
@@ -301,7 +301,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       `-c mkvmerge -e ${av1anEncoder}`,
       workerArgs,
       `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
-      `--sc-downscale-height 540 --chunk-order long-to-short --chunk-method hybrid`,
+      `--sc-downscale-height 540 --chunk-order long-to-short`,
       `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
       `--verbose --resume`,
     ];

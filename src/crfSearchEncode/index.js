@@ -419,7 +419,6 @@ const plugin = async (args) => {
     '-e', encoder,
     '--sc-downscale-height', '540',
     '--scaler', 'lanczos',
-    '--chunk-method', 'hybrid',
     ...(isAutoThreads ? [] : ['--workers', String(encodeBudget.maxWorkers)]),
     '--chunk-order', 'long-to-short',
     '--keep',
