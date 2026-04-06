@@ -322,8 +322,9 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   const cpuSamples = [];
   const memSamples = [];
 
-  // Measure encoded bytes — av1an writes chunks to work/encode/
-  const readBytesScript = `du -sb ${workDir}/encode 2>/dev/null | cut -f1 || echo 0`;
+  // Measure encoded bytes — av1an writes chunks to work/encode/ but target-quality
+  // probes write to other subdirs first; check the whole work dir for activity
+  const readBytesScript = `du -sb ${workDir} 2>/dev/null | cut -f1 || echo 0`;
 
   // Progress + stats monitor, kills encode when duration reached.
   // Polls every 2s until encoding starts (to catch the exact start time),
