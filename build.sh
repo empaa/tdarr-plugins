@@ -47,10 +47,21 @@ for plugin_dir in "${SRC_DIR}"/*/; do
   fi
 
   version="1.0.0"
-  out_dir="${DIST_DIR}/video/${plugin_name}/${version}"
+
+  # Read category from plugin.json if it exists, default to "video"
+  category="video"
+  plugin_json="${plugin_dir}plugin.json"
+  if [[ -f "$plugin_json" ]]; then
+    cat_override=$(node -e "console.log(require('${plugin_json}').category || 'video')" 2>/dev/null)
+    if [[ -n "$cat_override" ]]; then
+      category="$cat_override"
+    fi
+  fi
+
+  out_dir="${DIST_DIR}/${category}/${plugin_name}/${version}"
   mkdir -p "$out_dir"
 
-  echo "  bundle: ${plugin_name} -> dist/LocalFlowPlugins/video/${plugin_name}/${version}/index.js"
+  echo "  bundle: ${plugin_name} -> dist/LocalFlowPlugins/${category}/${plugin_name}/${version}/index.js"
 
   # shellcheck disable=SC2086
   "$ESBUILD" "$entry" \
