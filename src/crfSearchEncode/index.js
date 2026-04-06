@@ -431,6 +431,7 @@ const plugin = async (args) => {
     '--chunk-method', chunkMethod,
     ...(chunkMethod === 'hybrid' ? ['--ignore-frame-mismatch'] : []),
     ...(isAutoThreads ? [] : ['--workers', String(encodeBudget.maxWorkers)]),
+    '--min-scene-len', '24',
     '--chunk-order', 'long-to-short',
     '--keep',
     '--resume',

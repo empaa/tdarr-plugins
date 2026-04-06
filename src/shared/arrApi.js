@@ -59,13 +59,15 @@ async function findRadarrMatch(baseUrl, apiKey, arrPath) {
  * Find a Sonarr series + episode file matching the given file path.
  * @returns {{ series, episodeFile } | null}
  */
-async function findSonarrMatch(baseUrl, apiKey, arrPath) {
+async function findSonarrMatch(baseUrl, apiKey, arrPath, log) {
   const parts = arrPath.split('/');
   parts.pop(); // filename
   parts.pop(); // season folder
   const seriesFolder = parts.join('/');
 
   const seriesList = await arrFetch(`${baseUrl}/api/v3/series`, apiKey);
+
+  if (log) log(`Sonarr: comparing folder "${seriesFolder}" against ${seriesList.length} series`);
 
   const series = seriesList.find((s) => {
     const sp = s.path.replace(/\/$/, '');

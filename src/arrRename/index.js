@@ -81,9 +81,9 @@ const plugin = async (args) => {
   } = require('../shared/arrApi');
 
   const inputs = args.inputs || {};
-  const radarrUrl = (inputs.radarr_url || '').trim();
+  const radarrUrl = (inputs.radarr_url || '').trim().replace(/\/+$/, '');
   const radarrKey = (inputs.radarr_api_key || '').trim();
-  const sonarrUrl = (inputs.sonarr_url || '').trim();
+  const sonarrUrl = (inputs.sonarr_url || '').trim().replace(/\/+$/, '');
   const sonarrKey = (inputs.sonarr_api_key || '').trim();
   const timeoutMs = (Number(inputs.poll_timeout) || 120) * 1000;
 
@@ -119,13 +119,11 @@ const plugin = async (args) => {
   }
 
   const arrPath = mapper.toArr(filePath);
-  if (arrPath !== filePath) {
-    log(`Arr-side path: ${arrPath}`);
-  }
+  log(`Arr-side path: ${arrPath}${arrPath === filePath ? ' (no mapping applied)' : ''}`);
 
-  try {
-    // Try Radarr
-    if (hasRadarr) {
+  // Try Radarr
+  if (hasRadarr) {
+    try {
       log('Searching Radarr...');
       const match = await findRadarrMatch(radarrUrl, radarrKey, arrPath);
       if (match) {
@@ -143,12 +141,16 @@ const plugin = async (args) => {
         };
       }
       log('No Radarr match');
+    } catch (err) {
+      log(`Radarr error: ${err.message}`);
     }
+  }
 
-    // Try Sonarr
-    if (hasSonarr) {
+  // Try Sonarr
+  if (hasSonarr) {
+    try {
       log('Searching Sonarr...');
-      const match = await findSonarrMatch(sonarrUrl, sonarrKey, arrPath);
+      const match = await findSonarrMatch(sonarrUrl, sonarrKey, arrPath, log);
       if (match) {
         log(`Matched series: ${match.series.title} (file id: ${match.episodeFile.id})`);
         const newArrPath = await sonarrRename(
@@ -164,15 +166,13 @@ const plugin = async (args) => {
         };
       }
       log('No Sonarr match');
+    } catch (err) {
+      log(`Sonarr error: ${err.message}`);
     }
-
-    log('No Arr service matched this file');
-    return noChange();
-
-  } catch (err) {
-    log(`Arr rename error: ${err.message}`);
-    return noChange();
   }
+
+  log('No Arr service matched this file');
+  return noChange();
 };
 
 module.exports = { details, plugin };
