@@ -909,7 +909,7 @@ async function main() {
     configs = generateGrid(threads);
     console.log(`\nGrid mode: ${configs.length} configurations to test\n`);
   } else {
-    const presets = presetFilter || PRESETS;
+    const presets = presetFilter || (customConfigs.length > 0 ? [] : PRESETS);
     configs = presets.map((name) => {
       if (name === 'auto') {
         return { workers: null, tpw: null, svtLp: null, vmafThreads: null, label: 'auto', auto: true };
