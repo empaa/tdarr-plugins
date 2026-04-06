@@ -89,6 +89,14 @@ const details = () => ({
       tooltip: 'Only used when Thread Strategy is "custom". JSON: {"workers":16,"threadsPerWorker":2,"vmafThreads":12}. Omitted keys fall back to aggressive preset.',
     },
     {
+      label: 'Chunk Method',
+      name: 'chunk_method',
+      type: 'string',
+      defaultValue: 'lsmash',
+      inputUI: { type: 'dropdown', options: ['lsmash', 'hybrid'] },
+      tooltip: 'lsmash = fast startup via index seeking, low disk usage, best for SVT-AV1. hybrid = ffmpeg segment splitting, better for long aom encodes. Both require VapourSynth.',
+    },
+    {
       label: 'Grain Synthesis',
       name: 'grain_synth',
       type: 'boolean',
@@ -135,6 +143,7 @@ const plugin = async (args) => {
     }
   }
 
+  const chunkMethod       = String(inputs.chunk_method || 'lsmash');
   const grainSynthEnabled = inputs.grain_synth === true || inputs.grain_synth === 'true';
 
   const findBin = (name, ...paths) => paths.find((p) => fs.existsSync(p))
@@ -278,8 +287,8 @@ const plugin = async (args) => {
     '-e', encoder,
     '--sc-downscale-height', '540',
     '--scaler', 'lanczos',
-    '--chunk-method', 'hybrid',
-    '--ignore-frame-mismatch',
+    '--chunk-method', chunkMethod,
+    ...(chunkMethod === 'hybrid' ? ['--ignore-frame-mismatch'] : []),
     ...(isAutoThreads ? [] : ['--workers', String(maxWorkers)]),
     '--qp-range', qpRange,
     '--target-quality', String(targetVmaf),

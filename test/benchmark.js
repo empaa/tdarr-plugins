@@ -45,6 +45,7 @@ Options:
                         (default; use --warmup to force cached scene detection)
   --warmup              Use shared scene cache warmup (faster but may skew results)
   --grid                Test a custom worker×thread grid instead of presets
+  --chunk-method <name> Chunk method: lsmash (default) or hybrid
   --sample <name>       Filter sample files by name substring
   --help, -h            Show this help
 
@@ -124,6 +125,10 @@ const realitySeconds = (() => {
   return idx !== -1 && cliArgs[idx + 1] ? Number(cliArgs[idx + 1]) : null;
 })();
 const grainEnabled = cliArgs.includes('--grain');
+const chunkMethod = (() => {
+  const idx = cliArgs.indexOf('--chunk-method');
+  return idx !== -1 && cliArgs[idx + 1] ? cliArgs[idx + 1] : 'lsmash';
+})();
 const noWarmup = cliArgs.includes('--no-warmup') || !cliArgs.includes('--warmup');
 
 if (realitySeconds != null && cliArgs.includes('--duration')) {
@@ -284,7 +289,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       `-c mkvmerge -e ${av1anEncoder}`,
       workerArgs,
       `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
-      `--sc-downscale-height 540 --chunk-order long-to-short --chunk-method hybrid --ignore-frame-mismatch`,
+      `--sc-downscale-height 540 --chunk-order long-to-short --chunk-method ${chunkMethod}${chunkMethod === 'hybrid' ? ' --ignore-frame-mismatch' : ''}`,
       `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
       `--verbose`,
     ];
@@ -301,7 +306,7 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       `-c mkvmerge -e ${av1anEncoder}`,
       workerArgs,
       `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
-      `--sc-downscale-height 540 --chunk-order long-to-short --chunk-method hybrid --ignore-frame-mismatch`,
+      `--sc-downscale-height 540 --chunk-order long-to-short --chunk-method ${chunkMethod}${chunkMethod === 'hybrid' ? ' --ignore-frame-mismatch' : ''}`,
       `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
       `--verbose --resume`,
     ];
