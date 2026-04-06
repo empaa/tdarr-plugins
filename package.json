@@ -1,6 +1,6 @@
 {
   "name": "tdarr-plugins",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "private": true,
   "description": "AV1 encoding FlowPlugins for Tdarr (av1an + ab-av1)",
   "scripts": {
