@@ -2,7 +2,7 @@
 
 ## Overview
 
-A Tdarr FlowPlugin that triggers Radarr/Sonarr to rename files according to their built-in naming schemes after encoding. Placed at the end of a flow (after the encoder), it ensures the output file gets a proper name and Tdarr tracks the new path.
+A Tdarr FlowPlugin that triggers Radarr/Sonarr to rename files according to their built-in naming schemes after encoding. Placed after the "Replace Original" node in the flow — so the encoded file is already in its final location when Radarr/Sonarr rescans and renames it.
 
 ## Plugin Identity
 
