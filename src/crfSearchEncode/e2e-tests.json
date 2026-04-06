@@ -1,0 +1,24 @@
+[
+  {
+    "name": "aom cpu-used 8",
+    "inputs": {
+      "encoder": "aom",
+      "target_vmaf": "93",
+      "preset": "8",
+      "max_encoded_percent": "100",
+      "grain_synth": "false",
+      "thread_strategy": "auto"
+    }
+  },
+  {
+    "name": "svt-av1 cpu-used 8",
+    "inputs": {
+      "encoder": "svt-av1",
+      "target_vmaf": "93",
+      "preset": "8",
+      "max_encoded_percent": "100",
+      "grain_synth": "false",
+      "thread_strategy": "auto"
+    }
+  }
+]
