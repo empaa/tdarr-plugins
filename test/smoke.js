@@ -3,7 +3,7 @@
 
 const api = require('./lib/tdarrApi.js');
 
-const PLUGIN_NAMES = ['av1anEncode', 'abAv1Encode'];
+const PLUGIN_NAMES = ['av1anEncode', 'abAv1Encode', 'arrRename'];
 
 async function smokeTest(filterPlugin) {
   const targets = filterPlugin
