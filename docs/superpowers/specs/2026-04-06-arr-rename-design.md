@@ -89,7 +89,7 @@ This will be resolved during implementation planning.
 2. **Integration test against test container** — deploy to the tdarr-av1 test instance, run a flow that encodes a file, and verify the rename triggers correctly
 3. **Test `_id` propagation** — specifically verify whether setting `args.inputFileObj._id` in the plugin return is sufficient for Tdarr to track the rename, or whether the `cruddb` fallback is needed
 
-## Open Questions
+## Resolved Questions
 
-- **Tdarr DB update:** Is `args.inputFileObj._id` propagation sufficient, or do we need the `cruddb` API fallback? To be determined by testing against the interactive test container.
-- **Build category:** How to make `build.sh` output to `file/` instead of `video/` for this plugin. To be resolved in implementation plan.
+- **Tdarr DB update:** `args.inputFileObj._id` propagation is sufficient. Tested 2026-04-06 against the interactive test container — Tdarr correctly tracks the new path in its DB. No `cruddb` fallback needed.
+- **Build category:** Resolved via `plugin.json` with `{"category": "file"}`, read by `build.sh`.
