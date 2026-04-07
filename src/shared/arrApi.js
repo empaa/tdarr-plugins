@@ -141,6 +141,55 @@ async function sonarrRename(baseUrl, apiKey, series, episodeFile, timeoutMs, log
   return updated.path;
 }
 
+/**
+ * Look up the original language of a media file via Radarr/Sonarr.
+ * @param {object} opts
+ * @param {string} opts.radarrUrl - Radarr base URL (empty to skip)
+ * @param {string} opts.radarrKey - Radarr API key
+ * @param {string} opts.sonarrUrl - Sonarr base URL (empty to skip)
+ * @param {string} opts.sonarrKey - Sonarr API key
+ * @param {string} opts.arrPath   - File path (Arr-side)
+ * @param {Function} opts.log     - Logging function
+ * @returns {Promise<string|null>} ISO 639-2 language code or null
+ */
+async function getOriginalLanguage(opts) {
+  const { radarrUrl, radarrKey, sonarrUrl, sonarrKey, arrPath, log } = opts;
+
+  if (radarrUrl && radarrKey) {
+    try {
+      log('Searching Radarr for original language...');
+      const match = await findRadarrMatch(radarrUrl, radarrKey, arrPath);
+      if (match && match.movie.originalLanguage) {
+        const lang = match.movie.originalLanguage.name;
+        const iso = match.movie.originalLanguage.iso639_2;
+        log(`Radarr: original language = ${lang} (${iso})`);
+        return iso || null;
+      }
+      log('No Radarr match or no originalLanguage field');
+    } catch (err) {
+      log(`Radarr error: ${err.message}`);
+    }
+  }
+
+  if (sonarrUrl && sonarrKey) {
+    try {
+      log('Searching Sonarr for original language...');
+      const match = await findSonarrMatch(sonarrUrl, sonarrKey, arrPath, log);
+      if (match && match.series.originalLanguage) {
+        const lang = match.series.originalLanguage.name;
+        const iso = match.series.originalLanguage.iso639_2;
+        log(`Sonarr: original language = ${lang} (${iso})`);
+        return iso || null;
+      }
+      log('No Sonarr match or no originalLanguage field');
+    } catch (err) {
+      log(`Sonarr error: ${err.message}`);
+    }
+  }
+
+  return null;
+}
+
 module.exports = {
   arrFetch,
   pollCommand,
@@ -148,4 +197,5 @@ module.exports = {
   findSonarrMatch,
   radarrRename,
   sonarrRename,
+  getOriginalLanguage,
 };
