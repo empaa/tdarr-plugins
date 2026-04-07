@@ -333,11 +333,43 @@ const plugin = async (args) => {
 
   log(`Running ffmpeg with ${mapArgs.length / 2} mapped streams...`);
 
+  const updateWorker = (fields) => {
+    if (typeof args.updateWorker === 'function') {
+      try { args.updateWorker(fields); } catch (_) {}
+    }
+  };
+
+  // Get total duration for progress calculation
+  const durationSec = (() => {
+    const fmt = args.inputFileObj.ffProbeData.format;
+    if (fmt && fmt.duration) return parseFloat(fmt.duration) || 0;
+    const vs = streams.find((s) => s.codec_type === 'video');
+    if (vs && vs.duration) return parseFloat(vs.duration) || 0;
+    return 0;
+  })();
+
+  updateWorker({ percentage: 0, startTime: Date.now(), status: 'Remuxing' });
+
   const pm = createProcessManager(log, () => {});
   const exitCode = await pm.spawnAsync('/usr/local/bin/ffmpeg', ffmpegArgs, {
     silent: true,
+    onLine: (line) => {
+      // ffmpeg progress: "frame= 1234 fps=567 ... time=00:01:23.45 ... speed=12.3x"
+      const timeMatch = line.match(/time=(\d+):(\d+):(\d+\.?\d*)/);
+      if (timeMatch && durationSec > 0) {
+        const elapsed = parseInt(timeMatch[1]) * 3600
+          + parseInt(timeMatch[2]) * 60
+          + parseFloat(timeMatch[3]);
+        const pct = Math.min(100, Math.round((elapsed / durationSec) * 100));
+        const speedMatch = line.match(/speed=\s*([\d.]+)x/);
+        const speed = speedMatch ? `${speedMatch[1]}x` : '';
+        updateWorker({ percentage: pct, status: `Remuxing${speed ? ' ' + speed : ''}` });
+      }
+    },
   });
   pm.cleanup();
+
+  updateWorker({ percentage: 100 });
 
   if (exitCode !== 0) {
     throw new Error(`ffmpeg exited with code ${exitCode}`);
