@@ -219,6 +219,7 @@ const plugin = async (args) => {
   const { getOriginalLanguage } = require('../shared/arrApi');
   const { createProcessManager } = require('../shared/processManager');
   const path = require('path');
+  const fs = require('fs');
 
   const inputs = args.inputs || {};
   const radarrUrl = (inputs.radarr_url || '').trim().replace(/\/+$/, '');
@@ -351,16 +352,23 @@ const plugin = async (args) => {
 
   updateWorker({ status: 'Sanitizing' });
 
+  const mkvmergeBin = (() => {
+    for (const p of ['/usr/local/bin/mkvmerge', '/usr/bin/mkvmerge']) {
+      if (fs.existsSync(p)) return p;
+    }
+    return 'mkvmerge';
+  })();
+
   const pm = createProcessManager(log, () => {});
-  const exitCode = await pm.spawnAsync('/usr/local/bin/mkvmerge', mkvmergeArgs, {
+  const exitCode = await pm.spawnAsync(mkvmergeBin, mkvmergeArgs, {
     silent: true,
   });
   pm.cleanup();
 
   updateWorker({ percentage: 100 });
 
-  if (exitCode >= 2) {
-    throw new Error(`mkvmerge exited with code ${exitCode}`);
+  if (exitCode >= 2 || !fs.existsSync(outputPath)) {
+    throw new Error(`mkvmerge failed (exit ${exitCode}) — output not created`);
   }
   if (exitCode === 1) {
     log('mkvmerge warnings (exit 1) — treating as success');
