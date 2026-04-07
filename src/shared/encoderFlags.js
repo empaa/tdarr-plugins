@@ -186,10 +186,11 @@ const capSvtLpByPreset = (lp, encPreset) => {
 };
 
 const THREAD_PRESETS = {
-  safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 1.0, svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
-  balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 1.5, svtLpMax: 6,  vmafThreadDiv: 2, halve4kHdr: false },
-  aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 2.0, svtLpMax: 6,  vmafThreadDiv: 2, halve4kHdr: false },
-  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 2.6, svtLpMax: 6,  vmafThreadDiv: 2, halve4kHdr: false },
+  // hdr4kScale: worker multiplier for 4K HDR content (~3x memory per worker vs 1080p)
+  safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 1.0, svtLpMax: 6,  vmafThreadDiv: 8, hdr4kScale: 0.33 },
+  balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 1.5, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.33 },
+  aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 2.0, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.33 },
+  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 2.6, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.33 },
 };
 
 const resolveThreadStrategy = (strategyName, overrides) => {
@@ -225,8 +226,8 @@ const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
     maxWorkers = 1;
   }
 
-  if (is4kHdr && preset.halve4kHdr) {
-    maxWorkers = Math.max(1, Math.floor(maxWorkers / 2));
+  if (is4kHdr && encoder !== 'aom' && preset.hdr4kScale < 1) {
+    maxWorkers = Math.max(1, Math.round(maxWorkers * preset.hdr4kScale));
   }
 
   let vmafThreads = Math.max(2, Math.floor(availableThreads / preset.vmafThreadDiv));
