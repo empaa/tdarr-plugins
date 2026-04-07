@@ -228,6 +228,31 @@ const plugin = async (args) => {
 
   const lwiCache = path.join(vsDir, 'source.lwi');
 
+  // Build VapourSynth script (needed for both scene detection and phase 2)
+  const vpyScript = path.join(vsDir, 'source.vpy');
+  const escPy = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+  let vpyLines = [
+    'import vapoursynth as vs',
+    'core = vs.core',
+    `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
+  ];
+  if (doDownscale) {
+    vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
+  }
+  vpyLines.push('src.set_output()');
+  fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
+
+  // Pre-index lwi if needed (shared by scene detection and phase 2)
+  if (!fs.existsSync(lwiCache)) {
+    updateWorker({ status: 'Indexing' });
+    const lwiExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
+      cwd: vsDir,
+      silent: true,
+    });
+    dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
+  }
+
   let grainParam = 0;
   if (grainSynthEnabled) {
     const durationSec = parseFloat(stream.duration || '0')
@@ -375,31 +400,6 @@ const plugin = async (args) => {
   updateWorker({ percentage: 0, status: 'Encoding' });
 
   const audioSizeGb = await probeAudioSize(inputPath, args.workDir, dbg, dbg);
-
-  // Build VapourSynth script
-  const vpyScript = path.join(vsDir, 'source.vpy');
-  const escPy = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-
-  let vpyLines = [
-    'import vapoursynth as vs',
-    'core = vs.core',
-    `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
-  ];
-  if (doDownscale) {
-    vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
-  }
-  vpyLines.push('src.set_output()');
-  fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
-
-  // Pre-index lwi if needed
-  if (!fs.existsSync(lwiCache)) {
-    updateWorker({ status: 'Indexing' });
-    const lwiExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
-      cwd: vsDir,
-      silent: true,
-    });
-    dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
-  }
 
   // Build encoder flags for av1an (fixed CRF, no target-quality)
   let encFlags;
