@@ -295,6 +295,7 @@ const plugin = async (args) => {
     '--vmaf-path', vmafModel,
     ...(isAutoThreads ? [] : ['--vmaf-threads', String(vmafThreads)]),
     '--probes', '6',
+    '--min-scene-len', '24',
     '--chunk-order', 'long-to-short',
     '--keep',
     '--resume',

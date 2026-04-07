@@ -10,10 +10,11 @@ DEPLOY=false
 TDARR_AV1_DIR="${SCRIPT_DIR}/../tdarr-av1"
 DEPLOY_TARGET="${TDARR_AV1_DIR}/test/tdarr_config/server/Tdarr/Plugins/FlowPlugins/LocalFlowPlugins"
 
-for arg in "$@"; do
-  case "$arg" in
-    --deploy) DEPLOY=true ;;
-    *) echo "Unknown flag: $arg" >&2; exit 1 ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --deploy) DEPLOY=true; shift ;;
+    --deploy-to) DEPLOY=true; DEPLOY_TARGET="$2"; shift 2 ;;
+    *) echo "Unknown flag: $1" >&2; exit 1 ;;
   esac
 done
 
@@ -47,10 +48,21 @@ for plugin_dir in "${SRC_DIR}"/*/; do
   fi
 
   version="1.0.0"
-  out_dir="${DIST_DIR}/video/${plugin_name}/${version}"
+
+  # Read category from plugin.json if it exists, default to "video"
+  category="video"
+  plugin_json="${plugin_dir}plugin.json"
+  if [[ -f "$plugin_json" ]]; then
+    cat_override=$(node -e "console.log(require('${plugin_json}').category || 'video')" 2>/dev/null)
+    if [[ -n "$cat_override" ]]; then
+      category="$cat_override"
+    fi
+  fi
+
+  out_dir="${DIST_DIR}/${category}/${plugin_name}/${version}"
   mkdir -p "$out_dir"
 
-  echo "  bundle: ${plugin_name} -> dist/LocalFlowPlugins/video/${plugin_name}/${version}/index.js"
+  echo "  bundle: ${plugin_name} -> dist/LocalFlowPlugins/${category}/${plugin_name}/${version}/index.js"
 
   # shellcheck disable=SC2086
   "$ESBUILD" "$entry" \
@@ -69,14 +81,12 @@ echo "Built ${plugin_count} plugin(s) -> dist/LocalFlowPlugins/"
 
 # Deploy to test instance
 if [[ "$DEPLOY" == true ]]; then
-  if [[ ! -d "${TDARR_AV1_DIR}/test/tdarr_config" ]]; then
+  if [[ ! -d "$DEPLOY_TARGET" ]]; then
     echo ""
-    echo "WARNING: tdarr-av1 test config not found at ${TDARR_AV1_DIR}/test/tdarr_config" >&2
-    echo "Run './build.sh --interactive' in tdarr-av1 first to create it." >&2
+    echo "ERROR: deploy target not found: ${DEPLOY_TARGET}" >&2
     exit 1
   fi
 
-  mkdir -p "$DEPLOY_TARGET"
   cp -r "${DIST_DIR}/"* "$DEPLOY_TARGET/"
 
   echo ""
