@@ -497,6 +497,7 @@ const plugin = async (args) => {
 
   tracker = createAv1anTracker({
     workBase,
+    scenesFile: scenesPath,
     maxWorkers: encodeBudget.maxWorkers,
     audioSizeGb,
     sourceSizeGb,
