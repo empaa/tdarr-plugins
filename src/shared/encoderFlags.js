@@ -187,10 +187,10 @@ const capSvtLpByPreset = (lp, encPreset) => {
 
 const THREAD_PRESETS = {
   // hdr4kScale: SVT-AV1 worker multiplier for 4K HDR content (extra memory from 4K decode)
-  safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 1.0, svtLpMax: 6,  vmafThreadDiv: 8, hdr4kScale: 0.75 },
-  balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 1.5, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.75 },
-  aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 2.0, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.75 },
-  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 2.6, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.75 },
+  safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 1.0, svtLpMax: 6,  vmafThreadDiv: 8, hdr4kScale: 0.5 },
+  balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 1.5, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.5 },
+  aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 2.0, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.5 },
+  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 2.6, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.5 },
 };
 
 const resolveThreadStrategy = (strategyName, overrides) => {
