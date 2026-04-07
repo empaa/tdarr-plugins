@@ -170,8 +170,10 @@ const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
 
 // SVT-AV1 effective thread limits per encoder preset.
 // SVT-AV1 benefits more from extra workers (av1an parallelism) than from
-// extra threads per worker. lp beyond ~6 shows diminishing returns, so we
-// cap low to maximize workers. Lower presets cap even tighter at 4.
+// SVT-AV1 --lp (logical processors per worker). Benchmarking on a 32-thread
+// Ryzen 9 9950X showed no encode-speed gain above lp=6 — extra threads just
+// add memory pressure. Capped at 6 for all presets so the thread budget goes
+// toward more av1an workers instead.
 const SVT_LP_CAP_BY_PRESET = {
   0: 6, 1: 6, 2: 6, 3: 6,
   4: 6, 5: 6, 6: 6,
@@ -184,10 +186,10 @@ const capSvtLpByPreset = (lp, encPreset) => {
 };
 
 const THREAD_PRESETS = {
-  safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 0.5,  svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
-  balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 0.9,  svtLpMax: 20, vmafThreadDiv: 2, halve4kHdr: false },
-  aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 1.4,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
-  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 2.8,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
+  safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 1.0, svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
+  balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 1.5, svtLpMax: 6,  vmafThreadDiv: 2, halve4kHdr: false },
+  aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 2.0, svtLpMax: 6,  vmafThreadDiv: 2, halve4kHdr: false },
+  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 2.6, svtLpMax: 6,  vmafThreadDiv: 2, halve4kHdr: false },
 };
 
 const resolveThreadStrategy = (strategyName, overrides) => {
