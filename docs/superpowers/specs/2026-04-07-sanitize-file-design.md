@@ -49,7 +49,7 @@ Categorize every stream in `ffProbeData.streams`:
 - **Video:** `codec_type === 'video'` and not an image codec
 - **Audio:** `codec_type === 'audio'`
 - **Subtitle:** `codec_type === 'subtitle'`
-- **Image:** `codec_type === 'video'` with codec `mjpeg`, `png`, `bmp`, or `gif` (cover art, thumbnails) — also catches attachment-type image streams
+- **Image:** `codec_type === 'video'` with codec `mjpeg`, `png`, `bmp`, or `gif`, OR `disposition.attached_pic === 1` (cover art, thumbnails)
 
 For audio, group by language and rank within each group:
 
@@ -93,10 +93,10 @@ If skipped → output Port 2 (no changes).
 
 ### Step 6 — Execute ffmpeg
 
-Single call, stream copy only:
+Single call using `/usr/local/bin/ffmpeg` (our custom-built ffmpeg from the av1-stack, not Tdarr's built-in Jellyfin ffmpeg which lacks support for some exotic codecs), stream copy only:
 
 ```
-ffmpeg -i input.{ext} \
+/usr/local/bin/ffmpeg -i input.{ext} \
   -map 0:{video_idx} \
   -map 0:{audio_idx_1} -map 0:{audio_idx_2} ... \
   -map 0:{sub_idx_1} -map 0:{sub_idx_2} ... \
