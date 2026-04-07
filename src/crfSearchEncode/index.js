@@ -293,6 +293,7 @@ const plugin = async (args) => {
     '--max-crf', String(maxCrf),
     '--vmaf', `n_threads=${searchVmafThreads}:model=path=${vmafModel}`,
     '--max-encoded-percent', String(maxEncodedPercent),
+    '--cache', path.join(args.workDir, 'ab-av1-cache'),
   ];
 
   if (doDownscale) {
