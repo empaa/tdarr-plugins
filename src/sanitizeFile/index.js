@@ -314,25 +314,34 @@ const plugin = async (args) => {
     };
   }
 
-  // --- Step 5: Build ffmpeg map args and run ---
-  const mapArgs = [];
-  for (const v of video) mapArgs.push('-map', `0:${v.idx}`);
-  for (const a of selectedAudio) mapArgs.push('-map', `0:${a.idx}`);
-  for (const s of selectedSubs) mapArgs.push('-map', `0:${s.idx}`);
+  // --- Step 5: Build mkvmerge args and run ---
+  const videoIds = video.map((v) => v.idx).join(',');
+  const audioIds = selectedAudio.map((a) => a.idx).join(',');
+  const subIds = selectedSubs.map((s) => s.idx).join(',');
+
+  // Track order: video → audio (original lang first) → subtitles (original lang first)
+  const trackOrder = [
+    ...video.map((v) => `0:${v.idx}`),
+    ...selectedAudio.map((a) => `0:${a.idx}`),
+    ...selectedSubs.map((s) => `0:${s.idx}`),
+  ].join(',');
 
   const outputName = `${path.parse(filePath).name}.sanitized.mkv`;
   const outputPath = path.join(args.workDir, outputName);
 
-  const ffmpegArgs = [
-    '-y',
-    '-ignore_unknown',
-    '-i', filePath,
-    ...mapArgs,
-    '-c', 'copy',
-    outputPath,
+  const mkvmergeArgs = [
+    '-q',
+    '-o', outputPath,
+    '--no-attachments',
+    '-d', videoIds,
+    '-a', audioIds,
+    ...(selectedSubs.length > 0 ? ['-s', subIds] : ['-S']),
+    '--track-order', trackOrder,
+    filePath,
   ];
 
-  log(`Running ffmpeg with ${mapArgs.length / 2} mapped streams...`);
+  const totalStreams = video.length + selectedAudio.length + selectedSubs.length;
+  log(`Running mkvmerge with ${totalStreams} tracks...`);
 
   const updateWorker = (fields) => {
     if (typeof args.updateWorker === 'function') {
@@ -340,67 +349,21 @@ const plugin = async (args) => {
     }
   };
 
-  // Get total frames for progress calculation
-  const totalFrames = (() => {
-    const vs = streams.find((s) => s.codec_type === 'video');
-    if (vs && vs.nb_frames) return parseInt(vs.nb_frames) || 0;
-    // Fallback: estimate from duration × framerate
-    const fmt = args.inputFileObj.ffProbeData.format;
-    const dur = (fmt && parseFloat(fmt.duration)) || (vs && parseFloat(vs.duration)) || 0;
-    if (vs && vs.r_frame_rate && dur > 0) {
-      const [num, den] = vs.r_frame_rate.split('/');
-      const fpsEst = den ? parseInt(num) / parseInt(den) : parseFloat(num);
-      if (fpsEst > 0) return Math.round(dur * fpsEst);
-    }
-    return 0;
-  })();
-
-  const droppedCodecs = [];
-
-  updateWorker({ percentage: 0, startTime: Date.now(), status: 'Remuxing' });
+  updateWorker({ status: 'Sanitizing' });
 
   const pm = createProcessManager(log, () => {});
-  const exitCode = await pm.spawnAsync('/usr/local/bin/ffmpeg', ffmpegArgs, {
+  const exitCode = await pm.spawnAsync('/usr/local/bin/mkvmerge', mkvmergeArgs, {
     silent: true,
-    onLine: (line) => {
-      // Track streams dropped due to unknown codecs
-      const unknownMatch = line.match(/Unknown\/unsupported AVCodecID\s+(\S+)/);
-      if (unknownMatch) droppedCodecs.push(unknownMatch[1]);
-      // ffmpeg progress: "frame= 1234 fps=567 ... time=00:01:23.45 ... speed=12.3x"
-      const frameMatch = line.match(/frame=\s*(\d+)/);
-      const fpsMatch = line.match(/fps=\s*([\d.]+)/);
-      if (frameMatch && totalFrames > 0) {
-        const frame = parseInt(frameMatch[1]);
-        const fps = fpsMatch ? parseFloat(fpsMatch[1]) : 0;
-        const pct = Math.min(100, Math.round((frame / totalFrames) * 100));
-
-        let eta = '';
-        if (fps > 0) {
-          const remainSec = Math.round((totalFrames - frame) / fps);
-          if (remainSec >= 3600) {
-            eta = `${Math.floor(remainSec / 3600)}h${Math.floor((remainSec % 3600) / 60)}m`;
-          } else if (remainSec >= 60) {
-            eta = `${Math.floor(remainSec / 60)}m${remainSec % 60}s`;
-          } else {
-            eta = `${remainSec}s`;
-          }
-        }
-
-        updateWorker({ percentage: pct, fps, ETA: eta });
-      }
-    },
   });
   pm.cleanup();
 
-  updateWorker({ percentage: 100, fps: 0, ETA: '' });
+  updateWorker({ percentage: 100 });
 
-  if (exitCode !== 0) {
-    throw new Error(`ffmpeg exited with code ${exitCode}`);
+  if (exitCode >= 2) {
+    throw new Error(`mkvmerge exited with code ${exitCode}`);
   }
-
-  if (droppedCodecs.length > 0) {
-    log(`WARNING: ffmpeg dropped ${droppedCodecs.length} stream(s) with unsupported codecs: ${droppedCodecs.join(', ')}`);
-    log('Consider updating ffmpeg in the tdarr-av1 Docker image to add support');
+  if (exitCode === 1) {
+    log('mkvmerge warnings (exit 1) — treating as success');
   }
 
   log(`Output: ${outputPath}`);
