@@ -251,7 +251,7 @@ const plugin = async (args) => {
     try {
       mapper = createPathMapper(inputs.path_mappings || '');
     } catch (err) {
-      log(`Path mapping error: ${err.message} — falling back to track 0`);
+      log(`Path mapping error: ${err.message} — Arr lookup skipped, falling back to first audio track language`);
     }
     if (mapper) {
       const arrPath = mapper.toArr(filePath);
