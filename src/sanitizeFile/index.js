@@ -355,12 +355,17 @@ const plugin = async (args) => {
     return 0;
   })();
 
+  const droppedCodecs = [];
+
   updateWorker({ percentage: 0, startTime: Date.now(), status: 'Remuxing' });
 
   const pm = createProcessManager(log, () => {});
   const exitCode = await pm.spawnAsync('/usr/local/bin/ffmpeg', ffmpegArgs, {
     silent: true,
     onLine: (line) => {
+      // Track streams dropped due to unknown codecs
+      const unknownMatch = line.match(/Unknown\/unsupported AVCodecID\s+(\S+)/);
+      if (unknownMatch) droppedCodecs.push(unknownMatch[1]);
       // ffmpeg progress: "frame= 1234 fps=567 ... time=00:01:23.45 ... speed=12.3x"
       const frameMatch = line.match(/frame=\s*(\d+)/);
       const fpsMatch = line.match(/fps=\s*([\d.]+)/);
@@ -391,6 +396,11 @@ const plugin = async (args) => {
 
   if (exitCode !== 0) {
     throw new Error(`ffmpeg exited with code ${exitCode}`);
+  }
+
+  if (droppedCodecs.length > 0) {
+    log(`WARNING: ffmpeg dropped ${droppedCodecs.length} stream(s) with unsupported codecs: ${droppedCodecs.join(', ')}`);
+    log('Consider updating ffmpeg in the tdarr-av1 Docker image to add support');
   }
 
   log(`Output: ${outputPath}`);
