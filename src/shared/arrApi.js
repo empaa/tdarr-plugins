@@ -141,6 +141,68 @@ async function sonarrRename(baseUrl, apiKey, series, episodeFile, timeoutMs, log
   return updated.path;
 }
 
+// Radarr/Sonarr API only returns language name, not ISO codes.
+// Map to ISO 639-2 (3-letter) codes used by ffprobe stream tags.
+const ARR_LANG_TO_ISO = {
+  afrikaans: 'afr',
+  albanian: 'sqi',
+  arabic: 'ara',
+  bengali: 'ben',
+  bosnian: 'bos',
+  bulgarian: 'bul',
+  catalan: 'cat',
+  chinese: 'chi',
+  croatian: 'hrv',
+  czech: 'ces',
+  danish: 'dan',
+  dutch: 'dut',
+  english: 'eng',
+  estonian: 'est',
+  finnish: 'fin',
+  flemish: 'dut',
+  french: 'fre',
+  georgian: 'kat',
+  german: 'ger',
+  greek: 'gre',
+  hebrew: 'heb',
+  hindi: 'hin',
+  hungarian: 'hun',
+  icelandic: 'ice',
+  indonesian: 'ind',
+  italian: 'ita',
+  japanese: 'jpn',
+  kannada: 'kan',
+  korean: 'kor',
+  latvian: 'lav',
+  lithuanian: 'lit',
+  macedonian: 'mac',
+  malayalam: 'mal',
+  marathi: 'mar',
+  mongolian: 'mon',
+  norwegian: 'nor',
+  persian: 'per',
+  polish: 'pol',
+  portuguese: 'por',
+  'portuguese (brazil)': 'por',
+  romanian: 'rum',
+  romansh: 'roh',
+  russian: 'rus',
+  serbian: 'srp',
+  slovak: 'slo',
+  slovenian: 'slv',
+  spanish: 'spa',
+  'spanish (latino)': 'spa',
+  swedish: 'swe',
+  tagalog: 'tgl',
+  tamil: 'tam',
+  telugu: 'tel',
+  thai: 'tha',
+  turkish: 'tur',
+  ukrainian: 'ukr',
+  urdu: 'urd',
+  vietnamese: 'vie',
+};
+
 /**
  * Look up the original language of a media file via Radarr/Sonarr.
  * @param {object} opts
@@ -160,9 +222,9 @@ async function getOriginalLanguage(opts) {
       log('Searching Radarr for original language...');
       const match = await findRadarrMatch(radarrUrl, radarrKey, arrPath);
       if (match && match.movie.originalLanguage) {
-        const lang = match.movie.originalLanguage.name;
-        const iso = match.movie.originalLanguage.iso639_2;
-        log(`Radarr: original language = ${lang} (${iso})`);
+        const name = match.movie.originalLanguage.name;
+        const iso = ARR_LANG_TO_ISO[(name || '').toLowerCase()];
+        log(`Radarr: original language = ${name} (${iso || 'unknown'})`);
         return iso || null;
       }
       log('No Radarr match or no originalLanguage field');
@@ -176,9 +238,9 @@ async function getOriginalLanguage(opts) {
       log('Searching Sonarr for original language...');
       const match = await findSonarrMatch(sonarrUrl, sonarrKey, arrPath, log);
       if (match && match.series.originalLanguage) {
-        const lang = match.series.originalLanguage.name;
-        const iso = match.series.originalLanguage.iso639_2;
-        log(`Sonarr: original language = ${lang} (${iso})`);
+        const name = match.series.originalLanguage.name;
+        const iso = ARR_LANG_TO_ISO[(name || '').toLowerCase()];
+        log(`Sonarr: original language = ${name} (${iso || 'unknown'})`);
         return iso || null;
       }
       log('No Sonarr match or no originalLanguage field');
