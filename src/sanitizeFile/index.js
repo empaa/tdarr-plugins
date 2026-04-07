@@ -339,37 +339,38 @@ const plugin = async (args) => {
     }
   };
 
-  // Get total duration for progress calculation
-  const durationSec = (() => {
-    const fmt = args.inputFileObj.ffProbeData.format;
-    if (fmt && fmt.duration) return parseFloat(fmt.duration) || 0;
+  // Get total frames for progress calculation
+  const totalFrames = (() => {
     const vs = streams.find((s) => s.codec_type === 'video');
-    if (vs && vs.duration) return parseFloat(vs.duration) || 0;
+    if (vs && vs.nb_frames) return parseInt(vs.nb_frames) || 0;
+    // Fallback: estimate from duration × framerate
+    const fmt = args.inputFileObj.ffProbeData.format;
+    const dur = (fmt && parseFloat(fmt.duration)) || (vs && parseFloat(vs.duration)) || 0;
+    if (vs && vs.r_frame_rate && dur > 0) {
+      const [num, den] = vs.r_frame_rate.split('/');
+      const fpsEst = den ? parseInt(num) / parseInt(den) : parseFloat(num);
+      if (fpsEst > 0) return Math.round(dur * fpsEst);
+    }
     return 0;
   })();
 
-  const startMs = Date.now();
-  updateWorker({ percentage: 0, startTime: startMs, status: 'Remuxing' });
+  updateWorker({ percentage: 0, startTime: Date.now(), status: 'Remuxing' });
 
   const pm = createProcessManager(log, () => {});
   const exitCode = await pm.spawnAsync('/usr/local/bin/ffmpeg', ffmpegArgs, {
     silent: true,
     onLine: (line) => {
       // ffmpeg progress: "frame= 1234 fps=567 ... time=00:01:23.45 ... speed=12.3x"
-      const timeMatch = line.match(/time=(\d+):(\d+):(\d+\.?\d*)/);
-      if (timeMatch && durationSec > 0) {
-        const elapsed = parseInt(timeMatch[1]) * 3600
-          + parseInt(timeMatch[2]) * 60
-          + parseFloat(timeMatch[3]);
-        const pct = Math.min(100, Math.round((elapsed / durationSec) * 100));
-
-        const fpsMatch = line.match(/fps=\s*([\d.]+)/);
+      const frameMatch = line.match(/frame=\s*(\d+)/);
+      const fpsMatch = line.match(/fps=\s*([\d.]+)/);
+      if (frameMatch && totalFrames > 0) {
+        const frame = parseInt(frameMatch[1]);
         const fps = fpsMatch ? parseFloat(fpsMatch[1]) : 0;
+        const pct = Math.min(100, Math.round((frame / totalFrames) * 100));
 
         let eta = '';
-        if (pct > 0) {
-          const wallElapsed = (Date.now() - startMs) / 1000;
-          const remainSec = Math.round(wallElapsed * (100 - pct) / pct);
+        if (fps > 0) {
+          const remainSec = Math.round((totalFrames - frame) / fps);
           if (remainSec >= 3600) {
             eta = `${Math.floor(remainSec / 3600)}h${Math.floor((remainSec % 3600) / 60)}m`;
           } else if (remainSec >= 60) {
