@@ -228,6 +228,31 @@ const plugin = async (args) => {
 
   const lwiCache = path.join(vsDir, 'source.lwi');
 
+  // Build VapourSynth script (needed for both scene detection and phase 2)
+  const vpyScript = path.join(vsDir, 'source.vpy');
+  const escPy = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+  let vpyLines = [
+    'import vapoursynth as vs',
+    'core = vs.core',
+    `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
+  ];
+  if (doDownscale) {
+    vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
+  }
+  vpyLines.push('src.set_output()');
+  fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
+
+  // Pre-index lwi if needed (shared by scene detection and phase 2)
+  if (!fs.existsSync(lwiCache)) {
+    updateWorker({ status: 'Indexing' });
+    const lwiExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
+      cwd: vsDir,
+      silent: true,
+    });
+    dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
+  }
+
   let grainParam = 0;
   if (grainSynthEnabled) {
     const durationSec = parseFloat(stream.duration || '0')
@@ -247,6 +272,23 @@ const plugin = async (args) => {
       jobLog('[grain] source is clean (sigma < 2), skipping grain synthesis');
     }
   }
+
+  // ── Scene detection (parallel with CRF search) ──────────────────────
+  const scenesPath = path.join(workBase, 'scenes.json');
+  const scOnlyArgs = [
+    '-i', vpyScript,
+    '--sc-only',
+    '--scenes', scenesPath,
+    '--sc-downscale-height', '540',
+    '--min-scene-len', '24',
+    '--verbose',
+  ];
+
+  jobLog(`[scene-detect] starting in background: av1an ${scOnlyArgs.join(' ')}`);
+  const sceneDetectPromise = pm.spawnAsync(BIN.av1an, scOnlyArgs, {
+    cwd: vsDir,
+    filter: (l) => /scenecut|error|warn/i.test(l),
+  });
 
   // ── Phase 1: CRF Search ──────────────────────────────────────────────
   jobLog('='.repeat(64));
@@ -358,6 +400,7 @@ const plugin = async (args) => {
   });
 
   if (crfSearchFailed || abExit !== 0 || foundCrf == null) {
+    jobLog('[scene-detect] aborting (CRF search did not succeed)');
     pm.cleanup();
     jobLog('='.repeat(64));
     jobLog(`CRF SEARCH FAILED -- ${crfSearchFailed ? 'criteria not met' : `ab-av1 exited ${abExit}`}`);
@@ -371,35 +414,31 @@ const plugin = async (args) => {
 
   jobLog(`[phase 1] found CRF ${foundCrf} meeting VMAF >= ${targetVmaf}`);
 
+  // Wait for scene detection to finish (may already be done)
+  let sceneDetectDone = false;
+  sceneDetectPromise.then(() => { sceneDetectDone = true; }).catch(() => { sceneDetectDone = true; });
+  // Yield to let microtasks settle (if scene detection already resolved, flag is set)
+  await new Promise((r) => setImmediate(r));
+
+  if (!sceneDetectDone) {
+    jobLog('[scene-detect] CRF search complete, waiting for scene detection...');
+    updateWorker({ status: 'Scene Detection' });
+  } else {
+    jobLog('[scene-detect] already complete');
+  }
+  const sceneDetectExit = await sceneDetectPromise;
+
+  if (sceneDetectExit !== 0) {
+    pm.cleanup();
+    throw new Error(`Scene detection failed (exit ${sceneDetectExit})`);
+  }
+
+  jobLog(`[scene-detect] scenes written to ${scenesPath}`);
+
   // ── Phase 2: av1an Chunked Encode ─────────────────────────────────────
   updateWorker({ percentage: 0, status: 'Encoding' });
 
   const audioSizeGb = await probeAudioSize(inputPath, args.workDir, dbg, dbg);
-
-  // Build VapourSynth script
-  const vpyScript = path.join(vsDir, 'source.vpy');
-  const escPy = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-
-  let vpyLines = [
-    'import vapoursynth as vs',
-    'core = vs.core',
-    `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
-  ];
-  if (doDownscale) {
-    vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
-  }
-  vpyLines.push('src.set_output()');
-  fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
-
-  // Pre-index lwi if needed
-  if (!fs.existsSync(lwiCache)) {
-    updateWorker({ status: 'Indexing' });
-    const lwiExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
-      cwd: vsDir,
-      silent: true,
-    });
-    dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
-  }
 
   // Build encoder flags for av1an (fixed CRF, no target-quality)
   let encFlags;
@@ -434,8 +473,8 @@ const plugin = async (args) => {
     ...(isAutoThreads ? [] : ['--workers', String(encodeBudget.maxWorkers)]),
     '--min-scene-len', '24',
     '--chunk-order', 'long-to-short',
+    '--scenes', scenesPath,
     '--keep',
-    '--resume',
     '--verbose',
   ];
 
@@ -454,10 +493,11 @@ const plugin = async (args) => {
     if (tracker) tracker.stop();
   });
 
-  updateWorker({ status: 'Scene Detection' });
+  updateWorker({ status: 'Encoding' });
 
   tracker = createAv1anTracker({
     workBase,
+    scenesFile: scenesPath,
     maxWorkers: encodeBudget.maxWorkers,
     audioSizeGb,
     sourceSizeGb,

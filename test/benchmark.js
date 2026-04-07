@@ -42,8 +42,7 @@ Options:
   --reality <sec>       Trim sample to N seconds (from middle) and encode to completion
   --grain               Enable VapourSynth grain estimation (auto-detects film grain level)
   --no-warmup           Skip scene cache warmup, each run does fresh scene detection + encode
-                        (default; use --warmup to force cached scene detection)
-  --warmup              Use shared scene cache warmup (faster but may skew results)
+  --warmup              Use shared scene cache warmup (default; scene detection runs once via --sc-only)
   --grid                Test a custom worker×thread grid instead of presets
   --chunk-method <name> Chunk method: lsmash (default) or hybrid
   --sample <name>       Filter sample files by name substring
@@ -129,7 +128,7 @@ const chunkMethod = (() => {
   const idx = cliArgs.indexOf('--chunk-method');
   return idx !== -1 && cliArgs[idx + 1] ? cliArgs[idx + 1] : 'lsmash';
 })();
-const noWarmup = cliArgs.includes('--no-warmup') || !cliArgs.includes('--warmup');
+const noWarmup = cliArgs.includes('--no-warmup');
 
 if (realitySeconds != null && cliArgs.includes('--duration')) {
   console.error('ERROR: --reality and --duration are mutually exclusive');
@@ -278,10 +277,11 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
     ? ''
     : `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`;
 
+  const runDir = `${BENCH_TEMP}/run-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+
   let av1anCmdParts;
   if (noWarmup) {
     // Fresh run: no scene cache, av1an does scene detection + encode from scratch
-    const runDir = `${BENCH_TEMP}/run-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
     av1anCmdParts = [
       `rm -rf ${runDir} 2>/dev/null;`,
       `mkdir -p ${runDir}/work &&`,
@@ -294,21 +294,19 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       `--verbose`,
     ];
   } else {
-    // Reuse warmup's scene cache — clean encode output between runs
-    // av1an requires scenes.json + done.json with {"frames": N, "done": {}} + --resume
+    // Warmup mode: scene detection already done, pass --scenes to skip it
+    const scenesPath = `${warmupDir}/scenes.json`;
     av1anCmdParts = [
-      `rm -rf ${warmupDir}/work ${warmupDir}/out.mkv 2>/dev/null;`,
-      `mkdir -p ${warmupDir}/work &&`,
-      `cp ${warmupDir}/scenes_backup.json ${warmupDir}/work/scenes.json &&`,
-      `cp ${warmupDir}/chunks_backup.json ${warmupDir}/work/chunks.json &&`,
-      `echo '{"frames":0,"done":{},"audio_done":false}' > ${warmupDir}/work/done.json &&`,
-      `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
+      `rm -rf ${runDir} 2>/dev/null;`,
+      `mkdir -p ${runDir}/work &&`,
+      `av1an -i ${warmupDir}/vs/bench.vpy -o ${runDir}/out.mkv --temp ${runDir}/work`,
       `-c mkvmerge -e ${av1anEncoder}`,
       workerArgs,
       `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
       `--sc-downscale-height 540 --chunk-order long-to-short --chunk-method ${chunkMethod}${chunkMethod === 'hybrid' ? ' --ignore-frame-mismatch' : ''}`,
       `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
-      `--verbose --resume`,
+      `--scenes ${scenesPath}`,
+      `--verbose`,
     ];
   }
   if (downscaleRes) {
@@ -319,10 +317,8 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   const cmd = av1anCmdParts.join(' ');
 
   const startMs = Date.now();
-  let encodeStartMs = null;  // timestamp when av1an starts encoding chunks
-  const runDir = noWarmup
-    ? `${BENCH_TEMP}/run-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`
-    : warmupDir;
+  // In warmup mode, encode starts immediately (no scene detection phase)
+  let encodeStartMs = noWarmup ? null : startMs;
   const workDir = `${runDir}/work`;
   const cpuSamples = [];
   const memSamples = [];
@@ -397,7 +393,8 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   monitorTimer = setInterval(monitorTick, 1000);
 
   // Extra time for scene detection when no warmup, plus encode duration, plus muxing buffer
-  const sceneDetectionBuffer = noWarmup ? 300 : 60;
+  // No-warmup needs extra time for scene detection; warmup goes straight to encoding
+  const sceneDetectionBuffer = noWarmup ? 300 : 30;
   const execTimeout = realityMode ? 7200000 : (testDuration + sceneDetectionBuffer) * 1000;
   const result = await dockerExec(cmd, { timeout: execTimeout, live: true });
 
@@ -955,9 +952,9 @@ async function main() {
       grainParam = await estimateGrainInContainer(activeSample);
     }
 
-    // Warmup: run scene detection once so all benchmark runs use cached scenes
+    // Warmup: run scene detection once so all benchmark runs skip it
     if (!isAbAv1 && !noWarmup) {
-      console.log('\nWarmup: running scene detection (will be cached for all configs)...');
+      console.log('\nWarmup: running scene detection via --sc-only...');
       const containerSample = activeSample;
       const warmupDir = `${BENCH_TEMP}/warmup`;
       const vpyParts = [
@@ -973,50 +970,21 @@ async function main() {
       vpyParts.push('src.set_output()');
       const vpyLines = vpyParts.join('\\n');
 
-      // Run av1an just long enough to complete scene detection, then kill
-      const av1anEncoder = encoderArg === 'aom' ? 'aom' : 'svt-av1';
-      const warmupEncFlags = encoderArg === 'aom'
-        ? '--cpu-used=8 --threads=1'
-        : '--preset 8 --lp 1';
-      const warmupCmd = [
-        `mkdir -p ${warmupDir}/work ${warmupDir}/vs &&`,
+      const scenesPath = `${warmupDir}/scenes.json`;
+      const scOnlyCmd = [
+        `mkdir -p ${warmupDir}/vs &&`,
         `printf '${vpyLines}\\n' > ${warmupDir}/vs/bench.vpy &&`,
-        `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
-        `-c mkvmerge -e ${av1anEncoder}`,
-        `--workers 1 --sc-downscale-height 540`,
-        `--target-quality ${targetVmaf} --qp-range 10-50`,
-        `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
+        `av1an -i ${warmupDir}/vs/bench.vpy`,
+        `--sc-only --scenes ${scenesPath}`,
+        `--sc-downscale-height 540`,
         `--verbose`,
-        `-v "${warmupEncFlags}"`,
       ].join(' ');
 
-      // Wait for scenes.json AND chunks.json to appear, then kill
-      // av1an --resume requires both files plus done.json
-      const warmupProc = dockerExec(warmupCmd, { timeout: 300000, live: true });
-      let cacheReady = false;
-      for (let attempt = 0; attempt < 100; attempt++) {
-        await new Promise((r) => setTimeout(r, 3000));
-        const check = await dockerExec(
-          `test -f ${warmupDir}/work/scenes.json && test -f ${warmupDir}/work/chunks.json && echo yes || echo no`,
-          { timeout: 5000 },
-        );
-        if (check.stdout.trim() === 'yes') {
-          cacheReady = true;
-          process.stdout.write('    Scene detection + chunking complete — killing warmup encode\n');
-          spawnSync('docker', ['exec', CONTAINER, 'bash', '-c',
-            'pkill -f "av1an|aomenc|SvtAv1EncApp" 2>/dev/null; true',
-          ]);
-          break;
-        }
-      }
-      await warmupProc.catch(() => {});
-      if (!cacheReady) {
-        console.error('ERROR: warmup timed out (5 min) — scenes.json or chunks.json not produced');
+      const scResult = await dockerExec(scOnlyCmd, { timeout: 300000, live: true });
+      if (scResult.code !== 0) {
+        console.error(`ERROR: scene detection failed (exit ${scResult.code})`);
         process.exit(1);
       }
-      // Back up cache files — av1an may clean work/ after a completed encode
-      await dockerExec(`cp ${warmupDir}/work/scenes.json ${warmupDir}/scenes_backup.json`);
-      await dockerExec(`cp ${warmupDir}/work/chunks.json ${warmupDir}/chunks_backup.json`);
       console.log('    Scenes cached.\n');
     }
 

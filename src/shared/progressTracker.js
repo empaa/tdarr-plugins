@@ -29,7 +29,7 @@ const createAv1anTracker = (opts) => {
 
   const av1anTemp = path.join(workBase, 'work');
   const logDir = path.join(workBase, 'vs', 'logs');
-  const scenesFile = path.join(av1anTemp, 'scenes.json');
+  const scenesFile = opts.scenesFile || path.join(av1anTemp, 'scenes.json');
   const doneFile = path.join(av1anTemp, 'done.json');
 
   const pushStats = (fields) => {
