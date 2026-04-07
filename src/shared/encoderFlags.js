@@ -197,7 +197,8 @@ const resolveThreadStrategy = (strategyName, overrides) => {
   const base = strategyName === 'custom'
     ? THREAD_PRESETS.aggressive
     : (THREAD_PRESETS[strategyName] || THREAD_PRESETS.safe);
-  return { preset: base, overrides: overrides || {} };
+  // Only apply explicit overrides when strategy is "custom"
+  return { preset: base, overrides: strategyName === 'custom' ? (overrides || {}) : {} };
 };
 
 const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
@@ -226,16 +227,18 @@ const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
     maxWorkers = 1;
   }
 
-  if (is4kHdr && encoder !== 'aom' && preset.hdr4kScale < 1) {
-    maxWorkers = Math.max(1, Math.round(maxWorkers * preset.hdr4kScale));
-  }
-
   let vmafThreads = Math.max(2, Math.floor(availableThreads / preset.vmafThreadDiv));
 
   // Apply explicit overrides
   if (overrides.workers != null) maxWorkers = overrides.workers;
   if (overrides.threadsPerWorker != null) threadsPerWorker = overrides.threadsPerWorker;
   if (overrides.vmafThreads != null) vmafThreads = overrides.vmafThreads;
+
+  // 4K HDR scaling applied last — overrides set the 1080p baseline,
+  // then we scale down for the ~3x memory increase of 4K HDR
+  if (is4kHdr && encoder !== 'aom' && preset.hdr4kScale < 1) {
+    maxWorkers = Math.max(1, Math.round(maxWorkers * preset.hdr4kScale));
+  }
 
   const svtLp = Math.min(preset.svtLpMax, threadsPerWorker);
 
