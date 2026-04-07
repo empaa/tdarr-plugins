@@ -215,10 +215,140 @@ const details = () => ({
 });
 
 const plugin = async (args) => {
-  // Implemented in subsequent tasks
+  const { createPathMapper } = require('../shared/pathMapper');
+  const { getOriginalLanguage } = require('../shared/arrApi');
+  const { createProcessManager } = require('../shared/processManager');
+  const path = require('path');
+
+  const inputs = args.inputs || {};
+  const radarrUrl = (inputs.radarr_url || '').trim().replace(/\/+$/, '');
+  const radarrKey = (inputs.radarr_api_key || '').trim();
+  const sonarrUrl = (inputs.sonarr_url || '').trim().replace(/\/+$/, '');
+  const sonarrKey = (inputs.sonarr_api_key || '').trim();
+
+  const additionalAudioLangs = (inputs.additional_audio_languages || '')
+    .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const subtitleLangs = (inputs.subtitle_languages || '')
+    .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+
+  const log = (msg) => {
+    if (typeof args.jobLog === 'function') args.jobLog(msg);
+    else console.log(`[Sanitize] ${msg}`);
+  };
+
+  const filePath = args.inputFileObj._id;
+  const streams = args.inputFileObj.ffProbeData.streams || [];
+
+  log('==== Sanitize File ====');
+  log(`Input: ${filePath}`);
+
+  // --- Step 1: Determine original language ---
+  let originalLang = null;
+
+  const hasArr = (radarrUrl && radarrKey) || (sonarrUrl && sonarrKey);
+  if (hasArr) {
+    let mapper;
+    try {
+      mapper = createPathMapper(inputs.path_mappings || '');
+    } catch (err) {
+      log(`Path mapping error: ${err.message} — falling back to track 0`);
+    }
+    if (mapper) {
+      const arrPath = mapper.toArr(filePath);
+      originalLang = await getOriginalLanguage({
+        radarrUrl, radarrKey, sonarrUrl, sonarrKey, arrPath, log,
+      });
+    }
+  }
+
+  // Fallback: first audio track's language
+  if (!originalLang) {
+    const firstAudio = streams.find((s) => s.codec_type === 'audio');
+    if (firstAudio && firstAudio.tags && firstAudio.tags.language) {
+      originalLang = firstAudio.tags.language.toLowerCase();
+      log(`Arr unavailable — using track 0 language: ${originalLang}`);
+    }
+  }
+
+  // If still no language, keep everything
+  if (!originalLang) {
+    log('WARNING: No original language detected — keeping all audio tracks');
+  }
+
+  // --- Step 2: Analyze streams ---
+  const { video, audio, subtitle, image } = categorizeStreams(streams);
+  log(`Streams: ${video.length} video, ${audio.length} audio, ${subtitle.length} sub, ${image.length} image`);
+
+  // --- Step 3: Build keep-set ---
+  const selectedAudio = originalLang
+    ? selectAudio(audio, originalLang, additionalAudioLangs)
+    : audio; // no language = keep all
+
+  const selectedSubs = originalLang
+    ? selectSubtitles(subtitle, originalLang, subtitleLangs)
+    : subtitle; // no language = keep all
+
+  log(`Keeping: ${selectedAudio.length} audio, ${selectedSubs.length} subtitle`);
+  for (const a of selectedAudio) {
+    log(`  audio: [${a.lang}] ${a.stream.codec_name} ${a.channels}ch (stream ${a.idx})`);
+  }
+  for (const s of selectedSubs) {
+    log(`  sub: [${s.lang}] ${s.stream.codec_name} (stream ${s.idx})`);
+  }
+
+  // --- Step 4: Check if already clean ---
+  const ext = path.extname(filePath).toLowerCase();
+  const isMkv = ext === '.mkv';
+  const noImages = image.length === 0;
+  const audioMatch = selectedAudio.length === audio.length
+    && selectedAudio.every((a, i) => audio[i] && a.idx === audio[i].idx);
+  const subMatch = selectedSubs.length === subtitle.length
+    && selectedSubs.every((s, i) => subtitle[i] && s.idx === subtitle[i].idx);
+
+  if (isMkv && noImages && audioMatch && subMatch) {
+    log('File already clean — no changes needed');
+    return {
+      outputFileObj: args.inputFileObj,
+      outputNumber: 2,
+      variables: args.variables,
+    };
+  }
+
+  // --- Step 5: Build ffmpeg map args and run ---
+  const mapArgs = [];
+  for (const v of video) mapArgs.push('-map', `0:${v.idx}`);
+  for (const a of selectedAudio) mapArgs.push('-map', `0:${a.idx}`);
+  for (const s of selectedSubs) mapArgs.push('-map', `0:${s.idx}`);
+
+  const outputName = `${path.parse(filePath).name}.sanitized.mkv`;
+  const outputPath = path.join(args.workDir, outputName);
+
+  const ffmpegArgs = [
+    '-y',
+    '-i', filePath,
+    ...mapArgs,
+    '-c', 'copy',
+    outputPath,
+  ];
+
+  log(`Running ffmpeg with ${mapArgs.length / 2} mapped streams...`);
+
+  const pm = createProcessManager(log, () => {});
+  const exitCode = await pm.spawnAsync('/usr/local/bin/ffmpeg', ffmpegArgs, {
+    silent: true,
+  });
+  pm.cleanup();
+
+  if (exitCode !== 0) {
+    throw new Error(`ffmpeg exited with code ${exitCode}`);
+  }
+
+  log(`Output: ${outputPath}`);
+  args.inputFileObj._id = outputPath;
+
   return {
     outputFileObj: args.inputFileObj,
-    outputNumber: 2,
+    outputNumber: 1,
     variables: args.variables,
   };
 };
