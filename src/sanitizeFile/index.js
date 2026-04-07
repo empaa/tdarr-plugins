@@ -348,7 +348,8 @@ const plugin = async (args) => {
     return 0;
   })();
 
-  updateWorker({ percentage: 0, startTime: Date.now(), status: 'Remuxing' });
+  const startMs = Date.now();
+  updateWorker({ percentage: 0, startTime: startMs, status: 'Remuxing' });
 
   const pm = createProcessManager(log, () => {});
   const exitCode = await pm.spawnAsync('/usr/local/bin/ffmpeg', ffmpegArgs, {
@@ -361,15 +362,30 @@ const plugin = async (args) => {
           + parseInt(timeMatch[2]) * 60
           + parseFloat(timeMatch[3]);
         const pct = Math.min(100, Math.round((elapsed / durationSec) * 100));
-        const speedMatch = line.match(/speed=\s*([\d.]+)x/);
-        const speed = speedMatch ? `${speedMatch[1]}x` : '';
-        updateWorker({ percentage: pct, status: `Remuxing${speed ? ' ' + speed : ''}` });
+
+        const fpsMatch = line.match(/fps=\s*([\d.]+)/);
+        const fps = fpsMatch ? parseFloat(fpsMatch[1]) : 0;
+
+        let eta = '';
+        if (pct > 0) {
+          const wallElapsed = (Date.now() - startMs) / 1000;
+          const remainSec = Math.round(wallElapsed * (100 - pct) / pct);
+          if (remainSec >= 3600) {
+            eta = `${Math.floor(remainSec / 3600)}h${Math.floor((remainSec % 3600) / 60)}m`;
+          } else if (remainSec >= 60) {
+            eta = `${Math.floor(remainSec / 60)}m${remainSec % 60}s`;
+          } else {
+            eta = `${remainSec}s`;
+          }
+        }
+
+        updateWorker({ percentage: pct, fps, ETA: eta });
       }
     },
   });
   pm.cleanup();
 
-  updateWorker({ percentage: 100 });
+  updateWorker({ percentage: 100, fps: 0, ETA: '' });
 
   if (exitCode !== 0) {
     throw new Error(`ffmpeg exited with code ${exitCode}`);
