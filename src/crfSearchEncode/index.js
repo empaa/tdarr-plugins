@@ -273,6 +273,23 @@ const plugin = async (args) => {
     }
   }
 
+  // ── Scene detection (parallel with CRF search) ──────────────────────
+  const scenesPath = path.join(workBase, 'scenes.json');
+  const scOnlyArgs = [
+    '-i', vpyScript,
+    '--sc-only',
+    '--scenes', scenesPath,
+    '--sc-downscale-height', '540',
+    '--min-scene-len', '24',
+    '--verbose',
+  ];
+
+  jobLog(`[scene-detect] starting in background: av1an ${scOnlyArgs.join(' ')}`);
+  const sceneDetectPromise = pm.spawnAsync(BIN.av1an, scOnlyArgs, {
+    cwd: vsDir,
+    filter: (l) => /scenecut|error|warn/i.test(l),
+  });
+
   // ── Phase 1: CRF Search ──────────────────────────────────────────────
   jobLog('='.repeat(64));
   jobLog(`CRF SEARCH ENCODE  encoder=${encoder}  preset=${encPreset}`);
@@ -383,6 +400,7 @@ const plugin = async (args) => {
   });
 
   if (crfSearchFailed || abExit !== 0 || foundCrf == null) {
+    jobLog('[scene-detect] aborting (CRF search did not succeed)');
     pm.cleanup();
     jobLog('='.repeat(64));
     jobLog(`CRF SEARCH FAILED -- ${crfSearchFailed ? 'criteria not met' : `ab-av1 exited ${abExit}`}`);
@@ -395,6 +413,27 @@ const plugin = async (args) => {
   }
 
   jobLog(`[phase 1] found CRF ${foundCrf} meeting VMAF >= ${targetVmaf}`);
+
+  // Wait for scene detection to finish (may already be done)
+  let sceneDetectDone = false;
+  sceneDetectPromise.then(() => { sceneDetectDone = true; }).catch(() => { sceneDetectDone = true; });
+  // Yield to let microtasks settle (if scene detection already resolved, flag is set)
+  await new Promise((r) => setImmediate(r));
+
+  if (!sceneDetectDone) {
+    jobLog('[scene-detect] CRF search complete, waiting for scene detection...');
+    updateWorker({ status: 'Scene Detection' });
+  } else {
+    jobLog('[scene-detect] already complete');
+  }
+  const sceneDetectExit = await sceneDetectPromise;
+
+  if (sceneDetectExit !== 0) {
+    pm.cleanup();
+    throw new Error(`Scene detection failed (exit ${sceneDetectExit})`);
+  }
+
+  jobLog(`[scene-detect] scenes written to ${scenesPath}`);
 
   // ── Phase 2: av1an Chunked Encode ─────────────────────────────────────
   updateWorker({ percentage: 0, status: 'Encoding' });
@@ -434,8 +473,8 @@ const plugin = async (args) => {
     ...(isAutoThreads ? [] : ['--workers', String(encodeBudget.maxWorkers)]),
     '--min-scene-len', '24',
     '--chunk-order', 'long-to-short',
+    '--scenes', scenesPath,
     '--keep',
-    '--resume',
     '--verbose',
   ];
 
@@ -454,7 +493,7 @@ const plugin = async (args) => {
     if (tracker) tracker.stop();
   });
 
-  updateWorker({ status: 'Scene Detection' });
+  updateWorker({ status: 'Encoding' });
 
   tracker = createAv1anTracker({
     workBase,
