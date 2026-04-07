@@ -325,6 +325,7 @@ const plugin = async (args) => {
 
   const ffmpegArgs = [
     '-y',
+    '-ignore_unknown',
     '-i', filePath,
     ...mapArgs,
     '-c', 'copy',
