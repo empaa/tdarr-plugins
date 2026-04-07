@@ -277,10 +277,11 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
     ? ''
     : `--workers ${config.workers} --vmaf-threads ${config.vmafThreads}`;
 
+  const runDir = `${BENCH_TEMP}/run-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+
   let av1anCmdParts;
   if (noWarmup) {
     // Fresh run: no scene cache, av1an does scene detection + encode from scratch
-    const runDir = `${BENCH_TEMP}/run-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
     av1anCmdParts = [
       `rm -rf ${runDir} 2>/dev/null;`,
       `mkdir -p ${runDir}/work &&`,
@@ -293,21 +294,19 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
       `--verbose`,
     ];
   } else {
-    // Reuse warmup's scene cache — clean encode output between runs
-    // av1an requires scenes.json + done.json with {"frames": N, "done": {}} + --resume
+    // Warmup mode: scene detection already done, pass --scenes to skip it
+    const scenesPath = `${warmupDir}/scenes.json`;
     av1anCmdParts = [
-      `rm -rf ${warmupDir}/work ${warmupDir}/out.mkv 2>/dev/null;`,
-      `mkdir -p ${warmupDir}/work &&`,
-      `cp ${warmupDir}/scenes_backup.json ${warmupDir}/work/scenes.json &&`,
-      `cp ${warmupDir}/chunks_backup.json ${warmupDir}/work/chunks.json &&`,
-      `echo '{"frames":0,"done":{},"audio_done":false}' > ${warmupDir}/work/done.json &&`,
-      `av1an -i ${warmupDir}/vs/bench.vpy -o ${warmupDir}/out.mkv --temp ${warmupDir}/work`,
+      `rm -rf ${runDir} 2>/dev/null;`,
+      `mkdir -p ${runDir}/work &&`,
+      `av1an -i ${warmupDir}/vs/bench.vpy -o ${runDir}/out.mkv --temp ${runDir}/work`,
       `-c mkvmerge -e ${av1anEncoder}`,
       workerArgs,
       `--vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json`,
       `--sc-downscale-height 540 --chunk-order long-to-short --chunk-method ${chunkMethod}${chunkMethod === 'hybrid' ? ' --ignore-frame-mismatch' : ''}`,
       `--target-quality ${targetVmaf} --qp-range 10-50 --probes 6`,
-      `--verbose --resume`,
+      `--scenes ${scenesPath}`,
+      `--verbose`,
     ];
   }
   if (downscaleRes) {
@@ -318,10 +317,8 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   const cmd = av1anCmdParts.join(' ');
 
   const startMs = Date.now();
-  let encodeStartMs = null;  // timestamp when av1an starts encoding chunks
-  const runDir = noWarmup
-    ? `${BENCH_TEMP}/run-${config.label.replace(/[^a-zA-Z0-9_-]/g, '_')}`
-    : warmupDir;
+  // In warmup mode, encode starts immediately (no scene detection phase)
+  let encodeStartMs = noWarmup ? null : startMs;
   const workDir = `${runDir}/work`;
   const cpuSamples = [];
   const memSamples = [];
@@ -396,7 +393,8 @@ async function benchAv1an(samplePath, config, { realityMode = false, activeSampl
   monitorTimer = setInterval(monitorTick, 1000);
 
   // Extra time for scene detection when no warmup, plus encode duration, plus muxing buffer
-  const sceneDetectionBuffer = noWarmup ? 300 : 60;
+  // No-warmup needs extra time for scene detection; warmup goes straight to encoding
+  const sceneDetectionBuffer = noWarmup ? 300 : 30;
   const execTimeout = realityMode ? 7200000 : (testDuration + sceneDetectionBuffer) * 1000;
   const result = await dockerExec(cmd, { timeout: execTimeout, live: true });
 
