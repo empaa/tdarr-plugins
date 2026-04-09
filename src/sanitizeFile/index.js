@@ -306,7 +306,15 @@ const plugin = async (args) => {
   const subMatch = selectedSubs.length === subtitle.length
     && selectedSubs.every((s, i) => subtitle[i] && s.idx === subtitle[i].idx);
 
-  if (isMkv && noImages && audioMatch && subMatch) {
+  // Verify stream order: all video indices must come before all audio,
+  // and all audio before all subtitle.
+  const lastVideoIdx = video.length > 0 ? Math.max(...video.map((v) => v.idx)) : -1;
+  const firstAudioIdx = selectedAudio.length > 0 ? Math.min(...selectedAudio.map((a) => a.idx)) : Infinity;
+  const lastAudioIdx = selectedAudio.length > 0 ? Math.max(...selectedAudio.map((a) => a.idx)) : -1;
+  const firstSubIdx = selectedSubs.length > 0 ? Math.min(...selectedSubs.map((s) => s.idx)) : Infinity;
+  const orderCorrect = lastVideoIdx < firstAudioIdx && lastAudioIdx < firstSubIdx;
+
+  if (isMkv && noImages && audioMatch && subMatch && orderCorrect) {
     log('File already clean — no changes needed');
     return {
       outputFileObj: args.inputFileObj,
