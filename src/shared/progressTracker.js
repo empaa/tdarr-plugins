@@ -18,7 +18,7 @@ const formatEta = (seconds) => {
 
 const createAv1anTracker = (opts) => {
   const {
-    workBase, maxWorkers, audioSizeGb, sourceSizeGb,
+    workBase, audioSizeGb, sourceSizeGb,
     maxEncodedPercent, updateWorker, jobLog, dbg, onSizeExceeded,
   } = opts;
 
@@ -90,8 +90,7 @@ const createAv1anTracker = (opts) => {
         }
       }
 
-      const samples = Math.max(2, maxWorkers * 2);
-      const recentSamples = allFpsSamples.slice(-samples);
+      const recentSamples = allFpsSamples.slice(-20);
       if (recentSamples.length >= 2) {
         const sorted = [...recentSamples].sort((a, b) => a - b);
         const trimmed = sorted.length > 2 ? sorted.slice(1, -1) : sorted;
@@ -104,14 +103,13 @@ const createAv1anTracker = (opts) => {
     if (workerFps > 0) {
       smoothedFps = smoothedFps === 0 ? workerFps : smoothedFps * 0.7 + workerFps * 0.3;
     }
-    const chunkTotalFps = smoothedFps * maxWorkers;
 
-    let throughputFps = chunkTotalFps;
+    let throughputFps = smoothedFps;
     if (encodeStartMs > 0 && encodedFrames > 0) {
       const elapsedS = (Date.now() - encodeStartMs) / 1000;
       if (elapsedS > 0) throughputFps = encodedFrames / elapsedS;
     }
-    const totalFps = chunkTotalFps > 0 ? (chunkTotalFps + throughputFps) / 2 : throughputFps;
+    const totalFps = throughputFps;
 
     const pct = Math.min(99, Math.round((encodedFrames / totalFrames) * 100));
     const remainingFrames = totalFrames - encodedFrames;

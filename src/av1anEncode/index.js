@@ -72,22 +72,6 @@ const details = () => ({
       inputUI: { type: 'dropdown', options: ['720p', '1080p', '1440p'] },
       tooltip: 'Target resolution for downscaling. Only used when downscale is enabled.',
     },
-    {
-      label: 'Thread Strategy',
-      name: 'thread_strategy',
-      type: 'string',
-      defaultValue: 'auto',
-      inputUI: { type: 'dropdown', options: ['auto', 'safe', 'balanced', 'aggressive', 'max', 'custom'] },
-      tooltip: 'Controls thread/worker budget. auto=let av1an decide. safe=conservative defaults. balanced=~70% CPU. aggressive=saturate all cores (4x oversub). max=heavy oversubscription (6x). custom=use thread_overrides JSON.',
-    },
-    {
-      label: 'Thread Overrides (JSON)',
-      name: 'thread_overrides',
-      type: 'string',
-      defaultValue: '',
-      inputUI: { type: 'text' },
-      tooltip: 'Only used when Thread Strategy is "custom". JSON: {"workers":16,"threadsPerWorker":2,"vmafThreads":12}. Omitted keys fall back to aggressive preset.',
-    },
   ],
   outputs: [
     { number: 1, tooltip: 'Encode succeeded -- output file is the encoded video+audio MKV' },
@@ -98,11 +82,10 @@ const details = () => ({
 const plugin = async (args) => {
   const fs   = require('fs');
   const path = require('path');
-  const os   = require('os');
 
   const { createProcessManager } = require('../shared/processManager');
   const { createLogger, humanSize } = require('../shared/logger');
-  const { detectHdrMeta, buildAomFlags, buildSvtFlags, calculateThreadBudget } = require('../shared/encoderFlags');
+  const { detectHdrMeta, buildAomFlags, buildSvtFlags } = require('../shared/encoderFlags');
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
@@ -115,16 +98,6 @@ const plugin = async (args) => {
   const maxEncodedPercent = Number(inputs.max_encoded_percent) || 80;
   const downscaleEnabled  = inputs.downscale_enabled === true || inputs.downscale_enabled === 'true';
   const downscaleRes      = String(inputs.downscale_resolution || '1080p');
-
-  const threadStrategy    = String(inputs.thread_strategy || 'safe');
-  let threadOverrides = {};
-  let threadOverridesError = null;
-  const rawOverrides = String(inputs.thread_overrides || '').trim();
-  if (rawOverrides) {
-    try { threadOverrides = JSON.parse(rawOverrides); } catch (e) {
-      threadOverridesError = e.message;
-    }
-  }
 
   const findBin = (name, ...paths) => paths.find((p) => fs.existsSync(p))
     || (() => { throw new Error(`Required binary not found: ${name} (checked ${paths.join(', ')})`); })();
@@ -140,9 +113,6 @@ const plugin = async (args) => {
   if (!fs.existsSync(vmafModel)) throw new Error(`VMAF model not found: ${vmafModel}`);
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
-  if (threadOverridesError) {
-    jobLog(`WARNING: invalid thread_overrides JSON, falling back to aggressive: ${threadOverridesError}`);
-  }
   const pm = createProcessManager(jobLog, dbg);
 
   const updateWorker = (fields) => {
@@ -156,7 +126,6 @@ const plugin = async (args) => {
   const stream = (file.ffProbeData && file.ffProbeData.streams && file.ffProbeData.streams[0]) || {};
   const height = stream.height || 0;
   const sourceWidth = stream.width || 0;
-  const availableThreads = os.cpus().length;
 
   const doDownscale = downscaleEnabled && shouldDownscale(sourceWidth, downscaleRes);
   if (downscaleEnabled && !doDownscale) {
@@ -164,15 +133,6 @@ const plugin = async (args) => {
   }
 
   const { hdrAom, hdrSvt } = detectHdrMeta(stream);
-
-  const isAutoThreads = threadStrategy === 'auto';
-  const is4kHdr = height >= 2160 && stream.color_transfer === 'smpte2084';
-  const { maxWorkers, threadsPerWorker, svtLp, vmafThreads } = isAutoThreads
-    ? { maxWorkers: null, threadsPerWorker: null, svtLp: null, vmafThreads: null }
-    : calculateThreadBudget(
-      availableThreads, encoder, is4kHdr,
-      { strategy: threadStrategy, ...threadOverrides, encPreset },
-    );
 
   const workBase = path.join(args.workDir, 'av1an-work');
   const vsDir = path.join(workBase, 'vs');
@@ -183,16 +143,9 @@ const plugin = async (args) => {
 
   const lwiCache = path.join(vsDir, 'source.lwi');
 
-  let encFlags;
-  if (isAutoThreads) {
-    encFlags = encoder === 'aom'
-      ? buildAomFlags(encPreset, 0, hdrAom).replace(/--threads=\d+\s*/, '')
-      : buildSvtFlags(encPreset, 0, hdrSvt).replace(/--lp \d+\s*/, '');
-  } else {
-    encFlags = encoder === 'aom'
-      ? buildAomFlags(encPreset, threadsPerWorker, hdrAom)
-      : buildSvtFlags(encPreset, svtLp, hdrSvt);
-  }
+  const encFlags = encoder === 'aom'
+    ? buildAomFlags(encPreset, hdrAom)
+    : buildSvtFlags(encPreset, hdrSvt);
 
   jobLog('='.repeat(64));
   jobLog(`AV1AN ENCODE  encoder=${encoder}  preset=${encPreset}`);
@@ -200,7 +153,6 @@ const plugin = async (args) => {
   jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${doDownscale ? ` -> ${downscaleRes}` : ''}`);
   jobLog(`  target     : VMAF ${targetVmaf}  QP-range ${qpRange}`);
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
-  jobLog(`  threads    : cpu=${availableThreads}  workers=${isAutoThreads ? 'auto' : maxWorkers}  threads/worker=${isAutoThreads ? 'auto' : threadsPerWorker}  vmaf-threads=${isAutoThreads ? 'auto' : vmafThreads}  strategy=${threadStrategy}`);
   jobLog(`  enc flags  : ${encFlags}`);
   jobLog('='.repeat(64));
 
@@ -244,13 +196,9 @@ const plugin = async (args) => {
     '-e', encoder,
     '--sc-downscale-height', '540',
     '--scaler', 'lanczos',
-    '--chunk-method', 'hybrid',
-    '--ignore-frame-mismatch',
-    ...(isAutoThreads ? [] : ['--workers', String(maxWorkers)]),
     '--qp-range', qpRange,
     '--target-quality', String(targetVmaf),
     '--vmaf-path', vmafModel,
-    ...(isAutoThreads ? [] : ['--vmaf-threads', String(vmafThreads)]),
     '--probes', '6',
     '--chunk-order', 'long-to-short',
     '--keep',
@@ -277,7 +225,6 @@ const plugin = async (args) => {
 
   tracker = createAv1anTracker({
     workBase,
-    maxWorkers,
     audioSizeGb,
     sourceSizeGb,
     maxEncodedPercent,
