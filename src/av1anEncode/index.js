@@ -102,7 +102,7 @@ const details = () => ({
       type: 'boolean',
       defaultValue: 'false',
       inputUI: { type: 'switch' },
-      tooltip: 'Automatically detect noise, denoise during encoding, and synthesize matching grain at playback. Saves bitrate on noisy sources with no visual penalty.',
+      tooltip: 'Detect noise, denoise with NLMeans prefilter, and add photon noise grain at playback. Saves bitrate on noisy sources with no visual penalty.',
     },
   ],
   outputs: [
@@ -203,7 +203,7 @@ const plugin = async (args) => {
 
   const lwiCache = path.join(vsDir, 'source.lwi');
 
-  let grainParam = 0;
+  let grainResult = null;
   if (grainSynthEnabled) {
     const durationSec = parseFloat(stream.duration || '0')
       || (file.ffProbeData && file.ffProbeData.format && parseFloat(file.ffProbeData.format.duration)) || 0;
@@ -215,23 +215,41 @@ const plugin = async (args) => {
     const totalFrames = parseInt(stream.nb_frames || '0', 10)
       || (durationSec > 0 && srcFpsForGrain > 0 ? Math.round(durationSec * srcFpsForGrain) : 0);
     const result = estimateNoise(inputPath, durationSec, totalFrames, BIN.vspipe, lwiCache, dbg);
-    grainParam = result.grainParam;
-    if (grainParam > 0) {
-      jobLog(`[grain] detected sigma=${result.sigma.toFixed(2)} -> film-grain=${grainParam}`);
+    if (result.photonNoise > 0) {
+      grainResult = result;
+      jobLog(`[grain] detected sigma=${result.sigma.toFixed(2)} -> nlmH=${result.nlmH} photon-noise=${result.photonNoise}`);
     } else {
       jobLog('[grain] source is clean (sigma < 2), skipping grain synthesis');
     }
   }
 
+  if (grainResult) {
+    const checkScript = path.join(vsDir, 'check_nlm.vpy');
+    fs.writeFileSync(checkScript, [
+      'import vapoursynth as vs',
+      'core = vs.core',
+      'assert hasattr(core, "nlm_ispc"), "nlm_ispc plugin not found"',
+      'core.std.BlankClip(length=1).set_output()',
+    ].join('\n') + '\n');
+    const checkExit = require('child_process').spawnSync(BIN.vspipe, ['--info', checkScript], {
+      timeout: 10000, encoding: 'utf8',
+    });
+    try { fs.unlinkSync(checkScript); } catch (_) {}
+    if (checkExit.status !== 0) {
+      throw new Error('Grain synthesis requires vs-nlm-ispc plugin. Disable grain_synth or install the plugin.');
+    }
+    dbg('[grain] nlm_ispc plugin verified');
+  }
+
   let encFlags;
   if (isAutoThreads) {
     encFlags = encoder === 'aom'
-      ? buildAomFlags(encPreset, 0, hdrAom, grainParam).replace(/--threads=\d+\s*/, '')
-      : buildSvtFlags(encPreset, 0, hdrSvt, grainParam).replace(/--lp \d+\s*/, '');
+      ? buildAomFlags(encPreset, 0, hdrAom).replace(/--threads=\d+\s*/, '')
+      : buildSvtFlags(encPreset, 0, hdrSvt).replace(/--lp \d+\s*/, '');
   } else {
     encFlags = encoder === 'aom'
-      ? buildAomFlags(encPreset, threadsPerWorker, hdrAom, grainParam)
-      : buildSvtFlags(encPreset, svtLp, hdrSvt, grainParam);
+      ? buildAomFlags(encPreset, threadsPerWorker, hdrAom)
+      : buildSvtFlags(encPreset, svtLp, hdrSvt);
   }
 
   jobLog('='.repeat(64));
@@ -243,7 +261,7 @@ const plugin = async (args) => {
   jobLog(`  threads    : cpu=${availableThreads}  workers=${isAutoThreads ? 'auto' : maxWorkers}  threads/worker=${isAutoThreads ? 'auto' : threadsPerWorker}  vmaf-threads=${isAutoThreads ? 'auto' : vmafThreads}  strategy=${threadStrategy}`);
   jobLog(`  enc flags  : ${encFlags}`);
   if (grainSynthEnabled) {
-    jobLog(`  grain      : ${grainParam > 0 ? `enabled (film-grain=${grainParam})` : 'enabled (clean source, skipped)'}`);
+    jobLog(`  grain      : ${grainResult ? `NLMeans h=${grainResult.nlmH} + photon-noise=${grainResult.photonNoise}` : 'enabled (clean source, skipped)'}`);
   }
   jobLog('='.repeat(64));
 
@@ -263,12 +281,18 @@ const plugin = async (args) => {
     'core = vs.core',
     `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
   ];
+  if (grainResult) {
+    vpyLines.push(
+      `src = core.nlm_ispc.NLMeans(src, d=1, a=2, s=4, h=${grainResult.nlmH}, channels="Y")`,
+      `src = core.nlm_ispc.NLMeans(src, d=1, a=2, s=4, h=${grainResult.nlmChromaH}, channels="UV")`,
+    );
+  }
   if (doDownscale) {
     vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
   }
   vpyLines.push('src.set_output()');
   fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
-  dbg(`[vs] .vpy written${doDownscale ? ` (Lanczos3 -> ${downscaleRes})` : ' (passthrough)'}`);
+  dbg(`[vs] .vpy written${grainResult ? ' (NLMeans denoise)' : ''}${doDownscale ? ` (Lanczos3 -> ${downscaleRes})` : ''}`);
 
   if (!fs.existsSync(lwiCache)) {
     updateWorker({ status: 'Indexing' });
@@ -307,6 +331,10 @@ const plugin = async (args) => {
   }
 
   av1anArgs.push('-v', encFlags);
+
+  if (grainResult) {
+    av1anArgs.push('--photon-noise', String(grainResult.photonNoise), '--chroma-noise');
+  }
 
   jobLog(`av1an ${av1anArgs.map((a) => /\s/.test(a) ? `"${a}"` : a).join(' ')}`);
 

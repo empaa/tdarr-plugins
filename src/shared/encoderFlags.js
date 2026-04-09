@@ -74,23 +74,20 @@ const detectHdrMeta = (stream) => {
   return { prim, trans, matrix, chroma, hdrAom, hdrSvt };
 };
 
-const buildAomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
-  const grainFlags = grainParam > 0
-    ? `--denoise-noise-level=${grainParam}`
-    : '--enable-dnl-denoising=0';
+const buildAomFlags = (preset, threadsPerWorker, hdrAom) => {
   return [
     '--end-usage=q', `--cpu-used=${preset}`, `--threads=${threadsPerWorker}`,
     '--tune=ssim', '--enable-fwd-kf=0', '--disable-kf', '--kf-max-dist=9999',
     '--enable-qm=1', '--bit-depth=10', '--lag-in-frames=48',
     '--tile-columns=0', '--tile-rows=0', '--sb-size=dynamic',
     '--deltaq-mode=0', '--aq-mode=0', '--arnr-strength=1', '--arnr-maxframes=4',
-    '--enable-chroma-deltaq=1', grainFlags,
+    '--enable-chroma-deltaq=1', '--enable-dnl-denoising=0',
     '--disable-trellis-quant=0', '--quant-b-adapt=1',
     '--enable-keyframe-filtering=1', hdrAom,
   ].filter(Boolean).join(' ');
 };
 
-const svtConfig = (preset, lp, hdrSvt, grainParam) => {
+const svtConfig = (preset, lp, hdrSvt) => {
   const entries = [
     ['rc', '0'],
     ['preset', String(preset)],
@@ -112,12 +109,10 @@ const svtConfig = (preset, lp, hdrSvt, grainParam) => {
     ['sharpness', '1'],
     ['tile-columns', '1'],
     ['scm', '0'],
+    ['film-grain', '0'],
+    ['film-grain-denoise', '0'],
   ];
   if (lp) entries.push(['lp', String(lp)]);
-  if (grainParam > 0) {
-    entries.push(['film-grain', String(grainParam)]);
-    entries.push(['film-grain-denoise', '1']);
-  }
   return { entries, hdrSvt };
 };
 
@@ -127,17 +122,17 @@ const formatSvtForAv1an = ({ entries, hdrSvt }) =>
 const formatSvtForAbAv1 = ({ entries }) =>
   entries.map(([k, v]) => `--svt ${k}=${v}`).join(' ');
 
-const buildSvtFlags = (preset, svtLp, hdrSvt, grainParam) =>
-  formatSvtForAv1an(svtConfig(preset, svtLp, hdrSvt, grainParam));
+const buildSvtFlags = (preset, svtLp, hdrSvt) =>
+  formatSvtForAv1an(svtConfig(preset, svtLp, hdrSvt));
 
-const buildAbAv1SvtFlags = (lp, grainParam) => {
-  const cfg = svtConfig(0, lp, '', grainParam);
+const buildAbAv1SvtFlags = (lp) => {
+  const cfg = svtConfig(0, lp, '');
   const skip = new Set(['rc', 'preset', 'input-depth', 'keyint']);
   const filtered = { entries: cfg.entries.filter(([k]) => !skip.has(k)), hdrSvt: '' };
   return [formatSvtForAbAv1(filtered), '--keyint 10s', '--scd true'].join(' ');
 };
 
-const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
+const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom) => {
   // ffmpeg-native libaom-av1 options (exposed directly by ffmpeg)
   // Note: cpu-used and keyframe control are handled by ab-av1 natively
   // (--preset maps to -cpu-used, --keyint maps to -g)
@@ -149,7 +144,6 @@ const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
     '--enc aq-mode=0',
     '--enc arnr-strength=1',
     '--enc arnr-max-frames=4',
-    grainParam > 0 ? `--enc denoise-noise-level=${grainParam}` : '',
   ].filter(Boolean);
 
   // Raw aomenc params not exposed by ffmpeg — passed via aom-params
@@ -162,7 +156,7 @@ const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
     'disable-trellis-quant=0',
     'quant-b-adapt=1',
     'enable-keyframe-filtering=1',
-    grainParam <= 0 ? 'enable-dnl-denoising=0' : '',
+    'enable-dnl-denoising=0',
   ].filter(Boolean).join(':');
 
   return [...ffmpegArgs, `--enc aom-params=${aomParams}`].join(' ');

@@ -110,7 +110,7 @@ const details = () => ({
       type: 'boolean',
       defaultValue: 'false',
       inputUI: { type: 'switch' },
-      tooltip: 'Automatically detect noise, denoise during encoding, and synthesize matching grain at playback.',
+      tooltip: 'Detect noise, denoise with NLMeans prefilter, and add photon noise grain at playback. Saves bitrate on noisy sources with no visual penalty.',
     },
   ],
   outputs: [
@@ -253,7 +253,7 @@ const plugin = async (args) => {
     dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
   }
 
-  let grainParam = 0;
+  let grainResult = null;
   if (grainSynthEnabled) {
     const durationSec = parseFloat(stream.duration || '0')
       || (file.ffProbeData && file.ffProbeData.format && parseFloat(file.ffProbeData.format.duration)) || 0;
@@ -265,12 +265,30 @@ const plugin = async (args) => {
     const totalFrames = parseInt(stream.nb_frames || '0', 10)
       || (durationSec > 0 && srcFps > 0 ? Math.round(durationSec * srcFps) : 0);
     const result = estimateNoise(inputPath, durationSec, totalFrames, BIN.vspipe, lwiCache, dbg);
-    grainParam = result.grainParam;
-    if (grainParam > 0) {
-      jobLog(`[grain] detected sigma=${result.sigma.toFixed(2)} -> film-grain=${grainParam}`);
+    if (result.photonNoise > 0) {
+      grainResult = result;
+      jobLog(`[grain] detected sigma=${result.sigma.toFixed(2)} -> nlmH=${result.nlmH} photon-noise=${result.photonNoise}`);
     } else {
       jobLog('[grain] source is clean (sigma < 2), skipping grain synthesis');
     }
+  }
+
+  if (grainResult) {
+    const checkScript = path.join(vsDir, 'check_nlm.vpy');
+    fs.writeFileSync(checkScript, [
+      'import vapoursynth as vs',
+      'core = vs.core',
+      'assert hasattr(core, "nlm_ispc"), "nlm_ispc plugin not found"',
+      'core.std.BlankClip(length=1).set_output()',
+    ].join('\n') + '\n');
+    const checkExit = require('child_process').spawnSync(BIN.vspipe, ['--info', checkScript], {
+      timeout: 10000, encoding: 'utf8',
+    });
+    try { fs.unlinkSync(checkScript); } catch (_) {}
+    if (checkExit.status !== 0) {
+      throw new Error('Grain synthesis requires vs-nlm-ispc plugin. Disable grain_synth or install the plugin.');
+    }
+    dbg('[grain] nlm_ispc plugin verified');
   }
 
   // ── Scene detection (parallel with CRF search) ──────────────────────
@@ -301,7 +319,7 @@ const plugin = async (args) => {
   jobLog(`  phase 1    : ab-av1 crf-search (single-process, lp=${isAutoThreads ? 'auto' : searchBudget.svtLp})`);
   jobLog(`  phase 2    : av1an fixed-CRF (workers=${isAutoThreads ? 'auto' : encodeBudget.maxWorkers}, threads/worker=${isAutoThreads ? 'auto' : encodeBudget.threadsPerWorker})`);
   if (grainSynthEnabled) {
-    jobLog(`  grain      : ${grainParam > 0 ? `enabled (film-grain=${grainParam})` : 'enabled (clean source, skipped)'}`);
+    jobLog(`  grain      : ${grainResult ? `NLMeans h=${grainResult.nlmH} + photon-noise=${grainResult.photonNoise}` : 'enabled (clean source, skipped)'}`);
   }
   jobLog('='.repeat(64));
 
@@ -315,11 +333,11 @@ const plugin = async (args) => {
   let searchEncFlags;
   if (encoder === 'aom') {
     const tpw = isAutoThreads ? availableThreads : searchBudget.threadsPerWorker;
-    searchEncFlags = buildAbAv1AomFlags(encPreset, tpw, hdrAom, grainParam);
+    searchEncFlags = buildAbAv1AomFlags(encPreset, tpw, hdrAom);
   } else {
     searchEncFlags = isAutoThreads
-      ? buildAbAv1SvtFlags(0, grainParam).replace(/--svt lp=\d+\s*/, '')
-      : buildAbAv1SvtFlags(searchBudget.svtLp, grainParam);
+      ? buildAbAv1SvtFlags(0).replace(/--svt lp=\d+\s*/, '')
+      : buildAbAv1SvtFlags(searchBudget.svtLp);
   }
 
   const abEncoder = encoder === 'aom' ? 'libaom-av1' : 'libsvtav1';
@@ -435,6 +453,23 @@ const plugin = async (args) => {
 
   jobLog(`[scene-detect] scenes written to ${scenesPath}`);
 
+  // Rewrite .vpy with NLMeans denoise for phase 2 encoding
+  if (grainResult) {
+    const updatedVpyLines = [
+      'import vapoursynth as vs',
+      'core = vs.core',
+      `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
+      `src = core.nlm_ispc.NLMeans(src, d=1, a=2, s=4, h=${grainResult.nlmH}, channels="Y")`,
+      `src = core.nlm_ispc.NLMeans(src, d=1, a=2, s=4, h=${grainResult.nlmChromaH}, channels="UV")`,
+    ];
+    if (doDownscale) {
+      updatedVpyLines.push(...buildVsDownscaleLines(downscaleRes));
+    }
+    updatedVpyLines.push('src.set_output()');
+    fs.writeFileSync(vpyScript, updatedVpyLines.join('\n') + '\n');
+    dbg('[vs] .vpy rewritten with NLMeans denoise for phase 2');
+  }
+
   // ── Phase 2: av1an Chunked Encode ─────────────────────────────────────
   updateWorker({ percentage: 0, status: 'Encoding' });
 
@@ -445,16 +480,16 @@ const plugin = async (args) => {
   if (encoder === 'aom') {
     const crfFlag = `--cq-level=${foundCrf}`;
     if (isAutoThreads) {
-      encFlags = buildAomFlags(encPreset, 0, hdrAom, grainParam).replace(/--threads=\d+\s*/, '') + ' ' + crfFlag;
+      encFlags = buildAomFlags(encPreset, 0, hdrAom).replace(/--threads=\d+\s*/, '') + ' ' + crfFlag;
     } else {
-      encFlags = buildAomFlags(encPreset, encodeBudget.threadsPerWorker, hdrAom, grainParam) + ' ' + crfFlag;
+      encFlags = buildAomFlags(encPreset, encodeBudget.threadsPerWorker, hdrAom) + ' ' + crfFlag;
     }
   } else {
     const crfFlag = `--crf ${foundCrf}`;
     if (isAutoThreads) {
-      encFlags = buildSvtFlags(encPreset, 0, hdrSvt, grainParam).replace(/--lp \d+\s*/, '') + ' ' + crfFlag;
+      encFlags = buildSvtFlags(encPreset, 0, hdrSvt).replace(/--lp \d+\s*/, '') + ' ' + crfFlag;
     } else {
-      encFlags = buildSvtFlags(encPreset, encodeBudget.svtLp, hdrSvt, grainParam) + ' ' + crfFlag;
+      encFlags = buildSvtFlags(encPreset, encodeBudget.svtLp, hdrSvt) + ' ' + crfFlag;
     }
   }
 
@@ -483,6 +518,10 @@ const plugin = async (args) => {
   }
 
   av1anArgs.push('-v', encFlags);
+
+  if (grainResult) {
+    av1anArgs.push('--photon-noise', String(grainResult.photonNoise), '--chroma-noise');
+  }
 
   jobLog(`[phase 2] av1an ${av1anArgs.map((a) => /\s/.test(a) ? `"${a}"` : a).join(' ')}`);
 

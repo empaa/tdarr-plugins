@@ -1,19 +1,9 @@
 [
   {
-    "name": "grain-synth on",
+    "name": "default",
     "inputs": {
       "target_vmaf": "93",
       "preset": "6",
-      "grain_synth": "true",
-      "thread_strategy": "auto"
-    }
-  },
-  {
-    "name": "grain-synth off",
-    "inputs": {
-      "target_vmaf": "93",
-      "preset": "6",
-      "grain_synth": "false",
       "thread_strategy": "auto"
     }
   }

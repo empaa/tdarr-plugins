@@ -5,41 +5,72 @@ const cp = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-// Control points for sigma -> --film-grain / --denoise-noise-level mapping.
-// Sigma is estimated via VapourSynth temporal frame differencing (luma abs diff
-// between successive frames, converted to Gaussian sigma). Clean content reads
-// ~0, moderate grain ~3, heavy ~6+. Linear interpolation between points.
-// Tune these based on test encodes.
-const GRAIN_CURVE = [
-  { sigma: 2,  param: 4 },
-  { sigma: 4,  param: 8 },
-  { sigma: 6,  param: 15 },
-  { sigma: 10, param: 25 },
-  { sigma: 15, param: 50 },
+// Control points for sigma -> NLMeans h parameter mapping.
+// Calibrated from 5 sources (2 action, 1 horror, 1 CGI, 1 drama)
+// using Laplacian spatial noise estimation + ternary PSNR search.
+// Linear fit: h ≈ 0.86 * sigma - 0.52 (RMSE=0.31 across 40 data points).
+const DENOISE_CURVE = [
+  { sigma: 1.38, h: 0.64 },
+  { sigma: 1.81, h: 1.03 },
+  { sigma: 2.15, h: 1.31 },
+  { sigma: 2.45, h: 1.57 },
+  { sigma: 2.95, h: 2.02 },
+  { sigma: 3.38, h: 2.39 },
+  { sigma: 3.76, h: 2.74 },
+  { sigma: 4.57, h: 3.44 },
 ];
 
-const SIGMA_SKIP_THRESHOLD = 2;
+// Control points for sigma -> av1an --photon-noise value mapping.
+// TODO: photon-noise calibration needs a different approach — Laplacian
+// measurement of decoded AV1 saturates at max values. For now, use a
+// conservative linear estimate based on the av1an community guidelines.
+const PHOTON_CURVE = [
+  { sigma: 1.38, param: 4 },
+  { sigma: 1.81, param: 6 },
+  { sigma: 2.15, param: 8 },
+  { sigma: 2.45, param: 10 },
+  { sigma: 2.95, param: 14 },
+  { sigma: 3.38, param: 18 },
+  { sigma: 3.76, param: 22 },
+  { sigma: 4.57, param: 30 },
+];
+
+// Below this Laplacian sigma, source is clean enough to skip grain synthesis.
+// Derived from calibration: h drops below meaningful denoising (~0.1) at ~0.6.
+// Clean CGI sources read 0.1-0.3, noisy film reads 0.7+.
+const SIGMA_SKIP_THRESHOLD = 0.6;
+const CHROMA_SIGMA_RATIO = 0.5;
 const SAMPLE_REGIONS = 4;
 const FRAMES_PER_REGION = 50;
 
 /**
- * Interpolate sigma through the control-point curve.
- * Returns integer 0-50, or 0 if sigma is below threshold.
+ * Linearly interpolate through a curve of {sigma, <valueKey>} control points.
+ * Returns 0 if sigma is below SIGMA_SKIP_THRESHOLD.
  */
-const mapSigmaToGrainParam = (sigma) => {
+const interpolateCurve = (curve, valueKey, sigma) => {
   if (sigma < SIGMA_SKIP_THRESHOLD) return 0;
-  if (sigma >= GRAIN_CURVE[GRAIN_CURVE.length - 1].sigma) {
-    return GRAIN_CURVE[GRAIN_CURVE.length - 1].param;
+  if (sigma >= curve[curve.length - 1].sigma) {
+    return curve[curve.length - 1][valueKey];
   }
-  for (let i = 0; i < GRAIN_CURVE.length - 1; i++) {
-    const lo = GRAIN_CURVE[i];
-    const hi = GRAIN_CURVE[i + 1];
+  for (let i = 0; i < curve.length - 1; i++) {
+    const lo = curve[i];
+    const hi = curve[i + 1];
     if (sigma >= lo.sigma && sigma < hi.sigma) {
       const t = (sigma - lo.sigma) / (hi.sigma - lo.sigma);
-      return Math.round(lo.param + t * (hi.param - lo.param));
+      return lo[valueKey] + t * (hi[valueKey] - lo[valueKey]);
     }
   }
   return 0;
+};
+
+const mapSigmaToNlmH = (sigma) => {
+  const h = interpolateCurve(DENOISE_CURVE, 'h', sigma);
+  return Math.round(h * 100) / 100;
+};
+
+const mapSigmaToPhotonNoise = (sigma) => {
+  const pn = interpolateCurve(PHOTON_CURVE, 'param', sigma);
+  return Math.round(pn);
 };
 
 /**
@@ -49,9 +80,11 @@ const esc = (p) => p.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 /**
  * Build a VapourSynth script that samples SAMPLE_REGIONS regions of the video,
- * computes per-frame luma abs temporal diff, and prints SIGMA:<value> to stderr
- * for each processed frame. sigma = avg * 255.0 * 1.2533 / 1.4142 converts
- * mean absolute diff (0-1 range) to an approximate Gaussian noise sigma.
+ * applies a Laplacian convolution to each frame (spatial noise estimation),
+ * and prints SIGMA:<value> to stderr. Uses the Immerkaer estimator:
+ *   sigma = sqrt(pi/2) * (1/6) * mean(|Laplacian|) * 255
+ * This is immune to motion (single-frame, spatial-only) unlike temporal
+ * differencing, and only requires built-in VS filters.
  */
 const buildNoiseVpy = (inputPath, lwiCachePath, starts) => {
   const src = esc(inputPath);
@@ -61,17 +94,21 @@ const buildNoiseVpy = (inputPath, lwiCachePath, starts) => {
   const lines = [
     'import vapoursynth as vs',
     'import sys',
+    'import math',
     'core = vs.core',
     `clip = core.lsmas.LWLibavSource(source='${src}', cachefile='${cache}')`,
     'luma = core.std.ShufflePlanes(clip, planes=0, colorfamily=vs.GRAY)',
+    // Convert to 32-bit float to avoid clipping in Laplacian convolution
+    'luma = core.resize.Point(luma, format=vs.GRAYS)',
   ];
 
   // Unroll regions — VS needs explicit clip variables, not a loop.
   for (let i = 0; i < starts.length; i++) {
     const s = starts[i];
     lines.push(`r${i} = luma[${s}:${s + fpr}]`);
-    lines.push(`d${i} = core.std.Expr([r${i}[:-1], r${i}[1:]], expr=['x y - abs'])`);
-    lines.push(`d${i} = core.std.PlaneStats(d${i})`);
+    // Laplacian 3x3 kernel: [1, -2, 1, -2, 4, -2, 1, -2, 1]
+    lines.push(`lap${i} = core.std.Convolution(r${i}, matrix=[1, -2, 1, -2, 4, -2, 1, -2, 1])`);
+    lines.push(`d${i} = core.std.PlaneStats(core.std.Expr(lap${i}, expr=['x abs']))`);
   }
 
   // Splice regions together.
@@ -79,10 +116,11 @@ const buildNoiseVpy = (inputPath, lwiCachePath, starts) => {
   lines.push(`out = ${parts[0]}${parts.slice(1).map(p => ' + ' + p).join('')}`);
 
   // ModifyFrame callback prints SIGMA to stderr.
+  // Immerkaer: sigma = sqrt(pi/2) * (1/6) * mean(|Laplacian|) * 255
   lines.push('');
   lines.push('def emit_sigma(n, f):');
   lines.push('    avg = f.props["PlaneStatsAverage"]');
-  lines.push('    sigma = avg * 255.0 * 1.2533 / 1.4142');
+  lines.push('    sigma = math.sqrt(math.pi / 2.0) * (1.0 / 6.0) * avg * 255.0');
   lines.push('    sys.stderr.write("SIGMA:{:.6f}\\n".format(sigma))');
   lines.push('    sys.stderr.flush()');
   lines.push('    return f');
@@ -94,14 +132,15 @@ const buildNoiseVpy = (inputPath, lwiCachePath, starts) => {
 };
 
 /**
- * Estimate noise sigma from the source file using VapourSynth temporal luma
- * differencing. Samples SAMPLE_REGIONS regions spread across the video.
- * Returns { sigma, grainParam }.
+ * Estimate noise sigma from the source file using VapourSynth spatial
+ * Laplacian estimation (Immerkaer method). Samples SAMPLE_REGIONS regions
+ * spread across the video. Immune to motion unlike temporal differencing.
+ * Returns { sigma, nlmH, nlmChromaH, photonNoise }.
  */
 const estimateNoise = (inputPath, durationSec, totalFrames, vspipeBin, lwiCache, dbg) => {
   if (totalFrames < FRAMES_PER_REGION + 10) {
     dbg('[grain] totalFrames too small for noise estimation, skipping');
-    return { sigma: 0, grainParam: 0 };
+    return { sigma: 0, nlmH: 0, nlmChromaH: 0, photonNoise: 0 };
   }
 
   // Sample positions at 15%, 35%, 55%, 75% of totalFrames, clamped to valid range.
@@ -120,7 +159,7 @@ const estimateNoise = (inputPath, durationSec, totalFrames, vspipeBin, lwiCache,
     fs.writeFileSync(vpyPath, script, 'utf8');
   } catch (err) {
     dbg(`[grain] failed to write .vpy script: ${err.message}`);
-    return { sigma: 0, grainParam: 0 };
+    return { sigma: 0, nlmH: 0, nlmChromaH: 0, photonNoise: 0 };
   }
 
   let output = '';
@@ -140,15 +179,15 @@ const estimateNoise = (inputPath, durationSec, totalFrames, vspipeBin, lwiCache,
 
     if (result.error) {
       dbg(`[grain] vspipe error: ${result.error.message}`);
-      return { sigma: 0, grainParam: 0 };
+      return { sigma: 0, nlmH: 0, nlmChromaH: 0, photonNoise: 0 };
     }
     if (result.status !== 0) {
       dbg(`[grain] vspipe exited ${result.status}: ${(result.stderr || '').slice(0, 200)}`);
-      return { sigma: 0, grainParam: 0 };
+      return { sigma: 0, nlmH: 0, nlmChromaH: 0, photonNoise: 0 };
     }
   } catch (err) {
     dbg(`[grain] vspipe failed: ${err.message}`);
-    return { sigma: 0, grainParam: 0 };
+    return { sigma: 0, nlmH: 0, nlmChromaH: 0, photonNoise: 0 };
   } finally {
     try { fs.unlinkSync(vpyPath); } catch (_) { /* ignore */ }
   }
@@ -164,7 +203,7 @@ const estimateNoise = (inputPath, durationSec, totalFrames, vspipeBin, lwiCache,
 
   if (values.length === 0) {
     dbg('[grain] no SIGMA values found in vspipe output');
-    return { sigma: 0, grainParam: 0 };
+    return { sigma: 0, nlmH: 0, nlmChromaH: 0, photonNoise: 0 };
   }
 
   // Median across all sampled frames (robust to scene changes / motion).
@@ -174,10 +213,15 @@ const estimateNoise = (inputPath, durationSec, totalFrames, vspipeBin, lwiCache,
     ? (values[mid - 1] + values[mid]) / 2
     : values[mid];
 
-  const grainParam = mapSigmaToGrainParam(sigma);
-  dbg(`[grain] estimated sigma=${sigma.toFixed(2)} -> film-grain=${grainParam} (from ${values.length} frames)`);
+  const nlmH = mapSigmaToNlmH(sigma);
+  const nlmChromaH = mapSigmaToNlmH(sigma * CHROMA_SIGMA_RATIO);
+  const photonNoise = mapSigmaToPhotonNoise(sigma);
+  dbg(`[grain] estimated sigma=${sigma.toFixed(2)} -> nlmH=${nlmH} nlmChromaH=${nlmChromaH} photon-noise=${photonNoise} (from ${values.length} frames)`);
 
-  return { sigma, grainParam };
+  return { sigma, nlmH, nlmChromaH, photonNoise };
 };
 
-module.exports = { estimateNoise, mapSigmaToGrainParam, GRAIN_CURVE, SIGMA_SKIP_THRESHOLD };
+module.exports = {
+  estimateNoise, mapSigmaToNlmH, mapSigmaToPhotonNoise,
+  DENOISE_CURVE, PHOTON_CURVE, SIGMA_SKIP_THRESHOLD, CHROMA_SIGMA_RATIO,
+};

@@ -88,14 +88,6 @@ const details = () => ({
       inputUI: { type: 'text' },
       tooltip: 'Only used when Thread Strategy is "custom". JSON: {"threadsPerWorker":20}. Sets SVT-AV1 lp value. "workers" and "vmafThreads" are ignored for ab-av1.',
     },
-    {
-      label: 'Grain Synthesis',
-      name: 'grain_synth',
-      type: 'boolean',
-      defaultValue: 'false',
-      inputUI: { type: 'switch' },
-      tooltip: 'Automatically detect noise, denoise during encoding, and synthesize matching grain at playback. Saves bitrate on noisy sources with no visual penalty.',
-    },
   ],
   outputs: [
     { number: 1, tooltip: 'Encode succeeded -- output file is the encoded video+audio MKV' },
@@ -113,8 +105,6 @@ const plugin = async (args) => {
   const { detectHdrMeta, buildAbAv1SvtFlags, calculateThreadBudget } = require('../shared/encoderFlags');
   const { shouldDownscale, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { createAbAv1Tracker } = require('../shared/progressTracker');
-  const { estimateNoise } = require('../shared/grainSynth');
-
   const inputs = args.inputs || {};
   const targetVmaf        = Number(inputs.target_vmaf) || 93;
   const minCrf            = Number(inputs.min_crf) || 10;
@@ -133,8 +123,6 @@ const plugin = async (args) => {
       threadOverridesError = e.message;
     }
   }
-
-  const grainSynthEnabled = inputs.grain_synth === true || inputs.grain_synth === 'true';
 
   const BIN_AB_AV1 = ['/usr/local/bin/ab-av1', '/usr/bin/ab-av1'].find((p) => fs.existsSync(p));
   if (!BIN_AB_AV1) throw new Error('Required binary not found: ab-av1 (checked /usr/local/bin, /usr/bin)');
@@ -188,27 +176,9 @@ const plugin = async (args) => {
     return parts[1] ? parts[0] / parts[1] : parts[0];
   })();
 
-  let grainParam = 0;
-  if (grainSynthEnabled) {
-    const BIN_VSPIPE = ['/usr/local/bin/vspipe', '/usr/bin/vspipe'].find((p) => fs.existsSync(p));
-    if (!BIN_VSPIPE) throw new Error('Required binary not found: vspipe (checked /usr/local/bin, /usr/bin)');
-    const durationSec = parseFloat(stream.duration || '0')
-      || (file.ffProbeData && file.ffProbeData.format && parseFloat(file.ffProbeData.format.duration)) || 0;
-    const totalFrames = parseInt(stream.nb_frames || '0', 10)
-      || (durationSec > 0 && srcFps > 0 ? Math.round(durationSec * srcFps) : 0);
-    const lwiCache = path.join(abWorkDir, 'noise.lwi');
-    const result = estimateNoise(inputPath, durationSec, totalFrames, BIN_VSPIPE, lwiCache, dbg);
-    grainParam = result.grainParam;
-    if (grainParam > 0) {
-      jobLog(`[grain] detected sigma=${result.sigma.toFixed(2)} -> film-grain=${grainParam}`);
-    } else {
-      jobLog('[grain] source is clean (sigma < 2), skipping grain synthesis');
-    }
-  }
-
   const svtFlags = isAutoThreads
-    ? buildAbAv1SvtFlags(0, grainParam).replace(/--svt lp=\d+\s*/, '')
-    : buildAbAv1SvtFlags(svtLp, grainParam);
+    ? buildAbAv1SvtFlags(0).replace(/--svt lp=\d+\s*/, '')
+    : buildAbAv1SvtFlags(svtLp);
 
   const sourceSizeGb = (() => {
     try { return fs.statSync(inputPath).size / (1024 ** 3); } catch (_) { return 0; }
@@ -221,9 +191,6 @@ const plugin = async (args) => {
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
   jobLog(`  threads    : cpu=${availableThreads}  lp=${isAutoThreads ? 'auto' : svtLp}  strategy=${threadStrategy}`);
   jobLog(`  svt flags  : ${svtFlags}`);
-  if (grainSynthEnabled) {
-    jobLog(`  grain      : ${grainParam > 0 ? `enabled (film-grain=${grainParam})` : 'enabled (clean source, skipped)'}`);
-  }
   jobLog('='.repeat(64));
 
   updateWorker({ percentage: 0, startTime: Date.now(), status: 'CRF Search' });
