@@ -164,6 +164,7 @@ const plugin = async (args) => {
     '--max-crf', String(maxCrf),
     '--vmaf', `n_threads=${os.cpus().length}:model=path=${vmafModel}`,
     '--max-encoded-percent', String(maxEncodedPercent),
+    '--cache', 'false',
     '--verbose',
   ];
 
