@@ -697,8 +697,27 @@ async function trimSampleForReality(containerSample, seconds) {
 }
 
 async function probeFrameCount(containerPath) {
+  // Try nb_frames from container metadata first (instant, no decode)
+  const metaCmd = `ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of csv=p=0 "${containerPath}"`;
+  const metaResult = await dockerExec(metaCmd, { timeout: 10000 });
+  const metaFrames = parseInt(metaResult.stdout.trim(), 10);
+  if (!isNaN(metaFrames) && metaFrames > 0) return metaFrames;
+
+  // Fallback: calculate from duration × fps
+  const probeCmd = `ffprobe -v error -select_streams v:0 -show_entries stream=duration,r_frame_rate -of json "${containerPath}"`;
+  const probeResult = await dockerExec(probeCmd, { timeout: 10000 });
+  try {
+    const info = JSON.parse(probeResult.stdout);
+    const stream = info.streams[0];
+    const dur = parseFloat(stream.duration);
+    const [num, den] = stream.r_frame_rate.split('/').map(Number);
+    const fps = num / den;
+    if (dur > 0 && fps > 0) return Math.round(dur * fps);
+  } catch { /* fall through */ }
+
+  // Last resort: decode all frames (slow but accurate)
   const cmd = `ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "${containerPath}"`;
-  const result = await dockerExec(cmd, { timeout: 60000 });
+  const result = await dockerExec(cmd, { timeout: 600000 });
   const frames = parseInt(result.stdout.trim(), 10);
   return isNaN(frames) ? 0 : frames;
 }

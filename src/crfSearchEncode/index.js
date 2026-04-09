@@ -80,38 +80,6 @@ const details = () => ({
       inputUI: { type: 'dropdown', options: ['720p', '1080p', '1440p'] },
       tooltip: 'Target resolution for downscaling. Only used when downscale is enabled.',
     },
-    {
-      label: 'Thread Strategy',
-      name: 'thread_strategy',
-      type: 'string',
-      defaultValue: 'auto',
-      inputUI: { type: 'dropdown', options: ['auto', 'safe', 'balanced', 'aggressive', 'max', 'custom'] },
-      tooltip: 'Controls thread/worker budget. auto=let encoders decide. safe=conservative. balanced=~70% CPU. aggressive=saturate cores. max=heavy oversubscription. custom=use thread_overrides JSON.',
-    },
-    {
-      label: 'Thread Overrides (JSON)',
-      name: 'thread_overrides',
-      type: 'string',
-      defaultValue: '',
-      inputUI: { type: 'text' },
-      tooltip: 'Only used when Thread Strategy is "custom". JSON: {"workers":16,"threadsPerWorker":2,"vmafThreads":12}. Omitted keys fall back to aggressive preset.',
-    },
-    {
-      label: 'Chunk Method',
-      name: 'chunk_method',
-      type: 'string',
-      defaultValue: 'lsmash',
-      inputUI: { type: 'dropdown', options: ['lsmash', 'hybrid'] },
-      tooltip: 'lsmash = fast startup via index seeking, low disk usage, best for SVT-AV1. hybrid = ffmpeg segment splitting, better for long aom encodes. Both require VapourSynth.',
-    },
-    {
-      label: 'Grain Synthesis',
-      name: 'grain_synth',
-      type: 'boolean',
-      defaultValue: 'false',
-      inputUI: { type: 'switch' },
-      tooltip: 'Automatically detect noise, denoise during encoding, and synthesize matching grain at playback.',
-    },
   ],
   outputs: [
     { number: 1, tooltip: 'Encode succeeded -- output file is the encoded video+audio MKV' },
@@ -128,12 +96,11 @@ const plugin = async (args) => {
   const { createLogger, humanSize } = require('../shared/logger');
   const {
     detectHdrMeta, buildAomFlags, buildSvtFlags,
-    buildAbAv1SvtFlags, buildAbAv1AomFlags, calculateThreadBudget,
+    buildAbAv1SvtFlags, buildAbAv1AomFlags,
   } = require('../shared/encoderFlags');
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
-  const { estimateNoise } = require('../shared/grainSynth');
 
   const inputs = args.inputs || {};
   const encoder           = String(inputs.encoder || 'svt-av1');
@@ -144,19 +111,6 @@ const plugin = async (args) => {
   const maxEncodedPercent = Number(inputs.max_encoded_percent) || 80;
   const downscaleEnabled  = inputs.downscale_enabled === true || inputs.downscale_enabled === 'true';
   const downscaleRes      = String(inputs.downscale_resolution || '1080p');
-
-  const threadStrategy    = String(inputs.thread_strategy || 'safe');
-  let threadOverrides = {};
-  let threadOverridesError = null;
-  const rawOverrides = String(inputs.thread_overrides || '').trim();
-  if (rawOverrides) {
-    try { threadOverrides = JSON.parse(rawOverrides); } catch (e) {
-      threadOverridesError = e.message;
-    }
-  }
-
-  const chunkMethod       = String(inputs.chunk_method || 'lsmash');
-  const grainSynthEnabled = inputs.grain_synth === true || inputs.grain_synth === 'true';
 
   const findBin = (name, ...paths) => paths.find((p) => fs.existsSync(p))
     || (() => { throw new Error(`Required binary not found: ${name} (checked ${paths.join(', ')})`); })();
@@ -172,9 +126,6 @@ const plugin = async (args) => {
   if (!fs.existsSync(vmafModel)) throw new Error(`VMAF model not found: ${vmafModel}`);
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
-  if (threadOverridesError) {
-    jobLog(`WARNING: invalid thread_overrides JSON, falling back to aggressive: ${threadOverridesError}`);
-  }
   const pm = createProcessManager(jobLog, dbg);
 
   const updateWorker = (fields) => {
@@ -188,7 +139,6 @@ const plugin = async (args) => {
   const stream = (file.ffProbeData && file.ffProbeData.streams && file.ffProbeData.streams[0]) || {};
   const height = stream.height || 0;
   const sourceWidth = stream.width || 0;
-  const availableThreads = os.cpus().length;
 
   const doDownscale = downscaleEnabled && shouldDownscale(sourceWidth, downscaleRes);
   if (downscaleEnabled && !doDownscale) {
@@ -196,25 +146,6 @@ const plugin = async (args) => {
   }
 
   const { hdrAom, hdrSvt } = detectHdrMeta(stream);
-
-  const isAutoThreads = threadStrategy === 'auto';
-  const is4kHdr = height >= 2160 && stream.color_transfer === 'smpte2084';
-
-  // Phase 1 thread budget: single-process for CRF search
-  const searchBudget = isAutoThreads
-    ? { svtLp: null, vmafThreads: null }
-    : calculateThreadBudget(
-      availableThreads, encoder === 'aom' ? 'aom' : 'svt-av1', is4kHdr,
-      { strategy: threadStrategy, ...threadOverrides, singleProcess: true, encPreset },
-    );
-
-  // Phase 2 thread budget: multi-worker for av1an encode
-  const encodeBudget = isAutoThreads
-    ? { maxWorkers: null, threadsPerWorker: null, svtLp: null, vmafThreads: null }
-    : calculateThreadBudget(
-      availableThreads, encoder, is4kHdr,
-      { strategy: threadStrategy, ...threadOverrides, encPreset },
-    );
 
   // ── Grain estimation and work directory setup ────────────────────────
   const workBase = path.join(args.workDir, 'crf-search-work');
@@ -228,68 +159,6 @@ const plugin = async (args) => {
 
   const lwiCache = path.join(vsDir, 'source.lwi');
 
-  // Build VapourSynth script (needed for both scene detection and phase 2)
-  const vpyScript = path.join(vsDir, 'source.vpy');
-  const escPy = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-
-  let vpyLines = [
-    'import vapoursynth as vs',
-    'core = vs.core',
-    `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
-  ];
-  if (doDownscale) {
-    vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
-  }
-  vpyLines.push('src.set_output()');
-  fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
-
-  // Pre-index lwi if needed (shared by scene detection and phase 2)
-  if (!fs.existsSync(lwiCache)) {
-    updateWorker({ status: 'Indexing' });
-    const lwiExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
-      cwd: vsDir,
-      silent: true,
-    });
-    dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
-  }
-
-  let grainParam = 0;
-  if (grainSynthEnabled) {
-    const durationSec = parseFloat(stream.duration || '0')
-      || (file.ffProbeData && file.ffProbeData.format && parseFloat(file.ffProbeData.format.duration)) || 0;
-    const srcFps = (() => {
-      const r = stream.r_frame_rate || stream.avg_frame_rate || '24/1';
-      const parts = r.split('/').map(Number);
-      return parts[1] ? parts[0] / parts[1] : parts[0];
-    })();
-    const totalFrames = parseInt(stream.nb_frames || '0', 10)
-      || (durationSec > 0 && srcFps > 0 ? Math.round(durationSec * srcFps) : 0);
-    const result = estimateNoise(inputPath, durationSec, totalFrames, BIN.vspipe, lwiCache, dbg);
-    grainParam = result.grainParam;
-    if (grainParam > 0) {
-      jobLog(`[grain] detected sigma=${result.sigma.toFixed(2)} -> film-grain=${grainParam}`);
-    } else {
-      jobLog('[grain] source is clean (sigma < 2), skipping grain synthesis');
-    }
-  }
-
-  // ── Scene detection (parallel with CRF search) ──────────────────────
-  const scenesPath = path.join(workBase, 'scenes.json');
-  const scOnlyArgs = [
-    '-i', vpyScript,
-    '--sc-only',
-    '--scenes', scenesPath,
-    '--sc-downscale-height', '540',
-    '--min-scene-len', '24',
-    '--verbose',
-  ];
-
-  jobLog(`[scene-detect] starting in background: av1an ${scOnlyArgs.join(' ')}`);
-  const sceneDetectPromise = pm.spawnAsync(BIN.av1an, scOnlyArgs, {
-    cwd: vsDir,
-    filter: (l) => /scenecut|error|warn/i.test(l),
-  });
-
   // ── Phase 1: CRF Search ──────────────────────────────────────────────
   jobLog('='.repeat(64));
   jobLog(`CRF SEARCH ENCODE  encoder=${encoder}  preset=${encPreset}`);
@@ -297,12 +166,8 @@ const plugin = async (args) => {
   jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${doDownscale ? ` -> ${downscaleRes}` : ''}`);
   jobLog(`  target     : VMAF ${targetVmaf}  CRF ${minCrf}-${maxCrf}`);
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
-  jobLog(`  threads    : cpu=${availableThreads}  strategy=${threadStrategy}`);
-  jobLog(`  phase 1    : ab-av1 crf-search (single-process, lp=${isAutoThreads ? 'auto' : searchBudget.svtLp})`);
-  jobLog(`  phase 2    : av1an fixed-CRF (workers=${isAutoThreads ? 'auto' : encodeBudget.maxWorkers}, threads/worker=${isAutoThreads ? 'auto' : encodeBudget.threadsPerWorker})`);
-  if (grainSynthEnabled) {
-    jobLog(`  grain      : ${grainParam > 0 ? `enabled (film-grain=${grainParam})` : 'enabled (clean source, skipped)'}`);
-  }
+  jobLog(`  phase 1    : ab-av1 crf-search`);
+  jobLog(`  phase 2    : av1an fixed-CRF`);
   jobLog('='.repeat(64));
 
   const sourceSizeGb = (() => {
@@ -312,18 +177,12 @@ const plugin = async (args) => {
   updateWorker({ percentage: 0, startTime: Date.now(), status: 'CRF Search' });
 
   // Build ab-av1 encoder flags
-  let searchEncFlags;
-  if (encoder === 'aom') {
-    const tpw = isAutoThreads ? availableThreads : searchBudget.threadsPerWorker;
-    searchEncFlags = buildAbAv1AomFlags(encPreset, tpw, hdrAom, grainParam);
-  } else {
-    searchEncFlags = isAutoThreads
-      ? buildAbAv1SvtFlags(0, grainParam).replace(/--svt lp=\d+\s*/, '')
-      : buildAbAv1SvtFlags(searchBudget.svtLp, grainParam);
-  }
+  const searchEncFlags = encoder === 'aom'
+    ? buildAbAv1AomFlags(encPreset, hdrAom)
+    : buildAbAv1SvtFlags();
 
   const abEncoder = encoder === 'aom' ? 'libaom-av1' : 'libsvtav1';
-  const searchVmafThreads = isAutoThreads ? availableThreads : searchBudget.vmafThreads;
+  const searchVmafThreads = os.cpus().length;
 
   const abArgs = [
     'crf-search',
@@ -335,7 +194,6 @@ const plugin = async (args) => {
     '--max-crf', String(maxCrf),
     '--vmaf', `n_threads=${searchVmafThreads}:model=path=${vmafModel}`,
     '--max-encoded-percent', String(maxEncodedPercent),
-    '--cache', 'false',
   ];
 
   if (doDownscale) {
@@ -399,11 +257,15 @@ const plugin = async (args) => {
     onSpawn: (pid) => pm.startPpidWatcher(pid),
   });
 
-  if (crfSearchFailed || abExit !== 0 || foundCrf == null) {
-    jobLog('[scene-detect] aborting (CRF search did not succeed)');
+  if (abExit !== 0 && !crfSearchFailed) {
+    pm.cleanup();
+    throw new Error(`ab-av1 crashed (exit code ${abExit}) -- check logs for OOM or other fatal errors`);
+  }
+
+  if (crfSearchFailed || foundCrf == null) {
     pm.cleanup();
     jobLog('='.repeat(64));
-    jobLog(`CRF SEARCH FAILED -- ${crfSearchFailed ? 'criteria not met' : `ab-av1 exited ${abExit}`}`);
+    jobLog('CRF SEARCH FAILED -- criteria not met');
     jobLog('='.repeat(64));
     return {
       outputFileObj: args.inputFileObj,
@@ -414,49 +276,40 @@ const plugin = async (args) => {
 
   jobLog(`[phase 1] found CRF ${foundCrf} meeting VMAF >= ${targetVmaf}`);
 
-  // Wait for scene detection to finish (may already be done)
-  let sceneDetectDone = false;
-  sceneDetectPromise.then(() => { sceneDetectDone = true; }).catch(() => { sceneDetectDone = true; });
-  // Yield to let microtasks settle (if scene detection already resolved, flag is set)
-  await new Promise((r) => setImmediate(r));
-
-  if (!sceneDetectDone) {
-    jobLog('[scene-detect] CRF search complete, waiting for scene detection...');
-    updateWorker({ status: 'Scene Detection' });
-  } else {
-    jobLog('[scene-detect] already complete');
-  }
-  const sceneDetectExit = await sceneDetectPromise;
-
-  if (sceneDetectExit !== 0) {
-    pm.cleanup();
-    throw new Error(`Scene detection failed (exit ${sceneDetectExit})`);
-  }
-
-  jobLog(`[scene-detect] scenes written to ${scenesPath}`);
-
   // ── Phase 2: av1an Chunked Encode ─────────────────────────────────────
   updateWorker({ percentage: 0, status: 'Encoding' });
 
   const audioSizeGb = await probeAudioSize(inputPath, args.workDir, dbg, dbg);
 
-  // Build encoder flags for av1an (fixed CRF, no target-quality)
-  let encFlags;
-  if (encoder === 'aom') {
-    const crfFlag = `--cq-level=${foundCrf}`;
-    if (isAutoThreads) {
-      encFlags = buildAomFlags(encPreset, 0, hdrAom, grainParam).replace(/--threads=\d+\s*/, '') + ' ' + crfFlag;
-    } else {
-      encFlags = buildAomFlags(encPreset, encodeBudget.threadsPerWorker, hdrAom, grainParam) + ' ' + crfFlag;
-    }
-  } else {
-    const crfFlag = `--crf ${foundCrf}`;
-    if (isAutoThreads) {
-      encFlags = buildSvtFlags(encPreset, 0, hdrSvt, grainParam).replace(/--lp \d+\s*/, '') + ' ' + crfFlag;
-    } else {
-      encFlags = buildSvtFlags(encPreset, encodeBudget.svtLp, hdrSvt, grainParam) + ' ' + crfFlag;
-    }
+  // Build VapourSynth script
+  const vpyScript = path.join(vsDir, 'source.vpy');
+  const escPy = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+  let vpyLines = [
+    'import vapoursynth as vs',
+    'core = vs.core',
+    `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
+  ];
+  if (doDownscale) {
+    vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
   }
+  vpyLines.push('src.set_output()');
+  fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
+
+  // Pre-index lwi if needed
+  if (!fs.existsSync(lwiCache)) {
+    updateWorker({ status: 'Indexing' });
+    const lwiExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
+      cwd: vsDir,
+      silent: true,
+    });
+    dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
+  }
+
+  // Build encoder flags for av1an (fixed CRF, no target-quality)
+  const encFlags = encoder === 'aom'
+    ? buildAomFlags(encPreset, hdrAom) + ` --cq-level=${foundCrf}`
+    : buildSvtFlags(encPreset, hdrSvt) + ` --crf ${foundCrf}`;
 
   jobLog(`[phase 2] enc flags: ${encFlags}`);
 
@@ -468,13 +321,9 @@ const plugin = async (args) => {
     '-e', encoder,
     '--sc-downscale-height', '540',
     '--scaler', 'lanczos',
-    '--chunk-method', chunkMethod,
-    ...(chunkMethod === 'hybrid' ? ['--ignore-frame-mismatch'] : []),
-    ...(isAutoThreads ? [] : ['--workers', String(encodeBudget.maxWorkers)]),
-    '--min-scene-len', '24',
     '--chunk-order', 'long-to-short',
-    '--scenes', scenesPath,
     '--keep',
+    '--resume',
     '--verbose',
   ];
 
@@ -493,12 +342,10 @@ const plugin = async (args) => {
     if (tracker) tracker.stop();
   });
 
-  updateWorker({ status: 'Encoding' });
+  updateWorker({ status: 'Scene Detection' });
 
   tracker = createAv1anTracker({
     workBase,
-    scenesFile: scenesPath,
-    maxWorkers: encodeBudget.maxWorkers,
     audioSizeGb,
     sourceSizeGb,
     maxEncodedPercent,

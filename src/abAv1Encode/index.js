@@ -72,30 +72,6 @@ const details = () => ({
       inputUI: { type: 'dropdown', options: ['720p', '1080p', '1440p'] },
       tooltip: 'Target resolution for downscaling. Only used when downscale is enabled.',
     },
-    {
-      label: 'Thread Strategy',
-      name: 'thread_strategy',
-      type: 'string',
-      defaultValue: 'auto',
-      inputUI: { type: 'dropdown', options: ['auto', 'safe', 'balanced', 'aggressive', 'max', 'custom'] },
-      tooltip: 'Controls SVT-AV1 thread parallelism (lp). auto=let ab-av1/SVT-AV1 decide. safe=conservative defaults. balanced=~70% CPU. aggressive=saturate all cores. max=heavy oversubscription. custom=use thread_overrides JSON.',
-    },
-    {
-      label: 'Thread Overrides (JSON)',
-      name: 'thread_overrides',
-      type: 'string',
-      defaultValue: '',
-      inputUI: { type: 'text' },
-      tooltip: 'Only used when Thread Strategy is "custom". JSON: {"threadsPerWorker":20}. Sets SVT-AV1 lp value. "workers" and "vmafThreads" are ignored for ab-av1.',
-    },
-    {
-      label: 'Grain Synthesis',
-      name: 'grain_synth',
-      type: 'boolean',
-      defaultValue: 'false',
-      inputUI: { type: 'switch' },
-      tooltip: 'Automatically detect noise, denoise during encoding, and synthesize matching grain at playback. Saves bitrate on noisy sources with no visual penalty.',
-    },
   ],
   outputs: [
     { number: 1, tooltip: 'Encode succeeded -- output file is the encoded video+audio MKV' },
@@ -110,10 +86,9 @@ const plugin = async (args) => {
 
   const { createProcessManager } = require('../shared/processManager');
   const { createLogger, humanSize } = require('../shared/logger');
-  const { detectHdrMeta, buildAbAv1SvtFlags, calculateThreadBudget } = require('../shared/encoderFlags');
+  const { detectHdrMeta, buildAbAv1SvtFlags } = require('../shared/encoderFlags');
   const { shouldDownscale, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { createAbAv1Tracker } = require('../shared/progressTracker');
-  const { estimateNoise } = require('../shared/grainSynth');
 
   const inputs = args.inputs || {};
   const targetVmaf        = Number(inputs.target_vmaf) || 93;
@@ -124,18 +99,6 @@ const plugin = async (args) => {
   const downscaleEnabled  = inputs.downscale_enabled === true || inputs.downscale_enabled === 'true';
   const downscaleRes      = String(inputs.downscale_resolution || '1080p');
 
-  const threadStrategy    = String(inputs.thread_strategy || 'safe');
-  let threadOverrides = {};
-  let threadOverridesError = null;
-  const rawOverrides = String(inputs.thread_overrides || '').trim();
-  if (rawOverrides) {
-    try { threadOverrides = JSON.parse(rawOverrides); } catch (e) {
-      threadOverridesError = e.message;
-    }
-  }
-
-  const grainSynthEnabled = inputs.grain_synth === true || inputs.grain_synth === 'true';
-
   const BIN_AB_AV1 = ['/usr/local/bin/ab-av1', '/usr/bin/ab-av1'].find((p) => fs.existsSync(p));
   if (!BIN_AB_AV1) throw new Error('Required binary not found: ab-av1 (checked /usr/local/bin, /usr/bin)');
   const BIN_FFMPEG = ['/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg'].find((p) => fs.existsSync(p));
@@ -144,9 +107,6 @@ const plugin = async (args) => {
   if (!fs.existsSync(vmafModel)) throw new Error(`VMAF model not found: ${vmafModel}`);
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
-  if (threadOverridesError) {
-    jobLog(`WARNING: invalid thread_overrides JSON, falling back to aggressive: ${threadOverridesError}`);
-  }
   const pm = createProcessManager(jobLog, dbg);
 
   const updateWorker = (fields) => {
@@ -160,7 +120,6 @@ const plugin = async (args) => {
   const stream = (file.ffProbeData && file.ffProbeData.streams && file.ffProbeData.streams[0]) || {};
   const height = stream.height || 0;
   const sourceWidth = stream.width || 0;
-  const availableThreads = os.cpus().length;
 
   const doDownscale = downscaleEnabled && shouldDownscale(sourceWidth, downscaleRes);
   if (downscaleEnabled && !doDownscale) {
@@ -168,15 +127,6 @@ const plugin = async (args) => {
   }
 
   detectHdrMeta(stream);
-
-  const isAutoThreads = threadStrategy === 'auto';
-  const is4kHdr = height >= 2160 && stream.color_transfer === 'smpte2084';
-  const { svtLp, vmafThreads } = isAutoThreads
-    ? { svtLp: null, vmafThreads: null }
-    : calculateThreadBudget(
-      availableThreads, 'svt-av1', is4kHdr,
-      { strategy: threadStrategy, ...threadOverrides, singleProcess: true, encPreset },
-    );
 
   const abWorkDir = path.join(args.workDir, 'ab-av1-work');
   const outputPath = path.join(args.workDir, 'ab-av1-output.mkv');
@@ -188,27 +138,7 @@ const plugin = async (args) => {
     return parts[1] ? parts[0] / parts[1] : parts[0];
   })();
 
-  let grainParam = 0;
-  if (grainSynthEnabled) {
-    const BIN_VSPIPE = ['/usr/local/bin/vspipe', '/usr/bin/vspipe'].find((p) => fs.existsSync(p));
-    if (!BIN_VSPIPE) throw new Error('Required binary not found: vspipe (checked /usr/local/bin, /usr/bin)');
-    const durationSec = parseFloat(stream.duration || '0')
-      || (file.ffProbeData && file.ffProbeData.format && parseFloat(file.ffProbeData.format.duration)) || 0;
-    const totalFrames = parseInt(stream.nb_frames || '0', 10)
-      || (durationSec > 0 && srcFps > 0 ? Math.round(durationSec * srcFps) : 0);
-    const lwiCache = path.join(abWorkDir, 'noise.lwi');
-    const result = estimateNoise(inputPath, durationSec, totalFrames, BIN_VSPIPE, lwiCache, dbg);
-    grainParam = result.grainParam;
-    if (grainParam > 0) {
-      jobLog(`[grain] detected sigma=${result.sigma.toFixed(2)} -> film-grain=${grainParam}`);
-    } else {
-      jobLog('[grain] source is clean (sigma < 2), skipping grain synthesis');
-    }
-  }
-
-  const svtFlags = isAutoThreads
-    ? buildAbAv1SvtFlags(0, grainParam).replace(/--svt lp=\d+\s*/, '')
-    : buildAbAv1SvtFlags(svtLp, grainParam);
+  const svtFlags = buildAbAv1SvtFlags();
 
   const sourceSizeGb = (() => {
     try { return fs.statSync(inputPath).size / (1024 ** 3); } catch (_) { return 0; }
@@ -219,11 +149,7 @@ const plugin = async (args) => {
   jobLog(`  input      : ${inputPath}`);
   jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${doDownscale ? ` -> ${downscaleRes}` : ''}`);
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
-  jobLog(`  threads    : cpu=${availableThreads}  lp=${isAutoThreads ? 'auto' : svtLp}  strategy=${threadStrategy}`);
   jobLog(`  svt flags  : ${svtFlags}`);
-  if (grainSynthEnabled) {
-    jobLog(`  grain      : ${grainParam > 0 ? `enabled (film-grain=${grainParam})` : 'enabled (clean source, skipped)'}`);
-  }
   jobLog('='.repeat(64));
 
   updateWorker({ percentage: 0, startTime: Date.now(), status: 'CRF Search' });
@@ -236,9 +162,8 @@ const plugin = async (args) => {
     '--min-vmaf', String(targetVmaf),
     '--min-crf', String(minCrf),
     '--max-crf', String(maxCrf),
-    '--vmaf', `n_threads=${vmafThreads}:model=path=${vmafModel}`,
+    '--vmaf', `n_threads=${os.cpus().length}:model=path=${vmafModel}`,
     '--max-encoded-percent', String(maxEncodedPercent),
-    '--cache', 'false',
     '--verbose',
   ];
 

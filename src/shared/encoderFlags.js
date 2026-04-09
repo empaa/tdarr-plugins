@@ -74,23 +74,20 @@ const detectHdrMeta = (stream) => {
   return { prim, trans, matrix, chroma, hdrAom, hdrSvt };
 };
 
-const buildAomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
-  const grainFlags = grainParam > 0
-    ? `--denoise-noise-level=${grainParam}`
-    : '--enable-dnl-denoising=0';
+const buildAomFlags = (preset, hdrAom) => {
   return [
-    '--end-usage=q', `--cpu-used=${preset}`, `--threads=${threadsPerWorker}`,
+    '--end-usage=q', `--cpu-used=${preset}`,
     '--tune=ssim', '--enable-fwd-kf=0', '--disable-kf', '--kf-max-dist=9999',
     '--enable-qm=1', '--bit-depth=10', '--lag-in-frames=48',
     '--tile-columns=0', '--tile-rows=0', '--sb-size=dynamic',
     '--deltaq-mode=0', '--aq-mode=0', '--arnr-strength=1', '--arnr-maxframes=4',
-    '--enable-chroma-deltaq=1', grainFlags,
+    '--enable-chroma-deltaq=1', '--enable-dnl-denoising=0',
     '--disable-trellis-quant=0', '--quant-b-adapt=1',
     '--enable-keyframe-filtering=1', hdrAom,
   ].filter(Boolean).join(' ');
 };
 
-const svtConfig = (preset, lp, hdrSvt, grainParam) => {
+const svtConfig = (preset, hdrSvt) => {
   const entries = [
     ['rc', '0'],
     ['preset', String(preset)],
@@ -113,11 +110,6 @@ const svtConfig = (preset, lp, hdrSvt, grainParam) => {
     ['tile-columns', '1'],
     ['scm', '0'],
   ];
-  if (lp) entries.push(['lp', String(lp)]);
-  if (grainParam > 0) {
-    entries.push(['film-grain', String(grainParam)]);
-    entries.push(['film-grain-denoise', '1']);
-  }
   return { entries, hdrSvt };
 };
 
@@ -127,17 +119,17 @@ const formatSvtForAv1an = ({ entries, hdrSvt }) =>
 const formatSvtForAbAv1 = ({ entries }) =>
   entries.map(([k, v]) => `--svt ${k}=${v}`).join(' ');
 
-const buildSvtFlags = (preset, svtLp, hdrSvt, grainParam) =>
-  formatSvtForAv1an(svtConfig(preset, svtLp, hdrSvt, grainParam));
+const buildSvtFlags = (preset, hdrSvt) =>
+  formatSvtForAv1an(svtConfig(preset, hdrSvt));
 
-const buildAbAv1SvtFlags = (lp, grainParam) => {
-  const cfg = svtConfig(0, lp, '', grainParam);
+const buildAbAv1SvtFlags = () => {
+  const cfg = svtConfig(0, '');
   const skip = new Set(['rc', 'preset', 'input-depth', 'keyint']);
   const filtered = { entries: cfg.entries.filter(([k]) => !skip.has(k)), hdrSvt: '' };
   return [formatSvtForAbAv1(filtered), '--keyint 10s', '--scd true'].join(' ');
 };
 
-const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
+const buildAbAv1AomFlags = (preset, hdrAom) => {
   // ffmpeg-native libaom-av1 options (exposed directly by ffmpeg)
   // Note: cpu-used and keyframe control are handled by ab-av1 natively
   // (--preset maps to -cpu-used, --keyint maps to -g)
@@ -149,8 +141,7 @@ const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
     '--enc aq-mode=0',
     '--enc arnr-strength=1',
     '--enc arnr-max-frames=4',
-    grainParam > 0 ? `--enc denoise-noise-level=${grainParam}` : '',
-  ].filter(Boolean);
+  ];
 
   // Raw aomenc params not exposed by ffmpeg — passed via aom-params
   // Note: end-usage omitted — ab-av1 uses CRF mode natively
@@ -162,87 +153,10 @@ const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom, grainParam) => {
     'disable-trellis-quant=0',
     'quant-b-adapt=1',
     'enable-keyframe-filtering=1',
-    grainParam <= 0 ? 'enable-dnl-denoising=0' : '',
-  ].filter(Boolean).join(':');
+    'enable-dnl-denoising=0',
+  ].join(':');
 
   return [...ffmpegArgs, `--enc aom-params=${aomParams}`].join(' ');
-};
-
-// SVT-AV1 effective thread limits per encoder preset.
-// SVT-AV1 benefits more from extra workers (av1an parallelism) than from
-// SVT-AV1 --lp (logical processors per worker). Benchmarking on a 32-thread
-// Ryzen 9 9950X showed no encode-speed gain above lp=6 — extra threads just
-// add memory pressure. Capped at 6 for all presets so the thread budget goes
-// toward more av1an workers instead.
-const SVT_LP_CAP_BY_PRESET = {
-  0: 6, 1: 6, 2: 6, 3: 6,
-  4: 6, 5: 6, 6: 6,
-  7: 6, 8: 6, 9: 6, 10: 6, 11: 6, 12: 6, 13: 6,
-};
-
-const capSvtLpByPreset = (lp, encPreset) => {
-  const cap = SVT_LP_CAP_BY_PRESET[encPreset];
-  return cap != null ? Math.min(lp, cap) : lp;
-};
-
-const THREAD_PRESETS = {
-  // hdr4kScale: SVT-AV1 worker multiplier for 4K HDR content (extra memory from 4K decode)
-  safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 1.0, svtLpMax: 6,  vmafThreadDiv: 8, hdr4kScale: 0.5 },
-  balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 1.5, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.5 },
-  aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 2.0, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.5 },
-  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 2.4, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.5 },
-};
-
-const resolveThreadStrategy = (strategyName, overrides) => {
-  const base = strategyName === 'custom'
-    ? THREAD_PRESETS.aggressive
-    : (THREAD_PRESETS[strategyName] || THREAD_PRESETS.safe);
-  // Only apply explicit overrides when strategy is "custom"
-  return { preset: base, overrides: strategyName === 'custom' ? (overrides || {}) : {} };
-};
-
-const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
-  const opts = options || {};
-  const strategyName = opts.strategy || 'safe';
-  const { preset, overrides } = resolveThreadStrategy(strategyName, opts);
-
-  let threadsPerWorker, maxWorkers;
-
-  if (encoder === 'aom') {
-    maxWorkers = Math.max(1, Math.floor(availableThreads / preset.aomWorkerDiv));
-    threadsPerWorker = Math.max(1, Math.floor(availableThreads * preset.aomOversub / maxWorkers));
-  } else {
-    // SVT-AV1: use capped lp, then fill workers by strategy aggressiveness
-    let lp = Math.min(preset.svtLpMax, availableThreads);
-    if (opts.encPreset != null) lp = capSvtLpByPreset(lp, opts.encPreset);
-    threadsPerWorker = lp;
-    const maxPossibleWorkers = Math.max(1, Math.floor(availableThreads / lp));
-    maxWorkers = Math.max(1, Math.ceil(maxPossibleWorkers * preset.svtWorkerFill));
-  }
-
-  if (opts.singleProcess) {
-    let lp = Math.min(preset.svtLpMax, availableThreads);
-    if (encoder !== 'aom' && opts.encPreset != null) lp = capSvtLpByPreset(lp, opts.encPreset);
-    threadsPerWorker = lp;
-    maxWorkers = 1;
-  }
-
-  let vmafThreads = Math.max(2, Math.floor(availableThreads / preset.vmafThreadDiv));
-
-  // Apply explicit overrides
-  if (overrides.workers != null) maxWorkers = overrides.workers;
-  if (overrides.threadsPerWorker != null) threadsPerWorker = overrides.threadsPerWorker;
-  if (overrides.vmafThreads != null) vmafThreads = overrides.vmafThreads;
-
-  // 4K HDR scaling applied last — overrides set the 1080p baseline,
-  // then we scale down for the ~3x memory increase of 4K HDR
-  if (is4kHdr && encoder !== 'aom' && preset.hdr4kScale < 1) {
-    maxWorkers = Math.max(1, Math.round(maxWorkers * preset.hdr4kScale));
-  }
-
-  const svtLp = Math.min(preset.svtLpMax, threadsPerWorker);
-
-  return { maxWorkers, threadsPerWorker, svtLp, vmafThreads, strategy: strategyName };
 };
 
 module.exports = {
@@ -251,7 +165,4 @@ module.exports = {
   buildSvtFlags,
   buildAbAv1SvtFlags,
   buildAbAv1AomFlags,
-  calculateThreadBudget,
-  capSvtLpByPreset,
-  THREAD_PRESETS,
 };

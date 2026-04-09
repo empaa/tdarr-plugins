@@ -1,46 +1,20 @@
 [
   {
-    "name": "aom grain-synth on",
+    "name": "aom default",
     "inputs": {
       "encoder": "aom",
       "target_vmaf": "93",
       "preset": "6",
-      "max_encoded_percent": "100",
-      "grain_synth": "true",
-      "thread_strategy": "auto"
+      "max_encoded_percent": "100"
     }
   },
   {
-    "name": "svt-av1 grain-synth on",
+    "name": "svt-av1 default",
     "inputs": {
       "encoder": "svt-av1",
       "target_vmaf": "93",
       "preset": "6",
-      "max_encoded_percent": "100",
-      "grain_synth": "true",
-      "thread_strategy": "auto"
-    }
-  },
-  {
-    "name": "aom grain-synth off",
-    "inputs": {
-      "encoder": "aom",
-      "target_vmaf": "93",
-      "preset": "6",
-      "max_encoded_percent": "100",
-      "grain_synth": "false",
-      "thread_strategy": "auto"
-    }
-  },
-  {
-    "name": "svt-av1 grain-synth off",
-    "inputs": {
-      "encoder": "svt-av1",
-      "target_vmaf": "93",
-      "preset": "6",
-      "max_encoded_percent": "100",
-      "grain_synth": "false",
-      "thread_strategy": "auto"
+      "max_encoded_percent": "100"
     }
   }
 ]
