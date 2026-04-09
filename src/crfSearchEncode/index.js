@@ -136,7 +136,8 @@ const plugin = async (args) => {
 
   const file = args.inputFileObj;
   const inputPath = file._id;
-  const stream = (file.ffProbeData && file.ffProbeData.streams && file.ffProbeData.streams[0]) || {};
+  const streams = (file.ffProbeData && file.ffProbeData.streams) || [];
+  const stream = streams.find((s) => s.codec_type === 'video') || {};
   const height = stream.height || 0;
   const sourceWidth = stream.width || 0;
 
