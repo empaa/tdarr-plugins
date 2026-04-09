@@ -5,8 +5,7 @@
       "encoder": "aom",
       "target_vmaf": "93",
       "preset": "8",
-      "max_encoded_percent": "100",
-      "thread_strategy": "auto"
+      "max_encoded_percent": "100"
     }
   },
   {
@@ -15,8 +14,7 @@
       "encoder": "svt-av1",
       "target_vmaf": "93",
       "preset": "8",
-      "max_encoded_percent": "100",
-      "thread_strategy": "auto"
+      "max_encoded_percent": "100"
     }
   }
 ]
