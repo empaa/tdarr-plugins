@@ -257,10 +257,15 @@ const plugin = async (args) => {
     onSpawn: (pid) => pm.startPpidWatcher(pid),
   });
 
-  if (crfSearchFailed || abExit !== 0 || foundCrf == null) {
+  if (abExit !== 0 && !crfSearchFailed) {
+    pm.cleanup();
+    throw new Error(`ab-av1 crashed (exit code ${abExit}) -- check logs for OOM or other fatal errors`);
+  }
+
+  if (crfSearchFailed || foundCrf == null) {
     pm.cleanup();
     jobLog('='.repeat(64));
-    jobLog(`CRF SEARCH FAILED -- ${crfSearchFailed ? 'criteria not met' : `ab-av1 exited ${abExit}`}`);
+    jobLog('CRF SEARCH FAILED -- criteria not met');
     jobLog('='.repeat(64));
     return {
       outputFileObj: args.inputFileObj,
