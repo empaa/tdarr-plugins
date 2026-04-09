@@ -377,6 +377,25 @@ const plugin = async (args) => {
   log(`Output: ${outputPath}`);
   args.inputFileObj._id = outputPath;
 
+  // Re-probe the remuxed file so downstream plugins get fresh ffProbeData
+  const scanArgs = {
+    _id: outputPath,
+    file: args.inputFileObj.file,
+    DB: args.inputFileObj.DB,
+    footprintId: args.inputFileObj.footprintId,
+  };
+  const scanTypes = { exifToolScan: true, mediaInfoScan: false, closedCaptionScan: false };
+
+  if (typeof args.scanIndividualFile !== 'undefined') {
+    log('Re-scanning remuxed file...');
+    const scannedFile = await args.scanIndividualFile(scanArgs, scanTypes);
+    return {
+      outputFileObj: scannedFile,
+      outputNumber: 1,
+      variables: args.variables,
+    };
+  }
+
   return {
     outputFileObj: args.inputFileObj,
     outputNumber: 1,
