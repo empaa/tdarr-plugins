@@ -85,7 +85,7 @@ const plugin = async (args) => {
 
   const { createProcessManager } = require('../shared/processManager');
   const { createLogger, humanSize } = require('../shared/logger');
-  const { detectHdrMeta, buildAomFlags, buildSvtFlags } = require('../shared/encoderFlags');
+  const { detectHdrMeta, buildAomFlags, buildSvtFlags, probeVideoStream } = require('../shared/encoderFlags');
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
@@ -123,8 +123,7 @@ const plugin = async (args) => {
 
   const file = args.inputFileObj;
   const inputPath = file._id;
-  const streams = (file.ffProbeData && file.ffProbeData.streams) || [];
-  const stream = streams.find((s) => s.codec_type === 'video') || {};
+  const stream = probeVideoStream(inputPath, BIN.ffmpeg);
   const height = stream.height || 0;
   const sourceWidth = stream.width || 0;
 

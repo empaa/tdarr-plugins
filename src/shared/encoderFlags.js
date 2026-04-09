@@ -159,10 +159,28 @@ const buildAbAv1AomFlags = (preset, hdrAom) => {
   return [...ffmpegArgs, `--enc aom-params=${aomParams}`].join(' ');
 };
 
+const probeVideoStream = (inputPath, ffmpegBin) => {
+  const cp = require('child_process');
+  const ffprobeBin = ffmpegBin.replace(/ffmpeg$/, 'ffprobe');
+  const result = cp.spawnSync(ffprobeBin, [
+    '-v', 'quiet',
+    '-print_format', 'json',
+    '-show_streams',
+    '-select_streams', 'v:0',
+    inputPath,
+  ], { timeout: 30000 });
+  if (result.status !== 0) {
+    throw new Error(`ffprobe failed (exit ${result.status}) on ${inputPath}`);
+  }
+  const data = JSON.parse(result.stdout.toString());
+  return (data.streams && data.streams[0]) || {};
+};
+
 module.exports = {
   detectHdrMeta,
   buildAomFlags,
   buildSvtFlags,
   buildAbAv1SvtFlags,
   buildAbAv1AomFlags,
+  probeVideoStream,
 };
