@@ -47,7 +47,7 @@ Remove `calculateThreadBudget`, `capSvtLpByPreset`, and `THREAD_PRESETS` from `m
 - `crfSearchEncode` phase 2: `encFlags = (encoder === 'aom' ? buildAomFlags(preset, hdrAom) : buildSvtFlags(preset, hdrSvt)) + ' ' + crfFlag`
 - `abAv1Encode`: `svtFlags = buildAbAv1SvtFlags()`
 
-**av1an CLI args** — stop conditionally injecting `--workers` and `--vmaf-threads`. Just omit them entirely (av1an decides).
+**av1an CLI args** — stop conditionally injecting `--workers` and `--vmaf-threads`. Just omit them entirely (av1an decides). Also remove `--chunk-method hybrid` and `--ignore-frame-mismatch` from both `av1anEncode` and `crfSearchEncode` — av1an defaults to lsmash, which benchmarks confirmed is the right choice. `--ignore-frame-mismatch` was only needed because of hybrid chunking.
 
 **ab-av1 CLI args (abAv1Encode)** — the `--vmaf n_threads=N:model=...` flag: use `os.cpus().length` directly instead of the budget calculator. This matches what crfSearchEncode already does in auto mode.
 
@@ -77,5 +77,4 @@ In `crfSearchEncode` and `abAv1Encode`, `os` is still needed for `os.cpus().leng
 - `buildAomFlags()` — still builds all non-thread aomenc flags
 - `svtConfig()` / `buildSvtFlags()` / `formatSvtForAv1an()` / `formatSvtForAbAv1()` — still build SVT-AV1 flags
 - `buildAbAv1SvtFlags()` / `buildAbAv1AomFlags()` — still build ab-av1 encoder args
-- Chunk method (`hybrid` / `lsmash`) — unchanged, orthogonal concern
-- `--ignore-frame-mismatch` — stays (required by hybrid chunking)
+- Chunk method defaults to lsmash (av1an's default) — no flag needed
