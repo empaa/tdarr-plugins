@@ -3,8 +3,7 @@
     "name": "default",
     "inputs": {
       "target_vmaf": "93",
-      "preset": "6",
-      "thread_strategy": "auto"
+      "preset": "6"
     }
   }
 ]

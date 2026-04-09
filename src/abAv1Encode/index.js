@@ -72,22 +72,6 @@ const details = () => ({
       inputUI: { type: 'dropdown', options: ['720p', '1080p', '1440p'] },
       tooltip: 'Target resolution for downscaling. Only used when downscale is enabled.',
     },
-    {
-      label: 'Thread Strategy',
-      name: 'thread_strategy',
-      type: 'string',
-      defaultValue: 'auto',
-      inputUI: { type: 'dropdown', options: ['auto', 'safe', 'balanced', 'aggressive', 'max', 'custom'] },
-      tooltip: 'Controls SVT-AV1 thread parallelism (lp). auto=let ab-av1/SVT-AV1 decide. safe=conservative defaults. balanced=~70% CPU. aggressive=saturate all cores. max=heavy oversubscription. custom=use thread_overrides JSON.',
-    },
-    {
-      label: 'Thread Overrides (JSON)',
-      name: 'thread_overrides',
-      type: 'string',
-      defaultValue: '',
-      inputUI: { type: 'text' },
-      tooltip: 'Only used when Thread Strategy is "custom". JSON: {"threadsPerWorker":20}. Sets SVT-AV1 lp value. "workers" and "vmafThreads" are ignored for ab-av1.',
-    },
   ],
   outputs: [
     { number: 1, tooltip: 'Encode succeeded -- output file is the encoded video+audio MKV' },
@@ -102,7 +86,7 @@ const plugin = async (args) => {
 
   const { createProcessManager } = require('../shared/processManager');
   const { createLogger, humanSize } = require('../shared/logger');
-  const { detectHdrMeta, buildAbAv1SvtFlags, calculateThreadBudget } = require('../shared/encoderFlags');
+  const { detectHdrMeta, buildAbAv1SvtFlags } = require('../shared/encoderFlags');
   const { shouldDownscale, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { createAbAv1Tracker } = require('../shared/progressTracker');
 
@@ -115,16 +99,6 @@ const plugin = async (args) => {
   const downscaleEnabled  = inputs.downscale_enabled === true || inputs.downscale_enabled === 'true';
   const downscaleRes      = String(inputs.downscale_resolution || '1080p');
 
-  const threadStrategy    = String(inputs.thread_strategy || 'safe');
-  let threadOverrides = {};
-  let threadOverridesError = null;
-  const rawOverrides = String(inputs.thread_overrides || '').trim();
-  if (rawOverrides) {
-    try { threadOverrides = JSON.parse(rawOverrides); } catch (e) {
-      threadOverridesError = e.message;
-    }
-  }
-
   const BIN_AB_AV1 = ['/usr/local/bin/ab-av1', '/usr/bin/ab-av1'].find((p) => fs.existsSync(p));
   if (!BIN_AB_AV1) throw new Error('Required binary not found: ab-av1 (checked /usr/local/bin, /usr/bin)');
   const BIN_FFMPEG = ['/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg'].find((p) => fs.existsSync(p));
@@ -133,9 +107,6 @@ const plugin = async (args) => {
   if (!fs.existsSync(vmafModel)) throw new Error(`VMAF model not found: ${vmafModel}`);
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
-  if (threadOverridesError) {
-    jobLog(`WARNING: invalid thread_overrides JSON, falling back to aggressive: ${threadOverridesError}`);
-  }
   const pm = createProcessManager(jobLog, dbg);
 
   const updateWorker = (fields) => {
@@ -149,7 +120,6 @@ const plugin = async (args) => {
   const stream = (file.ffProbeData && file.ffProbeData.streams && file.ffProbeData.streams[0]) || {};
   const height = stream.height || 0;
   const sourceWidth = stream.width || 0;
-  const availableThreads = os.cpus().length;
 
   const doDownscale = downscaleEnabled && shouldDownscale(sourceWidth, downscaleRes);
   if (downscaleEnabled && !doDownscale) {
@@ -157,15 +127,6 @@ const plugin = async (args) => {
   }
 
   detectHdrMeta(stream);
-
-  const isAutoThreads = threadStrategy === 'auto';
-  const is4kHdr = height >= 2160 && stream.color_transfer === 'smpte2084';
-  const { svtLp, vmafThreads } = isAutoThreads
-    ? { svtLp: null, vmafThreads: null }
-    : calculateThreadBudget(
-      availableThreads, 'svt-av1', is4kHdr,
-      { strategy: threadStrategy, ...threadOverrides, singleProcess: true, encPreset },
-    );
 
   const abWorkDir = path.join(args.workDir, 'ab-av1-work');
   const outputPath = path.join(args.workDir, 'ab-av1-output.mkv');
@@ -177,9 +138,7 @@ const plugin = async (args) => {
     return parts[1] ? parts[0] / parts[1] : parts[0];
   })();
 
-  const svtFlags = isAutoThreads
-    ? buildAbAv1SvtFlags(0).replace(/--svt lp=\d+\s*/, '')
-    : buildAbAv1SvtFlags(svtLp);
+  const svtFlags = buildAbAv1SvtFlags();
 
   const sourceSizeGb = (() => {
     try { return fs.statSync(inputPath).size / (1024 ** 3); } catch (_) { return 0; }
@@ -190,7 +149,6 @@ const plugin = async (args) => {
   jobLog(`  input      : ${inputPath}`);
   jobLog(`  resolution : ${stream.width || '?'}x${height || '?'}${doDownscale ? ` -> ${downscaleRes}` : ''}`);
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
-  jobLog(`  threads    : cpu=${availableThreads}  lp=${isAutoThreads ? 'auto' : svtLp}  strategy=${threadStrategy}`);
   jobLog(`  svt flags  : ${svtFlags}`);
   jobLog('='.repeat(64));
 
@@ -204,7 +162,7 @@ const plugin = async (args) => {
     '--min-vmaf', String(targetVmaf),
     '--min-crf', String(minCrf),
     '--max-crf', String(maxCrf),
-    '--vmaf', `n_threads=${vmafThreads}:model=path=${vmafModel}`,
+    '--vmaf', `n_threads=${os.cpus().length}:model=path=${vmafModel}`,
     '--max-encoded-percent', String(maxEncodedPercent),
     '--verbose',
   ];
