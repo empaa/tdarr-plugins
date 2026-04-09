@@ -21,18 +21,17 @@ const DENOISE_CURVE = [
 ];
 
 // Control points for sigma -> av1an --photon-noise value mapping.
-// TODO: photon-noise calibration needs a different approach — Laplacian
-// measurement of decoded AV1 saturates at max values. For now, use a
-// conservative linear estimate based on the av1an community guidelines.
+// Calibrated using grain-isolation method: encode with/without photon noise,
+// grain_sigma = sqrt(total² - baseline²), binary search for target match.
 const PHOTON_CURVE = [
-  { sigma: 1.38, param: 4 },
-  { sigma: 1.81, param: 6 },
-  { sigma: 2.15, param: 8 },
-  { sigma: 2.45, param: 10 },
-  { sigma: 2.95, param: 14 },
-  { sigma: 3.38, param: 18 },
-  { sigma: 3.76, param: 22 },
-  { sigma: 4.57, param: 30 },
+  { sigma: 1.38, param: 2 },
+  { sigma: 1.81, param: 4 },
+  { sigma: 2.15, param: 5 },
+  { sigma: 2.45, param: 6 },
+  { sigma: 2.95, param: 8 },
+  { sigma: 3.38, param: 9 },
+  { sigma: 3.76, param: 12 },
+  { sigma: 4.57, param: 18 },
 ];
 
 // Below this Laplacian sigma, source is clean enough to skip grain synthesis.
