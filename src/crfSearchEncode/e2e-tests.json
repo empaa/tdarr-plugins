@@ -6,7 +6,6 @@
       "target_vmaf": "93",
       "preset": "8",
       "max_encoded_percent": "100",
-      "grain_synth": "false",
       "thread_strategy": "auto"
     }
   },
@@ -17,7 +16,6 @@
       "target_vmaf": "93",
       "preset": "8",
       "max_encoded_percent": "100",
-      "grain_synth": "false",
       "thread_strategy": "auto"
     }
   }

@@ -96,22 +96,6 @@ const details = () => ({
       inputUI: { type: 'text' },
       tooltip: 'Only used when Thread Strategy is "custom". JSON: {"workers":16,"threadsPerWorker":2,"vmafThreads":12}. Omitted keys fall back to aggressive preset.',
     },
-    {
-      label: 'Chunk Method',
-      name: 'chunk_method',
-      type: 'string',
-      defaultValue: 'lsmash',
-      inputUI: { type: 'dropdown', options: ['lsmash', 'hybrid'] },
-      tooltip: 'lsmash = fast startup via index seeking, low disk usage, best for SVT-AV1. hybrid = ffmpeg segment splitting, better for long aom encodes. Both require VapourSynth.',
-    },
-    {
-      label: 'Grain Synthesis',
-      name: 'grain_synth',
-      type: 'boolean',
-      defaultValue: 'false',
-      inputUI: { type: 'switch' },
-      tooltip: 'Detect noise, denoise with NLMeans prefilter, and add photon noise grain at playback. Saves bitrate on noisy sources with no visual penalty.',
-    },
   ],
   outputs: [
     { number: 1, tooltip: 'Encode succeeded -- output file is the encoded video+audio MKV' },
@@ -133,7 +117,6 @@ const plugin = async (args) => {
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
-  const { estimateNoise } = require('../shared/grainSynth');
 
   const inputs = args.inputs || {};
   const encoder           = String(inputs.encoder || 'svt-av1');
@@ -154,9 +137,6 @@ const plugin = async (args) => {
       threadOverridesError = e.message;
     }
   }
-
-  const chunkMethod       = String(inputs.chunk_method || 'lsmash');
-  const grainSynthEnabled = inputs.grain_synth === true || inputs.grain_synth === 'true';
 
   const findBin = (name, ...paths) => paths.find((p) => fs.existsSync(p))
     || (() => { throw new Error(`Required binary not found: ${name} (checked ${paths.join(', ')})`); })();
@@ -228,86 +208,6 @@ const plugin = async (args) => {
 
   const lwiCache = path.join(vsDir, 'source.lwi');
 
-  // Build VapourSynth script (needed for both scene detection and phase 2)
-  const vpyScript = path.join(vsDir, 'source.vpy');
-  const escPy = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-
-  let vpyLines = [
-    'import vapoursynth as vs',
-    'core = vs.core',
-    `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
-  ];
-  if (doDownscale) {
-    vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
-  }
-  vpyLines.push('src.set_output()');
-  fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
-
-  // Pre-index lwi if needed (shared by scene detection and phase 2)
-  if (!fs.existsSync(lwiCache)) {
-    updateWorker({ status: 'Indexing' });
-    const lwiExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
-      cwd: vsDir,
-      silent: true,
-    });
-    dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
-  }
-
-  let grainResult = null;
-  if (grainSynthEnabled) {
-    const durationSec = parseFloat(stream.duration || '0')
-      || (file.ffProbeData && file.ffProbeData.format && parseFloat(file.ffProbeData.format.duration)) || 0;
-    const srcFps = (() => {
-      const r = stream.r_frame_rate || stream.avg_frame_rate || '24/1';
-      const parts = r.split('/').map(Number);
-      return parts[1] ? parts[0] / parts[1] : parts[0];
-    })();
-    const totalFrames = parseInt(stream.nb_frames || '0', 10)
-      || (durationSec > 0 && srcFps > 0 ? Math.round(durationSec * srcFps) : 0);
-    const result = estimateNoise(inputPath, durationSec, totalFrames, BIN.vspipe, lwiCache, dbg);
-    if (result.photonNoise > 0) {
-      grainResult = result;
-      jobLog(`[grain] detected sigma=${result.sigma.toFixed(2)} -> nlmH=${result.nlmH} photon-noise=${result.photonNoise}`);
-    } else {
-      jobLog('[grain] source is clean (sigma < 2), skipping grain synthesis');
-    }
-  }
-
-  if (grainResult) {
-    const checkScript = path.join(vsDir, 'check_nlm.vpy');
-    fs.writeFileSync(checkScript, [
-      'import vapoursynth as vs',
-      'core = vs.core',
-      'assert hasattr(core, "nlm_ispc"), "nlm_ispc plugin not found"',
-      'core.std.BlankClip(length=1).set_output()',
-    ].join('\n') + '\n');
-    const checkExit = require('child_process').spawnSync(BIN.vspipe, ['--info', checkScript], {
-      timeout: 10000, encoding: 'utf8',
-    });
-    try { fs.unlinkSync(checkScript); } catch (_) {}
-    if (checkExit.status !== 0) {
-      throw new Error('Grain synthesis requires vs-nlm-ispc plugin. Disable grain_synth or install the plugin.');
-    }
-    dbg('[grain] nlm_ispc plugin verified');
-  }
-
-  // ── Scene detection (parallel with CRF search) ──────────────────────
-  const scenesPath = path.join(workBase, 'scenes.json');
-  const scOnlyArgs = [
-    '-i', vpyScript,
-    '--sc-only',
-    '--scenes', scenesPath,
-    '--sc-downscale-height', '540',
-    '--min-scene-len', '24',
-    '--verbose',
-  ];
-
-  jobLog(`[scene-detect] starting in background: av1an ${scOnlyArgs.join(' ')}`);
-  const sceneDetectPromise = pm.spawnAsync(BIN.av1an, scOnlyArgs, {
-    cwd: vsDir,
-    filter: (l) => /scenecut|error|warn/i.test(l),
-  });
-
   // ── Phase 1: CRF Search ──────────────────────────────────────────────
   jobLog('='.repeat(64));
   jobLog(`CRF SEARCH ENCODE  encoder=${encoder}  preset=${encPreset}`);
@@ -318,9 +218,6 @@ const plugin = async (args) => {
   jobLog(`  threads    : cpu=${availableThreads}  strategy=${threadStrategy}`);
   jobLog(`  phase 1    : ab-av1 crf-search (single-process, lp=${isAutoThreads ? 'auto' : searchBudget.svtLp})`);
   jobLog(`  phase 2    : av1an fixed-CRF (workers=${isAutoThreads ? 'auto' : encodeBudget.maxWorkers}, threads/worker=${isAutoThreads ? 'auto' : encodeBudget.threadsPerWorker})`);
-  if (grainSynthEnabled) {
-    jobLog(`  grain      : ${grainResult ? `NLMeans h=${grainResult.nlmH} + photon-noise=${grainResult.photonNoise}` : 'enabled (clean source, skipped)'}`);
-  }
   jobLog('='.repeat(64));
 
   const sourceSizeGb = (() => {
@@ -353,7 +250,6 @@ const plugin = async (args) => {
     '--max-crf', String(maxCrf),
     '--vmaf', `n_threads=${searchVmafThreads}:model=path=${vmafModel}`,
     '--max-encoded-percent', String(maxEncodedPercent),
-    '--cache', 'false',
   ];
 
   if (doDownscale) {
@@ -418,7 +314,6 @@ const plugin = async (args) => {
   });
 
   if (crfSearchFailed || abExit !== 0 || foundCrf == null) {
-    jobLog('[scene-detect] aborting (CRF search did not succeed)');
     pm.cleanup();
     jobLog('='.repeat(64));
     jobLog(`CRF SEARCH FAILED -- ${crfSearchFailed ? 'criteria not met' : `ab-av1 exited ${abExit}`}`);
@@ -432,48 +327,35 @@ const plugin = async (args) => {
 
   jobLog(`[phase 1] found CRF ${foundCrf} meeting VMAF >= ${targetVmaf}`);
 
-  // Wait for scene detection to finish (may already be done)
-  let sceneDetectDone = false;
-  sceneDetectPromise.then(() => { sceneDetectDone = true; }).catch(() => { sceneDetectDone = true; });
-  // Yield to let microtasks settle (if scene detection already resolved, flag is set)
-  await new Promise((r) => setImmediate(r));
-
-  if (!sceneDetectDone) {
-    jobLog('[scene-detect] CRF search complete, waiting for scene detection...');
-    updateWorker({ status: 'Scene Detection' });
-  } else {
-    jobLog('[scene-detect] already complete');
-  }
-  const sceneDetectExit = await sceneDetectPromise;
-
-  if (sceneDetectExit !== 0) {
-    pm.cleanup();
-    throw new Error(`Scene detection failed (exit ${sceneDetectExit})`);
-  }
-
-  jobLog(`[scene-detect] scenes written to ${scenesPath}`);
-
-  // Rewrite .vpy with NLMeans denoise for phase 2 encoding
-  if (grainResult) {
-    const updatedVpyLines = [
-      'import vapoursynth as vs',
-      'core = vs.core',
-      `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
-      `src = core.nlm_ispc.NLMeans(src, d=1, a=2, s=4, h=${grainResult.nlmH}, channels="Y")`,
-      `src = core.nlm_ispc.NLMeans(src, d=1, a=2, s=4, h=${grainResult.nlmChromaH}, channels="UV")`,
-    ];
-    if (doDownscale) {
-      updatedVpyLines.push(...buildVsDownscaleLines(downscaleRes));
-    }
-    updatedVpyLines.push('src.set_output()');
-    fs.writeFileSync(vpyScript, updatedVpyLines.join('\n') + '\n');
-    dbg('[vs] .vpy rewritten with NLMeans denoise for phase 2');
-  }
-
   // ── Phase 2: av1an Chunked Encode ─────────────────────────────────────
   updateWorker({ percentage: 0, status: 'Encoding' });
 
   const audioSizeGb = await probeAudioSize(inputPath, args.workDir, dbg, dbg);
+
+  // Build VapourSynth script
+  const vpyScript = path.join(vsDir, 'source.vpy');
+  const escPy = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+  let vpyLines = [
+    'import vapoursynth as vs',
+    'core = vs.core',
+    `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
+  ];
+  if (doDownscale) {
+    vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
+  }
+  vpyLines.push('src.set_output()');
+  fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
+
+  // Pre-index lwi if needed
+  if (!fs.existsSync(lwiCache)) {
+    updateWorker({ status: 'Indexing' });
+    const lwiExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
+      cwd: vsDir,
+      silent: true,
+    });
+    dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
+  }
 
   // Build encoder flags for av1an (fixed CRF, no target-quality)
   let encFlags;
@@ -503,13 +385,12 @@ const plugin = async (args) => {
     '-e', encoder,
     '--sc-downscale-height', '540',
     '--scaler', 'lanczos',
-    '--chunk-method', chunkMethod,
-    ...(chunkMethod === 'hybrid' ? ['--ignore-frame-mismatch'] : []),
+    '--chunk-method', 'hybrid',
+    '--ignore-frame-mismatch',
     ...(isAutoThreads ? [] : ['--workers', String(encodeBudget.maxWorkers)]),
-    '--min-scene-len', '24',
     '--chunk-order', 'long-to-short',
-    '--scenes', scenesPath,
     '--keep',
+    '--resume',
     '--verbose',
   ];
 
@@ -518,10 +399,6 @@ const plugin = async (args) => {
   }
 
   av1anArgs.push('-v', encFlags);
-
-  if (grainResult) {
-    av1anArgs.push('--photon-noise', String(grainResult.photonNoise), '--chroma-noise');
-  }
 
   jobLog(`[phase 2] av1an ${av1anArgs.map((a) => /\s/.test(a) ? `"${a}"` : a).join(' ')}`);
 
@@ -532,11 +409,10 @@ const plugin = async (args) => {
     if (tracker) tracker.stop();
   });
 
-  updateWorker({ status: 'Encoding' });
+  updateWorker({ status: 'Scene Detection' });
 
   tracker = createAv1anTracker({
     workBase,
-    scenesFile: scenesPath,
     maxWorkers: encodeBudget.maxWorkers,
     audioSizeGb,
     sourceSizeGb,

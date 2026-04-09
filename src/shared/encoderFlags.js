@@ -109,8 +109,6 @@ const svtConfig = (preset, lp, hdrSvt) => {
     ['sharpness', '1'],
     ['tile-columns', '1'],
     ['scm', '0'],
-    ['film-grain', '0'],
-    ['film-grain-denoise', '0'],
   ];
   if (lp) entries.push(['lp', String(lp)]);
   return { entries, hdrSvt };
@@ -144,7 +142,7 @@ const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom) => {
     '--enc aq-mode=0',
     '--enc arnr-strength=1',
     '--enc arnr-max-frames=4',
-  ].filter(Boolean);
+  ];
 
   // Raw aomenc params not exposed by ffmpeg — passed via aom-params
   // Note: end-usage omitted — ab-av1 uses CRF mode natively
@@ -157,17 +155,15 @@ const buildAbAv1AomFlags = (preset, threadsPerWorker, hdrAom) => {
     'quant-b-adapt=1',
     'enable-keyframe-filtering=1',
     'enable-dnl-denoising=0',
-  ].filter(Boolean).join(':');
+  ].join(':');
 
   return [...ffmpegArgs, `--enc aom-params=${aomParams}`].join(' ');
 };
 
 // SVT-AV1 effective thread limits per encoder preset.
 // SVT-AV1 benefits more from extra workers (av1an parallelism) than from
-// SVT-AV1 --lp (logical processors per worker). Benchmarking on a 32-thread
-// Ryzen 9 9950X showed no encode-speed gain above lp=6 — extra threads just
-// add memory pressure. Capped at 6 for all presets so the thread budget goes
-// toward more av1an workers instead.
+// extra threads per worker. lp beyond ~6 shows diminishing returns, so we
+// cap low to maximize workers. Lower presets cap even tighter at 4.
 const SVT_LP_CAP_BY_PRESET = {
   0: 6, 1: 6, 2: 6, 3: 6,
   4: 6, 5: 6, 6: 6,
@@ -180,19 +176,17 @@ const capSvtLpByPreset = (lp, encPreset) => {
 };
 
 const THREAD_PRESETS = {
-  // hdr4kScale: SVT-AV1 worker multiplier for 4K HDR content (extra memory from 4K decode)
-  safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 1.0, svtLpMax: 6,  vmafThreadDiv: 8, hdr4kScale: 0.5 },
-  balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 1.5, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.5 },
-  aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 2.0, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.5 },
-  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 2.4, svtLpMax: 6,  vmafThreadDiv: 2, hdr4kScale: 0.5 },
+  safe:        { aomWorkerDiv: 4, aomOversub: 1.0, svtWorkerFill: 0.5,  svtLpMax: 6,  vmafThreadDiv: 8, halve4kHdr: true },
+  balanced:    { aomWorkerDiv: 4, aomOversub: 2.0, svtWorkerFill: 0.9,  svtLpMax: 20, vmafThreadDiv: 2, halve4kHdr: false },
+  aggressive:  { aomWorkerDiv: 4, aomOversub: 4.0, svtWorkerFill: 1.4,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
+  max:         { aomWorkerDiv: 4, aomOversub: 6.0, svtWorkerFill: 2.8,  svtLpMax: 28, vmafThreadDiv: 2, halve4kHdr: false },
 };
 
 const resolveThreadStrategy = (strategyName, overrides) => {
   const base = strategyName === 'custom'
     ? THREAD_PRESETS.aggressive
     : (THREAD_PRESETS[strategyName] || THREAD_PRESETS.safe);
-  // Only apply explicit overrides when strategy is "custom"
-  return { preset: base, overrides: strategyName === 'custom' ? (overrides || {}) : {} };
+  return { preset: base, overrides: overrides || {} };
 };
 
 const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
@@ -221,18 +215,16 @@ const calculateThreadBudget = (availableThreads, encoder, is4kHdr, options) => {
     maxWorkers = 1;
   }
 
+  if (is4kHdr && preset.halve4kHdr) {
+    maxWorkers = Math.max(1, Math.floor(maxWorkers / 2));
+  }
+
   let vmafThreads = Math.max(2, Math.floor(availableThreads / preset.vmafThreadDiv));
 
   // Apply explicit overrides
   if (overrides.workers != null) maxWorkers = overrides.workers;
   if (overrides.threadsPerWorker != null) threadsPerWorker = overrides.threadsPerWorker;
   if (overrides.vmafThreads != null) vmafThreads = overrides.vmafThreads;
-
-  // 4K HDR scaling applied last — overrides set the 1080p baseline,
-  // then we scale down for the ~3x memory increase of 4K HDR
-  if (is4kHdr && encoder !== 'aom' && preset.hdr4kScale < 1) {
-    maxWorkers = Math.max(1, Math.round(maxWorkers * preset.hdr4kScale));
-  }
 
   const svtLp = Math.min(preset.svtLpMax, threadsPerWorker);
 

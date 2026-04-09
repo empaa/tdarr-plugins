@@ -88,22 +88,6 @@ const details = () => ({
       inputUI: { type: 'text' },
       tooltip: 'Only used when Thread Strategy is "custom". JSON: {"workers":16,"threadsPerWorker":2,"vmafThreads":12}. Omitted keys fall back to aggressive preset.',
     },
-    {
-      label: 'Chunk Method',
-      name: 'chunk_method',
-      type: 'string',
-      defaultValue: 'lsmash',
-      inputUI: { type: 'dropdown', options: ['lsmash', 'hybrid'] },
-      tooltip: 'lsmash = fast startup via index seeking, low disk usage, best for SVT-AV1. hybrid = ffmpeg segment splitting, better for long aom encodes. Both require VapourSynth.',
-    },
-    {
-      label: 'Grain Synthesis',
-      name: 'grain_synth',
-      type: 'boolean',
-      defaultValue: 'false',
-      inputUI: { type: 'switch' },
-      tooltip: 'Detect noise, denoise with NLMeans prefilter, and add photon noise grain at playback. Saves bitrate on noisy sources with no visual penalty.',
-    },
   ],
   outputs: [
     { number: 1, tooltip: 'Encode succeeded -- output file is the encoded video+audio MKV' },
@@ -122,7 +106,6 @@ const plugin = async (args) => {
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
-  const { estimateNoise } = require('../shared/grainSynth');
 
   const inputs = args.inputs || {};
   const encoder           = String(inputs.encoder || 'svt-av1');
@@ -142,9 +125,6 @@ const plugin = async (args) => {
       threadOverridesError = e.message;
     }
   }
-
-  const chunkMethod       = String(inputs.chunk_method || 'lsmash');
-  const grainSynthEnabled = inputs.grain_synth === true || inputs.grain_synth === 'true';
 
   const findBin = (name, ...paths) => paths.find((p) => fs.existsSync(p))
     || (() => { throw new Error(`Required binary not found: ${name} (checked ${paths.join(', ')})`); })();
@@ -203,44 +183,6 @@ const plugin = async (args) => {
 
   const lwiCache = path.join(vsDir, 'source.lwi');
 
-  let grainResult = null;
-  if (grainSynthEnabled) {
-    const durationSec = parseFloat(stream.duration || '0')
-      || (file.ffProbeData && file.ffProbeData.format && parseFloat(file.ffProbeData.format.duration)) || 0;
-    const srcFpsForGrain = (() => {
-      const r = stream.r_frame_rate || stream.avg_frame_rate || '24/1';
-      const parts = r.split('/').map(Number);
-      return parts[1] ? parts[0] / parts[1] : parts[0];
-    })();
-    const totalFrames = parseInt(stream.nb_frames || '0', 10)
-      || (durationSec > 0 && srcFpsForGrain > 0 ? Math.round(durationSec * srcFpsForGrain) : 0);
-    const result = estimateNoise(inputPath, durationSec, totalFrames, BIN.vspipe, lwiCache, dbg);
-    if (result.photonNoise > 0) {
-      grainResult = result;
-      jobLog(`[grain] detected sigma=${result.sigma.toFixed(2)} -> nlmH=${result.nlmH} photon-noise=${result.photonNoise}`);
-    } else {
-      jobLog('[grain] source is clean (sigma < 2), skipping grain synthesis');
-    }
-  }
-
-  if (grainResult) {
-    const checkScript = path.join(vsDir, 'check_nlm.vpy');
-    fs.writeFileSync(checkScript, [
-      'import vapoursynth as vs',
-      'core = vs.core',
-      'assert hasattr(core, "nlm_ispc"), "nlm_ispc plugin not found"',
-      'core.std.BlankClip(length=1).set_output()',
-    ].join('\n') + '\n');
-    const checkExit = require('child_process').spawnSync(BIN.vspipe, ['--info', checkScript], {
-      timeout: 10000, encoding: 'utf8',
-    });
-    try { fs.unlinkSync(checkScript); } catch (_) {}
-    if (checkExit.status !== 0) {
-      throw new Error('Grain synthesis requires vs-nlm-ispc plugin. Disable grain_synth or install the plugin.');
-    }
-    dbg('[grain] nlm_ispc plugin verified');
-  }
-
   let encFlags;
   if (isAutoThreads) {
     encFlags = encoder === 'aom'
@@ -260,9 +202,6 @@ const plugin = async (args) => {
   jobLog(`  max size   : ${maxEncodedPercent}% of source`);
   jobLog(`  threads    : cpu=${availableThreads}  workers=${isAutoThreads ? 'auto' : maxWorkers}  threads/worker=${isAutoThreads ? 'auto' : threadsPerWorker}  vmaf-threads=${isAutoThreads ? 'auto' : vmafThreads}  strategy=${threadStrategy}`);
   jobLog(`  enc flags  : ${encFlags}`);
-  if (grainSynthEnabled) {
-    jobLog(`  grain      : ${grainResult ? `NLMeans h=${grainResult.nlmH} + photon-noise=${grainResult.photonNoise}` : 'enabled (clean source, skipped)'}`);
-  }
   jobLog('='.repeat(64));
 
   const sourceSizeGb = (() => {
@@ -281,18 +220,12 @@ const plugin = async (args) => {
     'core = vs.core',
     `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
   ];
-  if (grainResult) {
-    vpyLines.push(
-      `src = core.nlm_ispc.NLMeans(src, d=1, a=2, s=4, h=${grainResult.nlmH}, channels="Y")`,
-      `src = core.nlm_ispc.NLMeans(src, d=1, a=2, s=4, h=${grainResult.nlmChromaH}, channels="UV")`,
-    );
-  }
   if (doDownscale) {
     vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
   }
   vpyLines.push('src.set_output()');
   fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
-  dbg(`[vs] .vpy written${grainResult ? ' (NLMeans denoise)' : ''}${doDownscale ? ` (Lanczos3 -> ${downscaleRes})` : ''}`);
+  dbg(`[vs] .vpy written${doDownscale ? ` (Lanczos3 -> ${downscaleRes})` : ' (passthrough)'}`);
 
   if (!fs.existsSync(lwiCache)) {
     updateWorker({ status: 'Indexing' });
@@ -311,15 +244,14 @@ const plugin = async (args) => {
     '-e', encoder,
     '--sc-downscale-height', '540',
     '--scaler', 'lanczos',
-    '--chunk-method', chunkMethod,
-    ...(chunkMethod === 'hybrid' ? ['--ignore-frame-mismatch'] : []),
+    '--chunk-method', 'hybrid',
+    '--ignore-frame-mismatch',
     ...(isAutoThreads ? [] : ['--workers', String(maxWorkers)]),
     '--qp-range', qpRange,
     '--target-quality', String(targetVmaf),
     '--vmaf-path', vmafModel,
     ...(isAutoThreads ? [] : ['--vmaf-threads', String(vmafThreads)]),
     '--probes', '6',
-    '--min-scene-len', '24',
     '--chunk-order', 'long-to-short',
     '--keep',
     '--resume',
@@ -331,10 +263,6 @@ const plugin = async (args) => {
   }
 
   av1anArgs.push('-v', encFlags);
-
-  if (grainResult) {
-    av1anArgs.push('--photon-noise', String(grainResult.photonNoise), '--chroma-noise');
-  }
 
   jobLog(`av1an ${av1anArgs.map((a) => /\s/.test(a) ? `"${a}"` : a).join(' ')}`);
 

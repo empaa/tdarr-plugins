@@ -105,6 +105,7 @@ const plugin = async (args) => {
   const { detectHdrMeta, buildAbAv1SvtFlags, calculateThreadBudget } = require('../shared/encoderFlags');
   const { shouldDownscale, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { createAbAv1Tracker } = require('../shared/progressTracker');
+
   const inputs = args.inputs || {};
   const targetVmaf        = Number(inputs.target_vmaf) || 93;
   const minCrf            = Number(inputs.min_crf) || 10;
@@ -205,7 +206,6 @@ const plugin = async (args) => {
     '--max-crf', String(maxCrf),
     '--vmaf', `n_threads=${vmafThreads}:model=path=${vmafModel}`,
     '--max-encoded-percent', String(maxEncodedPercent),
-    '--cache', 'false',
     '--verbose',
   ];
 
