@@ -1,7 +1,15 @@
 # sanitizeFile output propagation — design
 
 **Date:** 2026-06-04
-**Status:** Approved (pending spec review)
+**Status:** Implemented + verified
+
+## Verification results
+
+- Unit test (`npm run test:unit`): RED against old code, GREEN after fix.
+- Live instance, Input → Sanitize → Replace Original on the real LOTR clip
+  (1 video / 6 audio / 56 sub): output `1 audio / 6 sub`.
+- Live instance, Input → Sanitize → AV1 Encode → Replace Original (exact reproduction
+  of job `asArvTWPg`): output `av1 / 1 audio / 6 sub`.
 
 ## Problem
 
