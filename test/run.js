@@ -1,6 +1,7 @@
 // test/run.js
 'use strict';
 
+const { unitTest } = require('./unit.js');
 const { smokeTest } = require('./smoke.js');
 const { e2eTest } = require('./e2e.js');
 
@@ -9,13 +10,20 @@ let mode = 'all';
 let filterPlugin = null;
 
 for (const arg of args) {
-  if (arg === '--smoke') mode = 'smoke';
+  if (arg === '--unit') mode = 'unit';
+  else if (arg === '--smoke') mode = 'smoke';
   else if (arg === '--e2e') mode = 'e2e';
   else filterPlugin = arg;
 }
 
 async function run() {
   let failures = 0;
+
+  if (mode === 'all' || mode === 'unit') {
+    console.log('=== Unit Tests ===\n');
+    failures += await unitTest(filterPlugin);
+    console.log('');
+  }
 
   if (mode === 'all' || mode === 'smoke') {
     console.log('=== Smoke Tests ===\n');
