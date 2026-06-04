@@ -1,7 +1,14 @@
 # sanitizeFile commentary-track handling — design
 
 **Date:** 2026-06-04
-**Status:** Approved (pending spec review)
+**Status:** Implemented + verified
+
+## Verification results
+
+- `npm run test:unit`: 6/6 pass (RED→GREEN), incl. Oldboy off/on, subtitle off/on, and the
+  detection guard (title/flag yes; SDH/forced no).
+- Live test instance, Input → Sanitize → Replace on a synthetic clip with a `Main Audio` + a
+  `Commentary by director` track (default option OFF): output kept **Main Audio only**.
 
 ## Goal
 
