@@ -25,6 +25,14 @@ function codecRank(codecName, profile) {
   return CODEC_RANK[name] || WORST_RANK;
 }
 
+// A track is a commentary if ffprobe flags the comment disposition or its title
+// says "commentary". SDH (hearing_impaired) and forced tracks are NOT commentary.
+function isCommentary(stream) {
+  if (stream && stream.disposition && stream.disposition.comment === 1) return true;
+  const title = stream && stream.tags && stream.tags.title;
+  return /commentary/i.test(title || '');
+}
+
 /**
  * Categorize all streams into video, audio, subtitle, image.
  * @param {Array} streams - ffProbeData.streams
@@ -54,12 +62,14 @@ function categorizeStreams(streams) {
         lang: (s.tags && s.tags.language || '').toLowerCase(),
         channels: s.channels || 0,
         rank: codecRank(s.codec_name, s.profile),
+        commentary: isCommentary(s),
       });
     } else if (s.codec_type === 'subtitle') {
       subtitle.push({
         idx,
         stream: s,
         lang: (s.tags && s.tags.language || '').toLowerCase(),
+        commentary: isCommentary(s),
       });
     }
     // data/attachment streams are silently dropped (not mapped)
@@ -73,17 +83,19 @@ function categorizeStreams(streams) {
  * @param {Array} audioTracks - from categorizeStreams
  * @param {string} originalLang - ISO 639-2 code (lowercase)
  * @param {string[]} additionalLangs - extra language codes (lowercase)
+ * @param {boolean} keepCommentary - keep commentary tracks in additionalLangs
  * @returns {Array} selected audio tracks in desired order
  */
-function selectAudio(audioTracks, originalLang, additionalLangs) {
+function selectAudio(audioTracks, originalLang, additionalLangs, keepCommentary) {
   // Safety: if only one track, always keep it
   if (audioTracks.length <= 1) return audioTracks;
 
-  const wantedLangs = [originalLang, ...additionalLangs.filter((l) => l !== originalLang)];
+  // Main (non-commentary) tracks: original language is always wanted.
+  const mainWanted = [originalLang, ...additionalLangs.filter((l) => l !== originalLang)];
 
-  // Find best track per language: highest channels, then best codec rank
+  // Find best MAIN track per language: highest channels, then best codec rank
   function bestForLang(lang) {
-    const matches = audioTracks.filter((t) => t.lang === lang);
+    const matches = audioTracks.filter((t) => !t.commentary && t.lang === lang);
     if (matches.length === 0) return null;
     matches.sort((a, b) => b.channels - a.channels || a.rank - b.rank);
     return matches[0];
@@ -92,7 +104,7 @@ function selectAudio(audioTracks, originalLang, additionalLangs) {
   const selected = [];
   const seenIdx = new Set();
 
-  for (const lang of wantedLangs) {
+  for (const lang of mainWanted) {
     const best = bestForLang(lang);
     if (best && !seenIdx.has(best.idx)) {
       selected.push(best);
@@ -100,7 +112,19 @@ function selectAudio(audioTracks, originalLang, additionalLangs) {
     }
   }
 
-  // Safety: if nothing matched, keep all audio
+  // Commentary tracks follow the additional-language list only -- the original
+  // language is NOT auto-kept for commentaries.
+  if (keepCommentary) {
+    const commentaryLangs = new Set(additionalLangs);
+    for (const t of audioTracks) {
+      if (t.commentary && commentaryLangs.has(t.lang) && !seenIdx.has(t.idx)) {
+        selected.push(t);
+        seenIdx.add(t.idx);
+      }
+    }
+  }
+
+  // Safety: never emit an audio-less file
   if (selected.length === 0) return audioTracks;
 
   return selected;
@@ -111,14 +135,21 @@ function selectAudio(audioTracks, originalLang, additionalLangs) {
  * @param {Array} subTracks - from categorizeStreams
  * @param {string} originalLang - ISO 639-2 code (lowercase)
  * @param {string[]} subLangs - extra subtitle language codes (lowercase)
+ * @param {boolean} keepCommentary - keep commentary subs in subLangs
  * @returns {Array} selected subtitle tracks in desired order
  */
-function selectSubtitles(subTracks, originalLang, subLangs) {
-  const wantedLangs = new Set([originalLang, ...subLangs]);
+function selectSubtitles(subTracks, originalLang, subLangs, keepCommentary) {
+  // Main subs: original language is always wanted. Commentary subs follow the
+  // additional-language list only (original NOT auto-kept for commentaries).
+  const mainWanted = new Set([originalLang, ...subLangs]);
+  const commentaryLangs = new Set(subLangs);
   const byLang = new Map();
 
   for (const t of subTracks) {
-    if (wantedLangs.has(t.lang)) {
+    const keep = t.commentary
+      ? (keepCommentary && commentaryLangs.has(t.lang))
+      : mainWanted.has(t.lang);
+    if (keep) {
       if (!byLang.has(t.lang)) byLang.set(t.lang, []);
       byLang.get(t.lang).push(t);
     }
@@ -207,6 +238,14 @@ const details = () => ({
       inputUI: { type: 'text' },
       tooltip: 'Comma-separated ISO 639-2 codes for extra subtitle languages to keep (e.g. eng,swe). The original language subtitles are always kept.',
     },
+    {
+      label: 'Keep Commentary Tracks',
+      name: 'keep_commentary_tracks',
+      type: 'boolean',
+      defaultValue: 'false',
+      inputUI: { type: 'switch' },
+      tooltip: 'Keep commentary audio/subtitle tracks (detected via the comment disposition or a "commentary" title; SDH/forced are not commentary). When off, commentaries are removed even if they are the only track in a wanted language. Commentary tracks follow the additional-language lists only — the original language is not auto-kept for commentaries.',
+    },
   ],
   outputs: [
     { number: 1, tooltip: 'File was sanitized (streams filtered, reordered, remuxed to MKV)' },
@@ -231,6 +270,7 @@ const plugin = async (args) => {
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
   const subtitleLangs = (inputs.subtitle_languages || '')
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const keepCommentary = inputs.keep_commentary_tracks === true || inputs.keep_commentary_tracks === 'true';
 
   const log = (msg) => {
     if (typeof args.jobLog === 'function') args.jobLog(msg);
@@ -282,11 +322,11 @@ const plugin = async (args) => {
 
   // --- Step 3: Build keep-set ---
   const selectedAudio = originalLang
-    ? selectAudio(audio, originalLang, additionalAudioLangs)
+    ? selectAudio(audio, originalLang, additionalAudioLangs, keepCommentary)
     : audio; // no language = keep all
 
   const selectedSubs = originalLang
-    ? selectSubtitles(subtitle, originalLang, subtitleLangs)
+    ? selectSubtitles(subtitle, originalLang, subtitleLangs, keepCommentary)
     : subtitle; // no language = keep all
 
   log(`Keeping: ${selectedAudio.length} audio, ${selectedSubs.length} subtitle`);
@@ -398,4 +438,12 @@ const plugin = async (args) => {
   };
 };
 
-module.exports = { details, plugin };
+module.exports = {
+  details,
+  plugin,
+  // exported for unit tests
+  categorizeStreams,
+  selectAudio,
+  selectSubtitles,
+  isCommentary,
+};
