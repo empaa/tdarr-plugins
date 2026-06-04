@@ -105,8 +105,80 @@ async function sanitizeReturnsSanitizedFileAsWorkingFile() {
   );
 }
 
+// ---- commentary-track handling (keep_commentary_tracks) ----
+const { categorizeStreams, selectAudio, selectSubtitles, isCommentary } =
+  require(path.join(SRC, 'sanitizeFile', 'index.js'));
+
+const aud = (lang, codec, channels, title, disp) =>
+  ({ codec_type: 'audio', codec_name: codec, channels, tags: { language: lang, title }, disposition: disp || {} });
+const sub = (lang, codec, title, disp) =>
+  ({ codec_type: 'subtitle', codec_name: codec, tags: { language: lang, title }, disposition: disp || {} });
+
+// Oldboy-like: 1 Korean main DTS-HD MA + Korean & English commentaries (some by title, some flagged)
+const oldboyAudio = () => categorizeStreams([
+  { codec_type: 'video', codec_name: 'h264' },
+  aud('kor', 'dts', 6, 'DTS-HD MA 5.1'),                                // 1 main
+  aud('kor', 'ac3', 2, 'Commentary by director Park Chan-wook'),       // 2 commentary (title)
+  aud('kor', 'ac3', 2, 'Commentary by director and cinematographer'),  // 3 commentary (title)
+  aud('kor', 'ac3', 2, 'Commentary by director and actors'),           // 4 commentary (title)
+  aud('eng', 'ac3', 2, 'Commentary by critic Jasper Sharp'),           // 5 commentary (title)
+  aud('kor', 'ac3', 2, 'Commentary by Shin', { comment: 1 }),          // 6 commentary (flag)
+  aud('kor', 'ac3', 2, 'Commentary by Kim', { comment: 1 }),           // 7 commentary (flag)
+  aud('eng', 'ac3', 2, 'Commentary by Harry', { comment: 1 }),         // 8 commentary (flag)
+]).audio;
+
+const oldboySubs = () => categorizeStreams([
+  { codec_type: 'video', codec_name: 'h264' },
+  sub('eng', 'subrip', 'English'),                                       // 1 main
+  sub('eng', 'subrip', 'Commentary by director'),                        // 2 commentary
+  sub('swe', 'subrip', 'Swedish'),                                       // 3 main
+  sub('fre', 'subrip', 'French'),                                        // 4 not wanted
+  sub('eng', 'hdmv_pgs_subtitle', 'English SDH', { hearing_impaired: 1 }), // 5 SDH (not commentary)
+  sub('eng', 'hdmv_pgs_subtitle', 'English Forced', { forced: 1 }),      // 6 forced (not commentary)
+]).subtitle;
+
+const idxset = (sel) => new Set(sel.map((t) => t.idx));
+const ADD = ['eng', 'swe', 'nor', 'nob'];
+
+async function audioDropsCommentariesWhenOff() {
+  const s = idxset(selectAudio(oldboyAudio(), 'kor', ADD, false));
+  assert(s.size === 1 && s.has(1), `expected only Korean main [1], got [${[...s]}]`);
+}
+
+async function audioKeepsAdditionalLangCommentariesWhenOn() {
+  const s = idxset(selectAudio(oldboyAudio(), 'kor', ADD, true));
+  assert(s.has(1) && s.has(5) && s.has(8), `expected main + English commentaries {1,5,8}, got [${[...s]}]`);
+  assert(![2, 3, 4, 6, 7].some((i) => s.has(i)),
+    `Korean commentaries must be dropped (kor not in audio_language), got [${[...s]}]`);
+}
+
+async function subtitlesDropCommentaryKeepSdhForcedWhenOff() {
+  const s = idxset(selectSubtitles(oldboySubs(), 'kor', ADD, false));
+  assert(s.has(1) && s.has(3) && s.has(5) && s.has(6), `expected main + SDH + forced {1,3,5,6}, got [${[...s]}]`);
+  assert(!s.has(2), 'commentary subtitle must be dropped when option off');
+  assert(!s.has(4), 'non-wanted-language subtitle must be dropped');
+}
+
+async function subtitlesKeepCommentaryWhenOn() {
+  const s = idxset(selectSubtitles(oldboySubs(), 'kor', ADD, true));
+  assert(s.has(2), 'commentary subtitle in a wanted language must be kept when option on');
+}
+
+async function commentaryDetection() {
+  assert(isCommentary({ tags: { title: 'Commentary by critic Jasper Sharp' } }) === true, 'title-based commentary not detected');
+  assert(isCommentary({ disposition: { comment: 1 } }) === true, 'comment disposition not detected');
+  assert(isCommentary({ disposition: { hearing_impaired: 1 }, tags: { title: 'English SDH' } }) === false, 'SDH wrongly flagged as commentary');
+  assert(isCommentary({ disposition: { forced: 1 } }) === false, 'forced wrongly flagged as commentary');
+  assert(isCommentary({ tags: { title: 'DTS-HD MA 5.1' } }) === false, 'main track wrongly flagged as commentary');
+}
+
 const TESTS = [
   ['sanitizeFile: returns sanitized file as working file', sanitizeReturnsSanitizedFileAsWorkingFile],
+  ['audio: drops commentaries when keep off', audioDropsCommentariesWhenOff],
+  ['audio: keeps additional-lang commentaries when keep on', audioKeepsAdditionalLangCommentariesWhenOn],
+  ['subtitles: drop commentary, keep SDH/forced when off', subtitlesDropCommentaryKeepSdhForcedWhenOff],
+  ['subtitles: keep commentary when on', subtitlesKeepCommentaryWhenOn],
+  ['isCommentary: title or flag, not SDH/forced', commentaryDetection],
 ];
 
 async function unitTest(filterPlugin) {
