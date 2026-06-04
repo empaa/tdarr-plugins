@@ -1,12 +1,13 @@
 {
   "name": "tdarr-plugins",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "private": true,
   "description": "AV1 encoding FlowPlugins for Tdarr (av1an + ab-av1)",
   "scripts": {
     "build": "./build.sh",
     "deploy": "./build.sh --deploy",
     "test": "node test/run.js",
+    "test:unit": "node test/run.js --unit",
     "test:smoke": "node test/run.js --smoke",
     "test:e2e": "node test/run.js --e2e",
     "benchmark": "node test/benchmark.js"
