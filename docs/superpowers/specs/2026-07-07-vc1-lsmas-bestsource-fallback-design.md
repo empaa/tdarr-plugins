@@ -78,10 +78,11 @@ av1an run failed because of the source.
 SOURCE_LSMAS      = 'lsmas'
 SOURCE_BESTSOURCE = 'bestsource'
 
-buildSourceVpy({ sourceFilter, inputPath, cachePath, downscaleLines }) -> string
+buildSourceVpy({ sourceFilter, inputPath, cachePath, fpsNum, fpsDen, downscaleLines }) -> string
   // returns the full .vpy text:
   //   lsmas:      core.lsmas.LWLibavSource(source='...', cachefile='<cachePath>')
   //   bestsource: core.bs.VideoSource(source='...', cachepath='<cachePath>')
+  //               src = core.std.AssumeFPS(src, fpsnum=<fpsNum>, fpsden=<fpsDen>)   # see below
   // followed by the (optional) downscale filter lines, then src.set_output()
   // Python-escapes the source path exactly as the plugins do today (escPy).
 
@@ -96,7 +97,18 @@ The downscale filter chain (`buildVsDownscaleLines`) is unchanged and sits below
 source line regardless of filter, so downscale/HDR behaviour is identical on both paths.
 
 Cache paths differ per filter: lsmas writes `source.lwi`, BestSource writes its own cache
-(exact filename/param `cachepath` to be confirmed with the sibling); the module owns both.
+via the `cachepath` param; the module owns both.
+
+**BestSource fps quirk — AssumeFPS is required (validated).** BestSource auto-detects the
+*wrong* framerate for this VC-1 remux: `core.bs.VideoSource` alone yields `10.979 fps`
+(av1an banner: `Input: 1920x1080 @ 10.979 fps`) while the true rate is `24000/1001`
+(23.976). The frame *count* is correct (155209), only the timebase is wrong — an
+uncorrected encode would have the wrong duration and broken A/V sync. Fix:
+`core.std.AssumeFPS(src, fpsnum, fpsden)` using the source's ffprobe `r_frame_rate`
+(a metadata relabel — verified to preserve the exact frame count: 155209 → 155209, fps →
+23.976, av1an banner → `@ 23.976 fps`). AssumeFPS is applied on the BestSource path
+(harmless no-op if ever applied to lsmas, which already reports the correct rate). If
+`r_frame_rate` is missing/`0`, skip AssumeFPS and log a warning.
 
 ## av1anEncode fallback flow
 
@@ -161,27 +173,36 @@ The plugin is safe to ship independently of the image:
   the VC-1 sample, confirm the lsmas→BestSource fallback fires and the encode completes;
   confirm a normal (non-VC-1) file still uses lsmas with no retry and no overhead.
   Mandatory VS plugin-autoload check on the new image (per stack-update testing protocol).
-- **Optional de-risking (recommended):** build BestSource in a throwaway container and
-  confirm it decodes the exact VC-1 file (frames 0..155209, no error) *before* the sibling
-  commits to a rebuild. ffmpeg already proves the stream is clean, so this is
-  high-confidence; it makes the sibling request airtight.
+- **Pre-validation — DONE (2026-07-07).** Built BestSource (commit `bf3554d`) in a
+  throwaway `--rm` container off the `tdarr_node` image, against its VS R77 + ffmpeg 8.1.2.
+  Result: BestSource decoded the exact VC-1 file end-to-end — `vspipe --info` index pass
+  (a full linear decode) completed with exit 0, **155209 frames, zero decode errors** (vs
+  lsmas dying at frame 728). AssumeFPS relabel verified (see shared-module section). The
+  fix is confirmed to work before any sibling rebuild.
 
 ## Sibling request (to `tdarr-av1` inbox)
 
-Add the BestSource VapourSynth plugin to the stack image (analogous to the existing
-L-SMASH-Works meson build in the Dockerfile). Needed back:
+Add the BestSource VapourSynth plugin to the stack image. Build recipe is already worked
+out (from the pre-validation build against this exact image):
 
-- Confirmation the plugin autoloads (`core.bs` namespace resolves in `vspipe`).
-- Exact API: `core.bs.VideoSource(source=…, cachepath=…)` signature and cache filename.
-- Validation that it decodes the VC-1 sample end-to-end (I'll provide the exact path and
-  the frame-728 lsmas failure evidence).
-- Binary/namespace paths for the plugin's `findBin`-style checks, if any.
+- Source: `https://github.com/vapoursynth/bestsource` (validated at commit `bf3554d`),
+  clone `--recurse-submodules` (vendors `libp2p`).
+- Extra build dep beyond the current toolchain: **`libxxhash-dev`** (plus a C++ compiler;
+  meson/ninja/nasm/pkg-config already present). Builds against the image's `/usr/local`
+  VS + ffmpeg via `pkg-config` (`meson setup build --buildtype release && ninja -C build`).
+- Output `libbestsource.so` → install into the VS autoload dir
+  `/usr/local/lib/python3/dist-packages/vapoursynth/plugins/`.
+- API confirmed: `core.bs.VideoSource(source=…, cachepath=…)`; namespace `bs`.
 
-Publishing of the new image is gated on our confirmation, per existing protocol.
+Needed back: confirmation the plugin autoloads (`core.bs` resolves in a stock `vspipe`
+run on the published image) and the final `.so` path. Note the fps quirk (we handle it
+plugin-side via AssumeFPS — no sibling action needed). Publishing of the new image is
+gated on our confirmation, per existing protocol.
 
 ## Open questions / to confirm during implementation
 
-- Exact BestSource `.vpy` API (`cachepath` param name, cache filename) — confirm on the
-  test image before finalizing `vsSource.js`.
+- BestSource `.vpy` API is confirmed (`core.bs.VideoSource(source=, cachepath=)`), and the
+  fps quirk + AssumeFPS fix are validated. Remaining: confirm the autoload `.so` path on
+  the *published* sibling image matches the throwaway build.
 - Whether to generalize the fallback trigger beyond the two verified sentinels (kept
   minimal for now — YAGNI).
