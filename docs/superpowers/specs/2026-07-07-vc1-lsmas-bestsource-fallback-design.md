@@ -1,4 +1,36 @@
-# VC-1 lsmas → BestSource Automatic Fallback
+# VC-1 lsmas Fallback (BestSource → lossless FFV1 mezzanine)
+
+> **REVISION 2026-07-07 — BestSource was shipped (v2.2.0) then abandoned; replaced
+> by a lossless FFV1 mezzanine pre-pass (v2.3.0).**
+>
+> The proven root cause below (lsmas cannot decode this VC-1 stream) is unchanged.
+> Only the *fix* changed.
+>
+> **Why BestSource was dropped:** `core.bs.VideoSource` decoded the VC-1 correctly
+> (short clips passed), but on the full 108-min film the encode ran at ~0.2 fps with
+> a 200h+ ETA. Cause: av1an splits the film into ~1583 chunks and each parallel
+> worker *seeks* the source to its chunk; BestSource is a **linear** decoder, so
+> every seek re-decodes a large pre-roll, burning all CPU on discarded frames while
+> the encoders starve (observed: 26 vspipe decoders pegged, ~0 encoders, 1 chunk in
+> 27 min). It only hid in short tests because every chunk was near frame 0. Direct
+> BestSource is therefore fundamentally mismatched to av1an's random-access chunking
+> on long files. It also added a maintained package to the stack image for no lasting
+> benefit.
+>
+> **Replacement — lossless mezzanine:** when lsmas fails before scene-splitting, do
+> **one linear ffmpeg pass** re-wrapping the video into **FFV1** (mathematically
+> lossless, intra-only) and re-run the *existing lsmas pipeline* on it. lsmas is
+> av1an's proven fast-seek path, and FFV1 being all-intra means every frame seeks
+> with zero pre-roll. Lossless (verified: frame-index-aligned PSNR = inf on all
+> channels, all 1679 test frames bit-identical) so aomenc's quality is untouched.
+> Uses ffmpeg (already in the image) — **no BestSource, no VapourSynth `core.bs`,
+> no sibling image dependency**; the sibling is asked to remove BestSource again.
+> Cost: one ~linear pass (~15–20 min) + a temp FFV1 (~70 GB for a 108-min 1080p
+> film; disk had 1.3 TB free). Validated end-to-end on the aomenc config:
+> lsmas fail → FFV1 mezzanine → lsmas → valid AV1 @ 23.976 fps.
+>
+> Shared module `vsSource.js` keeps only the lsmas `.vpy` builder + failure gates;
+> the FFV1 args live in the new `shared/mezzanine.js`.
 
 ## Summary
 

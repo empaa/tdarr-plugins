@@ -172,38 +172,21 @@ async function commentaryDetection() {
   assert(isCommentary({ tags: { title: 'DTS-HD MA 5.1' } }) === false, 'main track wrongly flagged as commentary');
 }
 
-// ---- vsSource: lsmas/BestSource .vpy builder + source-failure gates ----
+// ---- vsSource: lsmas .vpy builder + source-failure gates ----
 // (lazy-require inside each test so a missing module fails only these tests)
 
 async function vsSourceLsmasLine() {
   const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
-  const vpy = buildSourceVpy({ sourceFilter: 'lsmas', inputPath: '/media/x.mkv', cachePath: '/tmp/s.lwi' });
+  const vpy = buildSourceVpy({ inputPath: '/media/x.mkv', cachePath: '/tmp/s.lwi' });
   assert(vpy.startsWith('import vapoursynth as vs'), `must start with vs import:\n${vpy}`);
   assert(vpy.includes("src = core.lsmas.LWLibavSource(source='/media/x.mkv', cachefile='/tmp/s.lwi')"),
     `lsmas source line missing:\n${vpy}`);
-  assert(!/AssumeFPS/.test(vpy), 'lsmas path must NOT add AssumeFPS (byte-identical to today)');
   assert(/src\.set_output\(\)\s*$/.test(vpy), `must end with src.set_output():\n${vpy}`);
-}
-
-async function vsSourceBestsourceWithFps() {
-  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
-  const vpy = buildSourceVpy({ sourceFilter: 'bestsource', inputPath: '/media/x.mkv', cachePath: '/tmp/bs', fpsNum: 24000, fpsDen: 1001 });
-  assert(vpy.includes("src = core.bs.VideoSource(source='/media/x.mkv', cachepath='/tmp/bs')"),
-    `bestsource line missing:\n${vpy}`);
-  assert(vpy.includes('src = core.std.AssumeFPS(src, fpsnum=24000, fpsden=1001)'),
-    `AssumeFPS relabel missing:\n${vpy}`);
-}
-
-async function vsSourceBestsourceNoFpsOmitsAssume() {
-  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
-  const vpy = buildSourceVpy({ sourceFilter: 'bestsource', inputPath: '/m.mkv', cachePath: '/tmp/bs', fpsNum: 0, fpsDen: 0 });
-  assert(vpy.includes('core.bs.VideoSource'), 'bestsource line present');
-  assert(!/AssumeFPS/.test(vpy), 'AssumeFPS must be omitted when fps is unknown/0');
 }
 
 async function vsSourceEscapesPath() {
   const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
-  const vpy = buildSourceVpy({ sourceFilter: 'lsmas', inputPath: "/media/a'b\\c.mkv", cachePath: '/tmp/s.lwi' });
+  const vpy = buildSourceVpy({ inputPath: "/media/a'b\\c.mkv", cachePath: '/tmp/s.lwi' });
   assert(vpy.includes("source='/media/a\\'b\\\\c.mkv'"), `path not Python-escaped:\n${vpy}`);
 }
 
@@ -211,15 +194,14 @@ async function vsSourceDownscaleAfterSource() {
   const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
   const { buildVsDownscaleLines } = require(path.join(SRC, 'shared', 'downscale.js'));
   const vpy = buildSourceVpy({
-    sourceFilter: 'bestsource', inputPath: '/m.mkv', cachePath: '/tmp/bs',
-    fpsNum: 24000, fpsDen: 1001, downscaleLines: buildVsDownscaleLines('1080p'),
+    inputPath: '/m.mkv', cachePath: '/tmp/s.lwi',
+    downscaleLines: buildVsDownscaleLines('1080p'),
   });
-  const iSrc = vpy.indexOf('core.bs.VideoSource');
-  const iFps = vpy.indexOf('AssumeFPS');
+  const iSrc = vpy.indexOf('core.lsmas.LWLibavSource');
   const iDown = vpy.indexOf('core.resize.Lanczos');
   const iOut = vpy.indexOf('set_output');
-  assert(iSrc >= 0 && iFps > iSrc && iDown > iFps && iOut > iDown,
-    `ordering wrong: src=${iSrc} fps=${iFps} down=${iDown} out=${iOut}\n${vpy}`);
+  assert(iSrc >= 0 && iDown > iSrc && iOut > iDown,
+    `ordering wrong: src=${iSrc} down=${iDown} out=${iOut}\n${vpy}`);
 }
 
 async function av1anReachedChunkingGate() {
@@ -245,14 +227,40 @@ async function sceneDetectProducedScenesGate() {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
+// ---- mezzanine: ffmpeg lossless pre-pass (fallback for lsmas-undecodable sources) ----
+
+async function mezzanineLosslessVideoOnlyIntra() {
+  const { buildMezzanineArgs } = require(path.join(SRC, 'shared', 'mezzanine.js'));
+  const a = buildMezzanineArgs({ inputPath: '/media/x.mkv', outputPath: '/tmp/m.mkv' });
+  const s = a.join(' ');
+  // FFV1 = mathematically lossless: the pre-pass must not degrade the source
+  // before the (quality-critical) AV1 encode.
+  assert(a.includes('ffv1'), `mezzanine must use lossless ffv1:\n${s}`);
+  assert(!/\bcrf\b|\bqp\b|-b:v|-q:v/i.test(s), `mezzanine must not set any lossy rate:\n${s}`);
+  // Intra-only (-g 1) so av1an's chunk workers seek every frame with no pre-roll.
+  const gi = a.indexOf('-g');
+  assert(gi >= 0 && a[gi + 1] === '1', `mezzanine must be all-intra (-g 1):\n${s}`);
+  // Video only -- audio/subs are muxed from the ORIGINAL source later.
+  assert(a.includes('-an') && a.includes('-sn'), `mezzanine must drop audio+subs:\n${s}`);
+  assert(a.indexOf('-map') >= 0 && a.indexOf('0:v:0') > a.indexOf('-map'), 'maps first video stream');
+}
+
+async function mezzanineInputBeforeOutput() {
+  const { buildMezzanineArgs } = require(path.join(SRC, 'shared', 'mezzanine.js'));
+  const a = buildMezzanineArgs({ inputPath: '/in.mkv', outputPath: '/out.mkv' });
+  assert(a[a.length - 1] === '/out.mkv', 'output path is last');
+  assert(a[a.indexOf('-i') + 1] === '/in.mkv', 'input follows -i');
+  assert(a.includes('-y') && a.includes('-nostdin'), 'non-interactive overwrite');
+}
+
 const TESTS = [
-  ['vsSource: lsmas line, no AssumeFPS', vsSourceLsmasLine],
-  ['vsSource: bestsource line + AssumeFPS from fps', vsSourceBestsourceWithFps],
-  ['vsSource: bestsource omits AssumeFPS when fps unknown', vsSourceBestsourceNoFpsOmitsAssume],
+  ['vsSource: lsmas line', vsSourceLsmasLine],
   ['vsSource: escapes quotes/backslashes in path', vsSourceEscapesPath],
-  ['vsSource: downscale lines after source+AssumeFPS', vsSourceDownscaleAfterSource],
+  ['vsSource: downscale lines after source', vsSourceDownscaleAfterSource],
   ['vsSource: av1anReachedChunking gate (chunks.json)', av1anReachedChunkingGate],
   ['vsSource: sceneDetectProducedScenes gate', sceneDetectProducedScenesGate],
+  ['mezzanine: lossless ffv1, video-only, intra', mezzanineLosslessVideoOnlyIntra],
+  ['mezzanine: input/output arg order', mezzanineInputBeforeOutput],
   ['sanitizeFile: returns sanitized file as working file', sanitizeReturnsSanitizedFileAsWorkingFile],
   ['audio: drops commentaries when keep off', audioDropsCommentariesWhenOff],
   ['audio: keeps additional-lang commentaries when keep on', audioKeepsAdditionalLangCommentariesWhenOn],
