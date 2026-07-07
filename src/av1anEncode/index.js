@@ -89,6 +89,7 @@ const plugin = async (args) => {
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
+  const { buildSourceVpy, av1anReachedChunking, SOURCE_LSMAS, SOURCE_BESTSOURCE } = require('../shared/vsSource');
 
   const inputs = args.inputs || {};
   const encoder           = String(inputs.encoder || 'svt-av1');
@@ -166,28 +167,36 @@ const plugin = async (args) => {
   const audioSizeGb = await probeAudioSize(inputPath, args.workDir, dbg, dbg);
 
   const vpyScript = path.join(vsDir, 'source.vpy');
-  const escPy = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const bsCache = path.join(vsDir, 'source.bsindex');
 
-  let vpyLines = [
-    'import vapoursynth as vs',
-    'core = vs.core',
-    `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
-  ];
-  if (doDownscale) {
-    vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
-  }
-  vpyLines.push('src.set_output()');
-  fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
-  dbg(`[vs] .vpy written${doDownscale ? ` (Lanczos3 -> ${downscaleRes})` : ' (passthrough)'}`);
+  // ffprobe framerate (num/den) for the BestSource AssumeFPS relabel (BestSource
+  // can misdetect fps on some VC-1 remuxes; lsmas reports it correctly).
+  const parseFps = (v) => {
+    const m = /^(\d+)\/(\d+)$/.exec(String(v || ''));
+    return m && +m[2] > 0 ? { num: +m[1], den: +m[2] } : { num: 0, den: 0 };
+  };
+  const { num: fpsNum, den: fpsDen } = parseFps(stream.r_frame_rate || stream.avg_frame_rate);
 
-  if (!fs.existsSync(lwiCache)) {
+  const downscaleLines = doDownscale ? buildVsDownscaleLines(downscaleRes) : [];
+
+  // Is the BestSource (core.bs) VapourSynth plugin present in this image?
+  const bestSourceAvailable = () => [
+    '/usr/local/lib/python3/dist-packages/vapoursynth/plugins',
+    '/usr/local/lib/vapoursynth',
+  ].some((d) => { try { return fs.readdirSync(d).some((f) => /bestsource/i.test(f)); } catch (_) { return false; } });
+
+  // Write source.vpy for the given filter and pre-build its frame index so
+  // av1an's parallel workers don't race to build it.
+  const prepareSource = async (sourceFilter) => {
+    const cachePath = sourceFilter === SOURCE_BESTSOURCE ? bsCache : lwiCache;
+    fs.writeFileSync(vpyScript, buildSourceVpy({
+      sourceFilter, inputPath, cachePath, fpsNum, fpsDen, downscaleLines,
+    }));
+    dbg(`[vs] .vpy written (${sourceFilter}${doDownscale ? `, Lanczos3 -> ${downscaleRes}` : ', passthrough'})`);
     updateWorker({ status: 'Indexing' });
-    const lwiExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
-      cwd: vsDir,
-      silent: true,
-    });
-    dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
-  }
+    const idxExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], { cwd: vsDir, silent: true });
+    dbg(idxExit === 0 ? `[vs] ${sourceFilter} index ready` : `[vs] WARNING: ${sourceFilter} index non-zero -- workers will retry`);
+  };
 
   const av1anArgs = [
     '-i', vpyScript,
@@ -222,31 +231,57 @@ const plugin = async (args) => {
     if (tracker) tracker.stop();
   });
 
-  updateWorker({ status: 'Scene Detection' });
+  // Keep lsmas decode errors + the split panic visible in the job log (they were
+  // previously filtered out, hiding the real source-failure reason).
+  const AV1AN_KEEP = /scenecut|error|warn|panic|crash|failed|lsmas|split scores|VideoSource|Failed to retrieve|failed to output/i;
 
-  tracker = createAv1anTracker({
-    workBase,
-    audioSizeGb,
-    sourceSizeGb,
-    maxEncodedPercent,
-    updateWorker,
-    jobLog,
-    dbg,
-    onSizeExceeded: () => {
-      sizeExceeded = true;
-      pm.killAll();
-    },
-  });
-  tracker.start();
+  const runAv1anAttempt = async () => {
+    updateWorker({ status: 'Scene Detection' });
+    tracker = createAv1anTracker({
+      workBase,
+      audioSizeGb,
+      sourceSizeGb,
+      maxEncodedPercent,
+      updateWorker,
+      jobLog,
+      dbg,
+      onSizeExceeded: () => {
+        sizeExceeded = true;
+        pm.killAll();
+      },
+    });
+    tracker.start();
+    const exit = await pm.spawnAsync(BIN.av1an, av1anArgs, {
+      cwd: vsDir,
+      filter: (l) => AV1AN_KEEP.test(l),
+      onSpawn: (pid) => pm.startPpidWatcher(pid),
+    });
+    tracker.stop();
+    return exit;
+  };
 
-  const AV1AN_KEEP = /scenecut|error|warn|panic|crash|failed/i;
-  const av1anExit = await pm.spawnAsync(BIN.av1an, av1anArgs, {
-    cwd: vsDir,
-    filter: (l) => AV1AN_KEEP.test(l),
-    onSpawn: (pid) => pm.startPpidWatcher(pid),
-  });
+  await prepareSource(SOURCE_LSMAS);
+  let av1anExit = await runAv1anAttempt();
 
-  tracker.stop();
+  // Source-decode failure signature: non-zero exit with no chunks.json means
+  // av1an died at/before scene-splitting (e.g. lsmas cannot decode this VC-1
+  // stream, starving scene detection -> split/mod.rs panic). Retry once with
+  // the ffmpeg-based BestSource source, which decodes what lsmas cannot.
+  if (!sizeExceeded && av1anExit !== 0 && !av1anReachedChunking(av1anTemp)) {
+    if (bestSourceAvailable()) {
+      jobLog('='.repeat(64));
+      jobLog('[av1an] lsmas failed before chunking -- likely a source-decode issue (e.g. VC-1).');
+      jobLog('[av1an] retrying with BestSource (ffmpeg-based VapourSynth source)...');
+      jobLog('='.repeat(64));
+      try { fs.rmSync(av1anTemp, { recursive: true, force: true }); } catch (_) {}
+      fs.mkdirSync(av1anTemp, { recursive: true });
+      await prepareSource(SOURCE_BESTSOURCE);
+      av1anExit = await runAv1anAttempt();
+    } else {
+      jobLog('[av1an] lsmas failed before chunking and BestSource (core.bs) is not present in this image.');
+      jobLog('[av1an] Update the tdarr-av1 stack image to enable the ffmpeg-based fallback.');
+    }
+  }
 
   let encodeOk = false;
   if (sizeExceeded) {
