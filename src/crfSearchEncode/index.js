@@ -101,7 +101,8 @@ const plugin = async (args) => {
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
-  const { buildSourceVpy, sceneDetectProducedScenes, SOURCE_LSMAS, SOURCE_BESTSOURCE } = require('../shared/vsSource');
+  const { buildSourceVpy, sceneDetectProducedScenes } = require('../shared/vsSource');
+  const { buildMezzanineArgs } = require('../shared/mezzanine');
 
   const inputs = args.inputs || {};
   const encoder           = String(inputs.encoder || 'svt-av1');
@@ -160,37 +161,50 @@ const plugin = async (args) => {
   fs.mkdirSync(searchDir, { recursive: true });
 
   const lwiCache = path.join(vsDir, 'source.lwi');
-  const bsCache = path.join(vsDir, 'source.bsindex');
-
-  // ffprobe framerate for the BestSource AssumeFPS relabel (BestSource can
-  // misdetect fps on some VC-1 remuxes; lsmas reports it correctly).
-  const parseFps = (v) => {
-    const m = /^(\d+)\/(\d+)$/.exec(String(v || ''));
-    return m && +m[2] > 0 ? { num: +m[1], den: +m[2] } : { num: 0, den: 0 };
-  };
-  const { num: fpsNum, den: fpsDen } = parseFps(stream.r_frame_rate || stream.avg_frame_rate);
+  const mezzPath = path.join(workBase, 'source.mezzanine.mkv');
   const downscaleLines = doDownscale ? buildVsDownscaleLines(downscaleRes) : [];
 
-  const bestSourceAvailable = () => [
-    '/usr/local/lib/python3/dist-packages/vapoursynth/plugins',
-    '/usr/local/lib/vapoursynth',
-  ].some((d) => { try { return fs.readdirSync(d).some((f) => /bestsource/i.test(f)); } catch (_) { return false; } });
+  // The video source lsmas reads. Starts as the original; on a decode failure it
+  // is re-pointed at a lossless mezzanine (see the scene-detect retry below).
+  let sourcePath = inputPath;
 
-  // Build VapourSynth script (shared by scene detection and phase 2) for a given
-  // source filter and pre-build its frame index.
+  // Total frame count for mezzanine transcode progress (best-effort).
+  const totalFrames = (() => {
+    const n = Number(stream.nb_frames);
+    if (n > 0) return n;
+    const fmt = (file.ffProbeData && file.ffProbeData.format) || {};
+    const dur = Number(stream.duration || fmt.duration || 0);
+    const fr = /^(\d+)\/(\d+)$/.exec(String(stream.r_frame_rate || ''));
+    return dur > 0 && fr && +fr[2] > 0 ? Math.round(dur * (+fr[1] / +fr[2])) : 0;
+  })();
+
+  // Build the lsmas .vpy (shared by scene detection and phase 2) for the current
+  // sourcePath and pre-build its frame index.
   const vpyScript = path.join(vsDir, 'source.vpy');
-  const prepareSource = async (sourceFilter) => {
-    const cachePath = sourceFilter === SOURCE_BESTSOURCE ? bsCache : lwiCache;
-    fs.writeFileSync(vpyScript, buildSourceVpy({
-      sourceFilter, inputPath, cachePath, fpsNum, fpsDen, downscaleLines,
-    }));
-    dbg(`[vs] .vpy written (${sourceFilter}${doDownscale ? `, Lanczos3 -> ${downscaleRes}` : ', passthrough'})`);
+  const prepareSource = async () => {
+    try { fs.rmSync(lwiCache, { force: true }); } catch (_) {}
+    fs.writeFileSync(vpyScript, buildSourceVpy({ inputPath: sourcePath, cachePath: lwiCache, downscaleLines }));
+    dbg(`[vs] .vpy written (lsmas${doDownscale ? `, Lanczos3 -> ${downscaleRes}` : ', passthrough'})`);
     updateWorker({ status: 'Indexing' });
     const idxExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], { cwd: vsDir, silent: true });
-    dbg(idxExit === 0 ? `[vs] ${sourceFilter} index ready` : `[vs] WARNING: ${sourceFilter} index non-zero -- workers will retry`);
+    dbg(idxExit === 0 ? '[vs] lsmas index ready' : '[vs] WARNING: lsmas index non-zero -- workers will retry');
   };
 
-  await prepareSource(SOURCE_LSMAS);
+  // One linear ffmpeg pass: re-wrap the video losslessly to FFV1 so lsmas can
+  // decode+seek it (used when lsmas cannot decode the original, e.g. VC-1).
+  const runMezzanine = () => pm.spawnAsync(BIN.ffmpeg, buildMezzanineArgs({ inputPath, outputPath: mezzPath }), {
+    cwd: workBase,
+    onLine: (l) => {
+      const m = /frame=\s*(\d+)/.exec(l);
+      if (m && totalFrames > 0) {
+        const pct = Math.min(99, Math.round((+m[1] / totalFrames) * 100));
+        updateWorker({ status: `Transcoding source (lossless) ${pct}%` });
+      }
+    },
+    filter: (l) => /error|fatal|invalid|no such|unable/i.test(l),
+  });
+
+  await prepareSource();
 
   // ── Scene detection (parallel with CRF search) ──────────────────────
   const scenesPath = path.join(workBase, 'scenes.json');
@@ -343,25 +357,33 @@ const plugin = async (args) => {
   let sceneDetectExit = await sceneDetectPromise;
 
   // If lsmas scene detection failed to produce scenes (e.g. it cannot decode
-  // this VC-1 stream), retry once with the ffmpeg-based BestSource source.
-  // Phase 2 reuses the same vpyScript (now BestSource), keeping the job consistent.
+  // this VC-1 stream), re-wrap the video losslessly to an FFV1 mezzanine that
+  // lsmas can decode, then retry. Phase 2 reuses the same vpyScript (now pointing
+  // at the mezzanine), keeping the job consistent. (ab-av1 phase 1 already ran on
+  // the original via ffmpeg, so its found CRF stays valid for the lossless copy.)
   if (sceneDetectExit !== 0 && !sceneDetectProducedScenes(scenesPath)) {
-    if (bestSourceAvailable()) {
-      jobLog('[scene-detect] lsmas scene detection failed before producing scenes -- retrying with BestSource...');
-      try { fs.rmSync(scenesPath, { force: true }); } catch (_) {}
-      await prepareSource(SOURCE_BESTSOURCE);
-      updateWorker({ status: 'Scene Detection' });
-      sceneDetectExit = await pm.spawnAsync(BIN.av1an, scOnlyArgs, {
-        cwd: vsDir,
-        filter: (l) => /scenecut|error|warn|lsmas|split scores|VideoSource|Failed to retrieve/i.test(l),
-      });
-    } else {
-      jobLog('[scene-detect] lsmas failed and BestSource (core.bs) is not present in this image -- update the tdarr-av1 stack.');
+    jobLog('[scene-detect] lsmas failed before producing scenes -- building a lossless mezzanine (ffmpeg FFV1)...');
+    updateWorker({ status: 'Transcoding source (lossless)' });
+    const mezzExit = await runMezzanine();
+    if (mezzExit !== 0 || !fs.existsSync(mezzPath) || fs.statSync(mezzPath).size === 0) {
+      pm.cleanup();
+      try { fs.rmSync(mezzPath, { force: true }); } catch (_) {}
+      throw new Error('mezzanine transcode failed -- source could not be decoded for encoding');
     }
+    jobLog(`[scene-detect] mezzanine ready (${humanSize(fs.statSync(mezzPath).size)}); re-running scene detection via lsmas`);
+    try { fs.rmSync(scenesPath, { force: true }); } catch (_) {}
+    sourcePath = mezzPath;
+    await prepareSource();
+    updateWorker({ status: 'Scene Detection' });
+    sceneDetectExit = await pm.spawnAsync(BIN.av1an, scOnlyArgs, {
+      cwd: vsDir,
+      filter: (l) => /scenecut|error|warn|lsmas|split scores/i.test(l),
+    });
   }
 
   if (sceneDetectExit !== 0) {
     pm.cleanup();
+    try { fs.rmSync(mezzPath, { force: true }); } catch (_) {}
     throw new Error(`Scene detection failed (exit ${sceneDetectExit})`);
   }
 
@@ -458,6 +480,8 @@ const plugin = async (args) => {
   }
 
   pm.cleanup();
+  // Drop the (potentially large) lossless mezzanine if one was built.
+  try { fs.rmSync(mezzPath, { force: true }); } catch (_) {}
 
   if (sizeExceeded) {
     jobLog('='.repeat(64));

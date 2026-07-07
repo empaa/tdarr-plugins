@@ -2,45 +2,30 @@
 'use strict';
 
 // VapourSynth source-filter construction + source-failure gates, shared by the
-// av1an-based encoders. lsmas is the fast default; BestSource (core.bs) is a
-// ffmpeg-based fallback for inputs lsmas cannot decode (e.g. some VC-1 streams).
+// av1an-based encoders. lsmas is the only source filter; inputs lsmas cannot
+// decode directly (e.g. some VC-1 streams) are first re-wrapped losslessly by
+// the mezzanine pre-pass (see shared/mezzanine.js), then read through lsmas.
 
 const fs = require('fs');
 const path = require('path');
-
-const SOURCE_LSMAS = 'lsmas';
-const SOURCE_BESTSOURCE = 'bestsource';
 
 // Escape a path for single-quoted Python string literals in the .vpy.
 const escPy = (s) => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 /**
- * Build the full .vpy text for a chosen source filter.
+ * Build the full lsmas .vpy text.
  * @param {object} o
- * @param {string} o.sourceFilter   SOURCE_LSMAS | SOURCE_BESTSOURCE
- * @param {string} o.inputPath      source media path
- * @param {string} o.cachePath      lsmas .lwi cache / BestSource cachepath
- * @param {number} [o.fpsNum]       ffprobe framerate numerator (BestSource only)
- * @param {number} [o.fpsDen]       ffprobe framerate denominator (BestSource only)
+ * @param {string} o.inputPath      source media path (original or mezzanine)
+ * @param {string} o.cachePath      lsmas .lwi cache path
  * @param {string[]} [o.downscaleLines]  VapourSynth lines that transform `src`
  * @returns {string} .vpy text (trailing newline)
  */
-function buildSourceVpy({ sourceFilter, inputPath, cachePath, fpsNum, fpsDen, downscaleLines }) {
+function buildSourceVpy({ inputPath, cachePath, downscaleLines }) {
   const lines = ['import vapoursynth as vs', 'core = vs.core'];
   const src = escPy(inputPath);
   const cache = escPy(cachePath);
 
-  if (sourceFilter === SOURCE_BESTSOURCE) {
-    lines.push(`src = core.bs.VideoSource(source='${src}', cachepath='${cache}')`);
-    // BestSource can misdetect the framerate (e.g. VC-1 remuxes report ~10.979
-    // fps for true 23.976). Relabel to ffprobe's rate; AssumeFPS is metadata
-    // only and preserves the exact frame count. Skipped if fps is unknown.
-    if (fpsNum > 0 && fpsDen > 0) {
-      lines.push(`src = core.std.AssumeFPS(src, fpsnum=${fpsNum}, fpsden=${fpsDen})`);
-    }
-  } else {
-    lines.push(`src = core.lsmas.LWLibavSource(source='${src}', cachefile='${cache}')`);
-  }
+  lines.push(`src = core.lsmas.LWLibavSource(source='${src}', cachefile='${cache}')`);
 
   if (Array.isArray(downscaleLines)) {
     for (const l of downscaleLines) lines.push(l);
@@ -78,8 +63,6 @@ function sceneDetectProducedScenes(scenesJsonPath) {
 }
 
 module.exports = {
-  SOURCE_LSMAS,
-  SOURCE_BESTSOURCE,
   buildSourceVpy,
   av1anReachedChunking,
   sceneDetectProducedScenes,
