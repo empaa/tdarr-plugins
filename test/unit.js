@@ -172,7 +172,87 @@ async function commentaryDetection() {
   assert(isCommentary({ tags: { title: 'DTS-HD MA 5.1' } }) === false, 'main track wrongly flagged as commentary');
 }
 
+// ---- vsSource: lsmas/BestSource .vpy builder + source-failure gates ----
+// (lazy-require inside each test so a missing module fails only these tests)
+
+async function vsSourceLsmasLine() {
+  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const vpy = buildSourceVpy({ sourceFilter: 'lsmas', inputPath: '/media/x.mkv', cachePath: '/tmp/s.lwi' });
+  assert(vpy.startsWith('import vapoursynth as vs'), `must start with vs import:\n${vpy}`);
+  assert(vpy.includes("src = core.lsmas.LWLibavSource(source='/media/x.mkv', cachefile='/tmp/s.lwi')"),
+    `lsmas source line missing:\n${vpy}`);
+  assert(!/AssumeFPS/.test(vpy), 'lsmas path must NOT add AssumeFPS (byte-identical to today)');
+  assert(/src\.set_output\(\)\s*$/.test(vpy), `must end with src.set_output():\n${vpy}`);
+}
+
+async function vsSourceBestsourceWithFps() {
+  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const vpy = buildSourceVpy({ sourceFilter: 'bestsource', inputPath: '/media/x.mkv', cachePath: '/tmp/bs', fpsNum: 24000, fpsDen: 1001 });
+  assert(vpy.includes("src = core.bs.VideoSource(source='/media/x.mkv', cachepath='/tmp/bs')"),
+    `bestsource line missing:\n${vpy}`);
+  assert(vpy.includes('src = core.std.AssumeFPS(src, fpsnum=24000, fpsden=1001)'),
+    `AssumeFPS relabel missing:\n${vpy}`);
+}
+
+async function vsSourceBestsourceNoFpsOmitsAssume() {
+  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const vpy = buildSourceVpy({ sourceFilter: 'bestsource', inputPath: '/m.mkv', cachePath: '/tmp/bs', fpsNum: 0, fpsDen: 0 });
+  assert(vpy.includes('core.bs.VideoSource'), 'bestsource line present');
+  assert(!/AssumeFPS/.test(vpy), 'AssumeFPS must be omitted when fps is unknown/0');
+}
+
+async function vsSourceEscapesPath() {
+  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const vpy = buildSourceVpy({ sourceFilter: 'lsmas', inputPath: "/media/a'b\\c.mkv", cachePath: '/tmp/s.lwi' });
+  assert(vpy.includes("source='/media/a\\'b\\\\c.mkv'"), `path not Python-escaped:\n${vpy}`);
+}
+
+async function vsSourceDownscaleAfterSource() {
+  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const { buildVsDownscaleLines } = require(path.join(SRC, 'shared', 'downscale.js'));
+  const vpy = buildSourceVpy({
+    sourceFilter: 'bestsource', inputPath: '/m.mkv', cachePath: '/tmp/bs',
+    fpsNum: 24000, fpsDen: 1001, downscaleLines: buildVsDownscaleLines('1080p'),
+  });
+  const iSrc = vpy.indexOf('core.bs.VideoSource');
+  const iFps = vpy.indexOf('AssumeFPS');
+  const iDown = vpy.indexOf('core.resize.Lanczos');
+  const iOut = vpy.indexOf('set_output');
+  assert(iSrc >= 0 && iFps > iSrc && iDown > iFps && iOut > iDown,
+    `ordering wrong: src=${iSrc} fps=${iFps} down=${iDown} out=${iOut}\n${vpy}`);
+}
+
+async function av1anReachedChunkingGate() {
+  const { av1anReachedChunking } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-gate-'));
+  try {
+    assert(av1anReachedChunking(dir) === false, 'no chunks.json => false (failed before chunking)');
+    fs.writeFileSync(path.join(dir, 'chunks.json'), '[]');
+    assert(av1anReachedChunking(dir) === true, 'chunks.json present => true (reached chunking)');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+async function sceneDetectProducedScenesGate() {
+  const { sceneDetectProducedScenes } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-sc-'));
+  try {
+    const p = path.join(dir, 'scenes.json');
+    assert(sceneDetectProducedScenes(p) === false, 'missing file => false');
+    fs.writeFileSync(p, JSON.stringify({ frames: 0, scenes: [] }));
+    assert(sceneDetectProducedScenes(p) === false, 'empty scenes => false (panic left it empty)');
+    fs.writeFileSync(p, JSON.stringify({ frames: 100, scenes: [{ start_frame: 0, end_frame: 100 }] }));
+    assert(sceneDetectProducedScenes(p) === true, 'non-empty scenes => true');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
 const TESTS = [
+  ['vsSource: lsmas line, no AssumeFPS', vsSourceLsmasLine],
+  ['vsSource: bestsource line + AssumeFPS from fps', vsSourceBestsourceWithFps],
+  ['vsSource: bestsource omits AssumeFPS when fps unknown', vsSourceBestsourceNoFpsOmitsAssume],
+  ['vsSource: escapes quotes/backslashes in path', vsSourceEscapesPath],
+  ['vsSource: downscale lines after source+AssumeFPS', vsSourceDownscaleAfterSource],
+  ['vsSource: av1anReachedChunking gate (chunks.json)', av1anReachedChunkingGate],
+  ['vsSource: sceneDetectProducedScenes gate', sceneDetectProducedScenesGate],
   ['sanitizeFile: returns sanitized file as working file', sanitizeReturnsSanitizedFileAsWorkingFile],
   ['audio: drops commentaries when keep off', audioDropsCommentariesWhenOff],
   ['audio: keeps additional-lang commentaries when keep on', audioKeepsAdditionalLangCommentariesWhenOn],

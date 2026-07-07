@@ -101,6 +101,7 @@ const plugin = async (args) => {
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
+  const { buildSourceVpy, sceneDetectProducedScenes, SOURCE_LSMAS, SOURCE_BESTSOURCE } = require('../shared/vsSource');
 
   const inputs = args.inputs || {};
   const encoder           = String(inputs.encoder || 'svt-av1');
@@ -159,31 +160,37 @@ const plugin = async (args) => {
   fs.mkdirSync(searchDir, { recursive: true });
 
   const lwiCache = path.join(vsDir, 'source.lwi');
+  const bsCache = path.join(vsDir, 'source.bsindex');
 
-  // Build VapourSynth script (needed for both scene detection and phase 2)
+  // ffprobe framerate for the BestSource AssumeFPS relabel (BestSource can
+  // misdetect fps on some VC-1 remuxes; lsmas reports it correctly).
+  const parseFps = (v) => {
+    const m = /^(\d+)\/(\d+)$/.exec(String(v || ''));
+    return m && +m[2] > 0 ? { num: +m[1], den: +m[2] } : { num: 0, den: 0 };
+  };
+  const { num: fpsNum, den: fpsDen } = parseFps(stream.r_frame_rate || stream.avg_frame_rate);
+  const downscaleLines = doDownscale ? buildVsDownscaleLines(downscaleRes) : [];
+
+  const bestSourceAvailable = () => [
+    '/usr/local/lib/python3/dist-packages/vapoursynth/plugins',
+    '/usr/local/lib/vapoursynth',
+  ].some((d) => { try { return fs.readdirSync(d).some((f) => /bestsource/i.test(f)); } catch (_) { return false; } });
+
+  // Build VapourSynth script (shared by scene detection and phase 2) for a given
+  // source filter and pre-build its frame index.
   const vpyScript = path.join(vsDir, 'source.vpy');
-  const escPy = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-
-  let vpyLines = [
-    'import vapoursynth as vs',
-    'core = vs.core',
-    `src = core.lsmas.LWLibavSource(source='${escPy(inputPath)}', cachefile='${escPy(lwiCache)}')`,
-  ];
-  if (doDownscale) {
-    vpyLines = vpyLines.concat(buildVsDownscaleLines(downscaleRes));
-  }
-  vpyLines.push('src.set_output()');
-  fs.writeFileSync(vpyScript, vpyLines.join('\n') + '\n');
-
-  // Pre-index lwi if needed (shared by scene detection and phase 2)
-  if (!fs.existsSync(lwiCache)) {
+  const prepareSource = async (sourceFilter) => {
+    const cachePath = sourceFilter === SOURCE_BESTSOURCE ? bsCache : lwiCache;
+    fs.writeFileSync(vpyScript, buildSourceVpy({
+      sourceFilter, inputPath, cachePath, fpsNum, fpsDen, downscaleLines,
+    }));
+    dbg(`[vs] .vpy written (${sourceFilter}${doDownscale ? `, Lanczos3 -> ${downscaleRes}` : ', passthrough'})`);
     updateWorker({ status: 'Indexing' });
-    const lwiExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
-      cwd: vsDir,
-      silent: true,
-    });
-    dbg(lwiExit === 0 ? '[vs] .lwi index ready' : '[vs] WARNING: .lwi non-zero -- workers will retry');
-  }
+    const idxExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], { cwd: vsDir, silent: true });
+    dbg(idxExit === 0 ? `[vs] ${sourceFilter} index ready` : `[vs] WARNING: ${sourceFilter} index non-zero -- workers will retry`);
+  };
+
+  await prepareSource(SOURCE_LSMAS);
 
   // ── Scene detection (parallel with CRF search) ──────────────────────
   const scenesPath = path.join(workBase, 'scenes.json');
@@ -333,7 +340,25 @@ const plugin = async (args) => {
   } else {
     jobLog('[scene-detect] already complete');
   }
-  const sceneDetectExit = await sceneDetectPromise;
+  let sceneDetectExit = await sceneDetectPromise;
+
+  // If lsmas scene detection failed to produce scenes (e.g. it cannot decode
+  // this VC-1 stream), retry once with the ffmpeg-based BestSource source.
+  // Phase 2 reuses the same vpyScript (now BestSource), keeping the job consistent.
+  if (sceneDetectExit !== 0 && !sceneDetectProducedScenes(scenesPath)) {
+    if (bestSourceAvailable()) {
+      jobLog('[scene-detect] lsmas scene detection failed before producing scenes -- retrying with BestSource...');
+      try { fs.rmSync(scenesPath, { force: true }); } catch (_) {}
+      await prepareSource(SOURCE_BESTSOURCE);
+      updateWorker({ status: 'Scene Detection' });
+      sceneDetectExit = await pm.spawnAsync(BIN.av1an, scOnlyArgs, {
+        cwd: vsDir,
+        filter: (l) => /scenecut|error|warn|lsmas|split scores|VideoSource|Failed to retrieve/i.test(l),
+      });
+    } else {
+      jobLog('[scene-detect] lsmas failed and BestSource (core.bs) is not present in this image -- update the tdarr-av1 stack.');
+    }
+  }
 
   if (sceneDetectExit !== 0) {
     pm.cleanup();
