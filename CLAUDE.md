@@ -34,7 +34,7 @@ These binaries must exist on the Tdarr node at runtime (provided by the sibling 
 - `/usr/local/bin/av1an`
 - `/usr/local/bin/ab-av1`
 - `/usr/local/bin/ffmpeg`
-- `/usr/local/bin/mkvmerge`
+- `/usr/bin/mkvmerge` (mkvtoolnix apt package; `/usr/local/bin/mkvmerge` does not exist — plugins' `findBin` checks both)
 - `/usr/local/bin/vspipe`
 - `/usr/local/share/vmaf/vmaf_v0.6.1.json`
 
