@@ -103,6 +103,8 @@ const plugin = async (args) => {
   const { createAv1anTracker } = require('../shared/progressTracker');
   const {
     buildSourceVpy, sceneDetectProducedScenes, isSourceDecodeErrorLine, shouldRetryWithMezzanine,
+    parseVspipeFrameCount, buildProbeWindows, buildProbeArgs,
+    parseScenecutLine, isDegenerateSceneDetection,
   } = require('../shared/vsSource');
   const { buildMezzanineArgs } = require('../shared/mezzanine');
 
@@ -183,13 +185,54 @@ const plugin = async (args) => {
   // Build the lsmas .vpy (shared by scene detection and phase 2) for the current
   // sourcePath and pre-build its frame index.
   const vpyScript = path.join(vsDir, 'source.vpy');
+
+  // Frame count as lsmas reports it for the current sourcePath (vspipe --info).
+  let sourceFrameCount = 0;
+
   const prepareSource = async () => {
     try { fs.rmSync(lwiCache, { force: true }); } catch (_) {}
     fs.writeFileSync(vpyScript, buildSourceVpy({ inputPath: sourcePath, cachePath: lwiCache, downscaleLines }));
     dbg(`[vs] .vpy written (lsmas${doDownscale ? `, Lanczos3 -> ${downscaleRes}` : ', passthrough'})`);
     updateWorker({ status: 'Indexing' });
-    const idxExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], { cwd: vsDir, silent: true });
-    dbg(idxExit === 0 ? '[vs] lsmas index ready' : '[vs] WARNING: lsmas index non-zero -- workers will retry');
+    let infoText = '';
+    const idxExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
+      cwd: vsDir,
+      silent: true,
+      onLine: (l) => { infoText += `${l}\n`; },
+    });
+    sourceFrameCount = parseVspipeFrameCount(infoText);
+    dbg(idxExit === 0 ? `[vs] lsmas index ready (${sourceFrameCount || '?'} frames)`
+      : '[vs] WARNING: lsmas index non-zero -- workers will retry');
+  };
+
+  // Pre-flight: make lsmas actually DELIVER frames before committing to a CRF
+  // search + encode. Fail-safe -- only an explicit lsmas frame-delivery error
+  // counts, so a broken probe degrades to the post-encode backstop rather than
+  // triggering a needless lossless transcode. See av1anEncode for the rationale.
+  const probeSource = async () => {
+    const windows = buildProbeWindows(sourceFrameCount);
+    if (!windows.length) {
+      dbg('[probe] frame count unknown -- skipping pre-flight probe');
+      return null;
+    }
+    updateWorker({ status: 'Verifying source' });
+    for (const w of windows) {
+      let sawError = false;
+      const exit = await pm.spawnAsync(
+        BIN.vspipe,
+        buildProbeArgs({ vpyPath: vpyScript, start: w.start, end: w.end }),
+        { cwd: vsDir, silent: true, onLine: (l) => { if (isSourceDecodeErrorLine(l)) sawError = true; } },
+      );
+      if (sawError) {
+        dbg(`[probe] lsmas failed to deliver frames ${w.start}-${w.end} (exit ${exit})`);
+        return w;
+      }
+      if (exit !== 0) {
+        dbg(`[probe] vspipe exit ${exit} on frames ${w.start}-${w.end} with no lsmas error -- ignoring`);
+      }
+    }
+    dbg(`[probe] lsmas delivered all ${windows.length} probe window(s)`);
+    return null;
   };
 
   // One linear ffmpeg pass: re-wrap the video losslessly to FFV1 so lsmas can
@@ -229,19 +272,28 @@ const plugin = async (args) => {
     sawSourceDecodeError = false;
     return pm.spawnAsync(BIN.av1an, scOnlyArgs, {
       cwd: vsDir,
-      onLine: watchSourceDecode,
+      onLine: (l) => {
+        watchSourceDecode(l);
+        // Zero detected cuts across a feature-length file means the scenecut
+        // analyzer got nothing usable and chunking fell back to fixed intervals.
+        const sc = parseScenecutLine(l);
+        if (isDegenerateSceneDetection(sc)) {
+          jobLog(`WARNING: scene detection found no cuts at all (1 scene over ${sc.totalChunks}`
+            + ` chunks of ${sc.extraSplitFrames} frames) -- chunk boundaries are arbitrary,`
+            + ' which usually means the source did not decode cleanly.');
+        }
+      },
       filter: (l) => /scenecut|error|warn|lsmas|split scores/i.test(l),
     });
   };
 
   let mezzanineBuilt = false;
 
-  // Build the lossless mezzanine, re-point lsmas at it, and re-derive scenes.json
-  // from it. The scenes MUST be regenerated: the mezzanine holds exactly the
-  // frames ffmpeg could decode, which need not match what lsmas reported for the
-  // original, so the old scene boundaries may not be valid.
-  // @returns {Promise<number>} scene-detection exit code on the mezzanine
-  const buildMezzanineAndRedetect = async (tag) => {
+  // Transcode to the lossless mezzanine and re-point lsmas at it. Any existing
+  // scenes.json is dropped: the mezzanine holds exactly the frames ffmpeg could
+  // decode, which need not match what lsmas reported for the original, so old
+  // scene boundaries may not be valid.
+  const switchToMezzanine = async (tag) => {
     updateWorker({ status: 'Transcoding source (lossless)' });
     const mezzExit = await runMezzanine();
     if (mezzExit !== 0 || !fs.existsSync(mezzPath) || fs.statSync(mezzPath).size === 0) {
@@ -250,13 +302,36 @@ const plugin = async (args) => {
       throw new Error('mezzanine transcode failed -- source could not be decoded for encoding');
     }
     mezzanineBuilt = true;
-    jobLog(`[${tag}] mezzanine ready (${humanSize(fs.statSync(mezzPath).size)}); re-running scene detection via lsmas`);
+    jobLog(`[${tag}] mezzanine ready (${humanSize(fs.statSync(mezzPath).size)}); continuing via lsmas`);
     try { fs.rmSync(scenesPath, { force: true }); } catch (_) {}
     sourcePath = mezzPath;
     await prepareSource();
+  };
+
+  // Re-derive scenes.json from the mezzanine after switching to it.
+  // @returns {Promise<number>} scene-detection exit code on the mezzanine
+  const buildMezzanineAndRedetect = async (tag) => {
+    await switchToMezzanine(tag);
     updateWorker({ status: 'Scene Detection' });
     return runSceneDetect();
   };
+
+  // Pre-flight, before the CRF search and scene detection both commit to this
+  // source: if lsmas cannot deliver frames now, it will not manage it later.
+  const preflightBad = await probeSource();
+  if (preflightBad) {
+    jobLog('='.repeat(64));
+    jobLog(`[probe] lsmas cannot decode frames ${preflightBad.start}-${preflightBad.end}`
+      + ` of ${sourceFrameCount} -- source is not reliably decodable (e.g. VC-1).`);
+    jobLog('[probe] building a lossless mezzanine (ffmpeg FFV1) up front...');
+    jobLog('='.repeat(64));
+    await switchToMezzanine('probe');
+    const stillBad = await probeSource();
+    if (stillBad) {
+      jobLog(`[probe] WARNING: lsmas still cannot decode frames ${stillBad.start}-${stillBad.end}`
+        + ' of the mezzanine -- continuing anyway');
+    }
+  }
 
   jobLog(`[scene-detect] starting in background: av1an ${scOnlyArgs.join(' ')}`);
   const sceneDetectPromise = runSceneDetect();

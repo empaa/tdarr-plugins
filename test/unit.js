@@ -281,6 +281,95 @@ async function mezzanineRetryDecision() {
   }) === false, 'size-limit abort must not be mistaken for a source failure');
 }
 
+// ---- lsmas pre-flight probe: catch an undecodable source BEFORE encoding ----
+// v2.3.1 only reacted after av1an exited, which on the 2026-08-01 VC-1 job meant
+// 13m15s of encoding (3 doomed retries of chunk 913) before the fallback fired.
+
+async function vspipeFrameCountParse() {
+  const { parseVspipeFrameCount } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const info = [
+    'Width: 1920', 'Height: 1080', 'Frames: 219360', 'FPS: 24000/1001 (23.976 fps)',
+    'Format Name: YUV420P8',
+  ].join('\n');
+  assert(parseVspipeFrameCount(info) === 219360, 'must read the frame count from vspipe --info');
+  assert(parseVspipeFrameCount('Frames: 0') === 0, 'zero frames => 0');
+  assert(parseVspipeFrameCount('no frame line here') === 0, 'missing => 0');
+  assert(parseVspipeFrameCount(undefined) === 0, 'undefined => 0');
+  // Must not be fooled by a similar-looking line.
+  assert(parseVspipeFrameCount('Frames per second: 24') === 0, 'must anchor on the Frames: line');
+}
+
+async function probeWindowsCoverTailAndSpread() {
+  const { buildProbeWindows } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const n = 219360;                                   // the failing film
+  const w = buildProbeWindows(n, { tailFrames: 240, spread: 6 });
+
+  assert(w.length > 0, 'must produce probe windows');
+  for (const { start, end } of w) {
+    assert(Number.isInteger(start) && Number.isInteger(end), `integer bounds: ${start}-${end}`);
+    assert(start >= 0 && end <= n - 1, `windows must stay in range: ${start}-${end} of ${n}`);
+    assert(start <= end, `start must not exceed end: ${start}-${end}`);
+  }
+  // The tail is where this class of lsmas failure lives (the .lwi index claims
+  // more frames than the decoder can deliver). Frame 219316 actually failed.
+  const last = w[w.length - 1];
+  assert(last.end === n - 1, `last window must reach the final frame, got ${last.end}`);
+  assert(last.start <= 219316 && last.end >= 219316,
+    `tail window must cover the frame that failed in production: ${last.start}-${last.end}`);
+  // Ascending and non-overlapping so we fail fast at the earliest bad frame.
+  for (let i = 1; i < w.length; i++) {
+    assert(w[i].start > w[i - 1].end, `windows must be ordered and disjoint: ${JSON.stringify(w)}`);
+  }
+
+  // Degenerate inputs must not produce nonsense.
+  assert(buildProbeWindows(0).length === 0, 'no frames => no probes');
+  assert(buildProbeWindows(-5).length === 0, 'negative => no probes');
+  const tiny = buildProbeWindows(10, { tailFrames: 240, spread: 6 });
+  for (const { start, end } of tiny) {
+    assert(start >= 0 && end <= 9, `short clip windows must clamp: ${start}-${end}`);
+  }
+}
+
+async function probeArgsDecodeFrames() {
+  const { buildProbeArgs } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const a = buildProbeArgs({ vpyPath: '/w/source.vpy', start: 219120, end: 219359 });
+  assert(a[a.indexOf('--start') + 1] === '219120', `start passed: ${a.join(' ')}`);
+  assert(a[a.indexOf('--end') + 1] === '219359', `end passed: ${a.join(' ')}`);
+  // The script must precede the output target, and frames must be requested but
+  // NOT written -- vspipe R77 spells that sink `--` (`vspipe [options] s.vpy --`).
+  // Writing real frames anywhere would cost gigabytes.
+  const si = a.indexOf('/w/source.vpy');
+  assert(si >= 0 && si === a.length - 2, `script second-to-last: ${a.join(' ')}`);
+  assert(a[a.length - 1] === '--', `output must be the no-output sink: ${a.join(' ')}`);
+}
+
+// A silent scene-detection failure: av1an found ZERO cuts across a 152-minute
+// film and only fixed-interval extra_splits produced chunks. Worth surfacing --
+// the encode would otherwise be chunked at arbitrary boundaries.
+async function degenerateSceneDetection() {
+  const { parseScenecutLine, isDegenerateSceneDetection } = require(path.join(SRC, 'shared', 'vsSource.js'));
+
+  // Verbatim from both failed production runs.
+  const bad = parseScenecutLine(
+    'INFO encode_file: scenecut: found 1 scene(s) [with extra_splits (240 frames): 914 scene(s)]');
+  assert(bad && bad.detected === 1, `must parse detected scenes: ${JSON.stringify(bad)}`);
+  assert(bad.totalChunks === 914, `must parse post-split chunk count: ${JSON.stringify(bad)}`);
+  assert(isDegenerateSceneDetection(bad) === true, 'zero cuts over 914 chunks is degenerate');
+
+  // Healthy detection on a real film.
+  const good = parseScenecutLine(
+    'INFO encode_file: scenecut: found 1837 scene(s) [with extra_splits (240 frames): 2104 scene(s)]');
+  assert(good.detected === 1837, `must parse a healthy count: ${JSON.stringify(good)}`);
+  assert(isDegenerateSceneDetection(good) === false, 'many scenes is not degenerate');
+
+  // A genuinely short/single-shot clip legitimately has one scene -- must not warn.
+  const shortClip = parseScenecutLine('scenecut: found 1 scene(s) [with extra_splits (240 frames): 3 scene(s)]');
+  assert(isDegenerateSceneDetection(shortClip) === false, 'a short single-shot clip is not degenerate');
+
+  assert(parseScenecutLine('unrelated av1an chatter') === null, 'non-matching line => null');
+  assert(isDegenerateSceneDetection(null) === false, 'null info => false');
+}
+
 // ---- mezzanine: ffmpeg lossless pre-pass (fallback for lsmas-undecodable sources) ----
 
 async function mezzanineLosslessVideoOnlyIntra() {
@@ -315,6 +404,10 @@ const TESTS = [
   ['vsSource: sceneDetectProducedScenes gate', sceneDetectProducedScenesGate],
   ['vsSource: detects lsmas frame-delivery failure', sourceDecodeErrorLineDetection],
   ['vsSource: mezzanine retry decision (mid-encode + pre-chunking)', mezzanineRetryDecision],
+  ['vsSource: parses vspipe --info frame count', vspipeFrameCountParse],
+  ['vsSource: probe windows cover tail + spread', probeWindowsCoverTailAndSpread],
+  ['vsSource: probe args decode to /dev/null', probeArgsDecodeFrames],
+  ['vsSource: detects degenerate scene detection', degenerateSceneDetection],
   ['mezzanine: lossless ffv1, video-only, intra', mezzanineLosslessVideoOnlyIntra],
   ['mezzanine: input/output arg order', mezzanineInputBeforeOutput],
   ['sanitizeFile: returns sanitized file as working file', sanitizeReturnsSanitizedFileAsWorkingFile],
