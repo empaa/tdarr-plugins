@@ -92,6 +92,100 @@ function shouldRetryWithMezzanine({ exitCode, sizeExceeded, sawSourceDecodeError
 }
 
 /**
+ * Frame count as lsmas itself reports it, from `vspipe --info`. This is the
+ * count av1an will chunk against -- and on a stream whose .lwi index overstates
+ * what the decoder can deliver, the frames near this count are exactly the ones
+ * that fail.
+ * @param {string} text  full `vspipe --info` output
+ * @returns {number} frame count, or 0 if not found
+ */
+function parseVspipeFrameCount(text) {
+  const m = /^\s*Frames:\s*(\d+)\s*$/m.exec(String(text == null ? '' : text));
+  return m ? Number(m[1]) : 0;
+}
+
+/**
+ * Frame windows to decode as a pre-flight check that lsmas can actually deliver
+ * frames from this source, before committing to an encode.
+ *
+ * The tail comes last and always reaches the final frame: an .lwi index that
+ * claims more frames than the decoder can produce fails there, and probing it is
+ * what turns a 13-minute discovery (3 doomed chunk retries) into a few seconds.
+ * The spread windows ahead of it are single frames, cheap insurance against a
+ * source that breaks somewhere in the middle instead.
+ *
+ * @param {number} frameCount
+ * @param {object} [o]
+ * @param {number} [o.tailFrames=240]  length of the final window
+ * @param {number} [o.spread=6]        single frames sampled before the tail
+ * @returns {Array<{start:number,end:number}>} ordered, disjoint, in-range
+ */
+function buildProbeWindows(frameCount, { tailFrames = 240, spread = 6 } = {}) {
+  const n = Math.floor(Number(frameCount) || 0);
+  if (n <= 0) return [];
+
+  const last = n - 1;
+  const tailStart = Math.max(0, n - Math.max(1, tailFrames));
+  const windows = [];
+
+  // Single frames spread over the part of the file the tail window won't cover.
+  for (let i = 1; i <= spread; i++) {
+    const f = Math.floor((n * i) / (spread + 1));
+    if (f < tailStart && (!windows.length || f > windows[windows.length - 1].end)) {
+      windows.push({ start: f, end: f });
+    }
+  }
+
+  windows.push({ start: tailStart, end: last });
+  return windows;
+}
+
+/**
+ * `vspipe` args that decode a frame range and throw the pixels away. Decoding is
+ * the point -- `--info` alone reads the index and would not surface a decoder
+ * that cannot produce the frames. `--` is vspipe's documented no-output sink
+ * ("Request all frames but don't output them"), so nothing is written.
+ * @param {object} o
+ * @param {string} o.vpyPath
+ * @param {number} o.start
+ * @param {number} o.end
+ * @returns {string[]}
+ */
+function buildProbeArgs({ vpyPath, start, end }) {
+  return ['--start', String(start), '--end', String(end), vpyPath, '--'];
+}
+
+/**
+ * Parse av1an's scenecut summary, e.g.
+ *   `INFO encode_file: scenecut: found 1 scene(s) [with extra_splits (240 frames): 914 scene(s)]`
+ * @param {string} line
+ * @returns {{detected:number, extraSplitFrames:number, totalChunks:number}|null}
+ */
+function parseScenecutLine(line) {
+  const m = /found\s+(\d+)\s+scene\(s\)(?:\s*\[with\s+extra_splits\s*\((\d+)\s*frames?\):\s*(\d+)\s+scene\(s\)\])?/i
+    .exec(String(line == null ? '' : line));
+  if (!m) return null;
+  return {
+    detected: Number(m[1]),
+    extraSplitFrames: m[2] ? Number(m[2]) : 0,
+    totalChunks: m[3] ? Number(m[3]) : Number(m[1]),
+  };
+}
+
+/**
+ * True when av1an found NO scene cuts at all across a file long enough that this
+ * cannot be real content -- the signature of a scenecut analyzer being fed
+ * nothing usable (seen on the VC-1 remux: 1 scene across 914 chunks). Diagnostic
+ * only: a genuinely single-shot clip is legitimately one scene, so this warns
+ * rather than triggering anything.
+ * @param {ReturnType<typeof parseScenecutLine>} info
+ * @param {number} [minChunks=10]
+ */
+function isDegenerateSceneDetection(info, minChunks = 10) {
+  return Boolean(info) && info.detected === 1 && info.totalChunks >= minChunks;
+}
+
+/**
  * crfSearchEncode gate. av1an `--sc-only` serializes its scenes JSON only after
  * extra-splits, so a starved/panicked scene-detection leaves it missing or with
  * empty scene lists. Non-empty scenes => detection succeeded.
@@ -113,4 +207,9 @@ module.exports = {
   sceneDetectProducedScenes,
   isSourceDecodeErrorLine,
   shouldRetryWithMezzanine,
+  parseVspipeFrameCount,
+  buildProbeWindows,
+  buildProbeArgs,
+  parseScenecutLine,
+  isDegenerateSceneDetection,
 };
