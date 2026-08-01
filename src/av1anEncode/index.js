@@ -91,6 +91,8 @@ const plugin = async (args) => {
   const { createAv1anTracker } = require('../shared/progressTracker');
   const {
     buildSourceVpy, av1anReachedChunking, isSourceDecodeErrorLine, shouldRetryWithMezzanine,
+    parseVspipeFrameCount, buildProbeWindows, buildProbeArgs,
+    parseScenecutLine, isDegenerateSceneDetection,
   } = require('../shared/vsSource');
   const { buildMezzanineArgs } = require('../shared/mezzanine');
 
@@ -178,6 +180,10 @@ const plugin = async (args) => {
   // is re-pointed at a lossless mezzanine (see the retry below).
   let sourcePath = inputPath;
 
+  // Frame count as lsmas reports it for the current sourcePath (from vspipe
+  // --info). Drives the pre-flight probe window.
+  let sourceFrameCount = 0;
+
   // Write source.vpy for the current sourcePath and pre-build its lsmas frame
   // index so av1an's parallel workers don't race to build it.
   const prepareSource = async () => {
@@ -185,8 +191,51 @@ const plugin = async (args) => {
     fs.writeFileSync(vpyScript, buildSourceVpy({ inputPath: sourcePath, cachePath: lwiCache, downscaleLines }));
     dbg(`[vs] .vpy written (lsmas${doDownscale ? `, Lanczos3 -> ${downscaleRes}` : ', passthrough'})`);
     updateWorker({ status: 'Indexing' });
-    const idxExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], { cwd: vsDir, silent: true });
-    dbg(idxExit === 0 ? '[vs] lsmas index ready' : '[vs] WARNING: lsmas index non-zero -- workers will retry');
+    let infoText = '';
+    const idxExit = await pm.spawnAsync(BIN.vspipe, ['--info', vpyScript], {
+      cwd: vsDir,
+      silent: true,
+      onLine: (l) => { infoText += `${l}\n`; },
+    });
+    sourceFrameCount = parseVspipeFrameCount(infoText);
+    dbg(idxExit === 0 ? `[vs] lsmas index ready (${sourceFrameCount || '?'} frames)`
+      : '[vs] WARNING: lsmas index non-zero -- workers will retry');
+  };
+
+  // Pre-flight: make lsmas actually DELIVER frames before committing to an
+  // encode. Indexing alone is not enough -- the VC-1 remux indexed fine and only
+  // failed when a worker seeked into the tail, which cost 3 doomed chunk retries
+  // (~13 min) to discover. Decoding a few hundred frames takes seconds.
+  //
+  // Fail-safe by design: only an explicit lsmas frame-delivery error counts as a
+  // failure. A probe that breaks for any other reason (vspipe usage, missing
+  // binary) is logged and ignored, leaving the post-encode retry as the backstop
+  // -- never the other way round, since a false positive would cost a full
+  // lossless transcode of the source.
+  const probeSource = async () => {
+    const windows = buildProbeWindows(sourceFrameCount);
+    if (!windows.length) {
+      dbg('[probe] frame count unknown -- skipping pre-flight probe');
+      return null;
+    }
+    updateWorker({ status: 'Verifying source' });
+    for (const w of windows) {
+      let sawError = false;
+      const exit = await pm.spawnAsync(
+        BIN.vspipe,
+        buildProbeArgs({ vpyPath: vpyScript, start: w.start, end: w.end }),
+        { cwd: vsDir, silent: true, onLine: (l) => { if (isSourceDecodeErrorLine(l)) sawError = true; } },
+      );
+      if (sawError) {
+        dbg(`[probe] lsmas failed to deliver frames ${w.start}-${w.end} (exit ${exit})`);
+        return w;
+      }
+      if (exit !== 0) {
+        dbg(`[probe] vspipe exit ${exit} on frames ${w.start}-${w.end} with no lsmas error -- ignoring`);
+      }
+    }
+    dbg(`[probe] lsmas delivered all ${windows.length} probe window(s)`);
+    return null;
   };
 
   const av1anArgs = [
@@ -249,7 +298,19 @@ const plugin = async (args) => {
     tracker.start();
     const exit = await pm.spawnAsync(BIN.av1an, av1anArgs, {
       cwd: vsDir,
-      onLine: (l) => { if (isSourceDecodeErrorLine(l)) sawSourceDecodeError = true; },
+      onLine: (l) => {
+        if (isSourceDecodeErrorLine(l)) sawSourceDecodeError = true;
+        // Zero detected cuts across a feature-length file means the scenecut
+        // analyzer got nothing usable, so chunking fell back to fixed
+        // extra_splits intervals. The encode still runs, but the operator should
+        // know the chunk boundaries are arbitrary.
+        const sc = parseScenecutLine(l);
+        if (isDegenerateSceneDetection(sc)) {
+          jobLog(`WARNING: scene detection found no cuts at all (1 scene over ${sc.totalChunks}`
+            + ` chunks of ${sc.extraSplitFrames} frames) -- chunk boundaries are arbitrary,`
+            + ' which usually means the source did not decode cleanly.');
+        }
+      },
       filter: (l) => AV1AN_KEEP.test(l),
       onSpawn: (pid) => pm.startPpidWatcher(pid),
     });
@@ -281,7 +342,48 @@ const plugin = async (args) => {
     filter: (l) => /error|fatal|invalid|no such|unable/i.test(l),
   });
 
+  let mezzanineBuilt = false;
+
+  // Transcode to the lossless mezzanine and re-point lsmas at it. Shared by the
+  // pre-flight probe and the post-encode backstop.
+  const switchToMezzanine = async () => {
+    updateWorker({ status: 'Transcoding source (lossless)' });
+    const mezzExit = await runMezzanine();
+    if (mezzExit !== 0 || !fs.existsSync(mezzPath) || fs.statSync(mezzPath).size === 0) {
+      pm.cleanup();
+      try { fs.rmSync(mezzPath, { force: true }); } catch (_) {}
+      throw new Error('mezzanine transcode failed -- source could not be decoded for encoding');
+    }
+    mezzanineBuilt = true;
+    jobLog(`[av1an] mezzanine ready (${humanSize(fs.statSync(mezzPath).size)}); encoding via lsmas`);
+    // Anything already encoded was keyed to the original's frame boundaries,
+    // which the mezzanine need not match -- start from a clean temp dir.
+    try { fs.rmSync(av1anTemp, { recursive: true, force: true }); } catch (_) {}
+    fs.mkdirSync(av1anTemp, { recursive: true });
+    sourcePath = mezzPath;
+    await prepareSource();
+  };
+
   await prepareSource();
+
+  // Cheap up-front check: if lsmas cannot hand over frames now, it will not
+  // manage it mid-encode either. Going straight to the mezzanine skips the
+  // doomed first attempt entirely (~13 min on the VC-1 remux).
+  const badWindow = await probeSource();
+  if (badWindow) {
+    jobLog('='.repeat(64));
+    jobLog(`[probe] lsmas cannot decode frames ${badWindow.start}-${badWindow.end} of ${sourceFrameCount}`
+      + ' -- source is not reliably decodable (e.g. VC-1).');
+    jobLog('[probe] building a lossless mezzanine (ffmpeg FFV1) up front, skipping the doomed encode...');
+    jobLog('='.repeat(64));
+    await switchToMezzanine();
+    const stillBad = await probeSource();
+    if (stillBad) {
+      jobLog(`[probe] WARNING: lsmas still cannot decode frames ${stillBad.start}-${stillBad.end}`
+        + ' of the mezzanine -- attempting the encode anyway');
+    }
+  }
+
   let av1anExit = await runAv1anAttempt();
 
   // Source-decode failure. Two signatures, either of which warrants the retry:
@@ -294,7 +396,8 @@ const plugin = async (args) => {
   // Re-wrap the video losslessly to an FFV1 mezzanine that lsmas can decode and
   // seek cheaply, then retry once. (Direct BestSource decoded VC-1 but its
   // per-chunk seeking made a full-length encode take 200h+, so it was removed.)
-  if (shouldRetryWithMezzanine({
+  // Backstop for a source the probe's sampled windows did not happen to cover.
+  if (!mezzanineBuilt && shouldRetryWithMezzanine({
     exitCode: av1anExit,
     sizeExceeded,
     sawSourceDecodeError,
@@ -306,18 +409,7 @@ const plugin = async (args) => {
       : '[av1an] lsmas failed before chunking -- likely an undecodable source (e.g. VC-1).');
     jobLog('[av1an] building a lossless mezzanine (ffmpeg FFV1) and retrying via lsmas...');
     jobLog('='.repeat(64));
-    updateWorker({ status: 'Transcoding source (lossless)' });
-    const mezzExit = await runMezzanine();
-    if (mezzExit !== 0 || !fs.existsSync(mezzPath) || fs.statSync(mezzPath).size === 0) {
-      pm.cleanup();
-      try { fs.rmSync(mezzPath, { force: true }); } catch (_) {}
-      throw new Error('mezzanine transcode failed -- source could not be decoded for encoding');
-    }
-    jobLog(`[av1an] mezzanine ready (${humanSize(fs.statSync(mezzPath).size)}); re-running encode via lsmas`);
-    try { fs.rmSync(av1anTemp, { recursive: true, force: true }); } catch (_) {}
-    fs.mkdirSync(av1anTemp, { recursive: true });
-    sourcePath = mezzPath;
-    await prepareSource();
+    await switchToMezzanine();
     av1anExit = await runAv1anAttempt();
   }
 
