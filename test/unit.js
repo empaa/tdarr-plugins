@@ -227,6 +227,60 @@ async function sceneDetectProducedScenesGate() {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
+// A partially-decodable source (the 2026-08-01 VC-1 job) lets lsmas index and
+// scene-detect the file, then fails to deliver a frame once a chunk worker seeks
+// into it. Only the lsmas error itself identifies that as a source failure.
+async function sourceDecodeErrorLineDetection() {
+  const { isSourceDecodeErrorLine } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  // Verbatim from the failed production job (chunk 913 of 914).
+  assert(isSourceDecodeErrorLine(
+    'Error: Failed to retrieve frame 196 with error: lsmas: failed to output a video frame.') === true,
+    'must detect the lsmas frame-delivery failure from the failed VC-1 job');
+  assert(isSourceDecodeErrorLine('lsmas: failed to output a video frame') === true,
+    'must detect the bare lsmas message');
+  // Downstream failures must NOT trigger a full lossless pre-pass of the source.
+  assert(isSourceDecodeErrorLine('WARN encode_chunk: Encoder failed (on chunk 913):') === false,
+    'generic chunk failure is not a source-decode error');
+  assert(isSourceDecodeErrorLine('encoder crashed: exit status: 0') === false,
+    'encoder crash is not a source-decode error');
+  assert(isSourceDecodeErrorLine('ERROR [chunk 913] encoder failed 3 times, shutting down worker') === false,
+    'encoder retry exhaustion is not a source-decode error');
+  assert(isSourceDecodeErrorLine(
+    'INFO encode_file: scenecut: found 1 scene(s) [with extra_splits (240 frames): 914 scene(s)]') === false,
+    'scenecut progress is not a source-decode error');
+  assert(isSourceDecodeErrorLine('') === false, 'empty line => false');
+  assert(isSourceDecodeErrorLine(undefined) === false, 'undefined => false');
+}
+
+// The regression itself: the v2.3.0 gate only asked "did av1an reach chunking?",
+// so a mid-encode lsmas failure (chunks.json already written) skipped the retry.
+async function mezzanineRetryDecision() {
+  const { shouldRetryWithMezzanine } = require(path.join(SRC, 'shared', 'vsSource.js'));
+
+  // The 2026-08-01 VC-1 failure: reached chunking, then lsmas failed mid-encode.
+  assert(shouldRetryWithMezzanine({
+    exitCode: 1, sizeExceeded: false, sawSourceDecodeError: true, reachedChunking: true,
+  }) === true, 'mid-encode lsmas failure must retry even though chunking was reached');
+
+  // The v2.2.0/2.3.0 case: starved scene detection, died before chunking.
+  assert(shouldRetryWithMezzanine({
+    exitCode: 1, sizeExceeded: false, sawSourceDecodeError: false, reachedChunking: false,
+  }) === true, 'failure before chunking must still retry');
+
+  // Downstream failure past chunking with no source error => do NOT retry.
+  assert(shouldRetryWithMezzanine({
+    exitCode: 1, sizeExceeded: false, sawSourceDecodeError: false, reachedChunking: true,
+  }) === false, 'downstream failure must not trigger a pointless lossless pre-pass');
+
+  // Success and the size-limit abort are never source failures.
+  assert(shouldRetryWithMezzanine({
+    exitCode: 0, sizeExceeded: false, sawSourceDecodeError: true, reachedChunking: true,
+  }) === false, 'a successful encode must never retry (transient error recovered)');
+  assert(shouldRetryWithMezzanine({
+    exitCode: 1, sizeExceeded: true, sawSourceDecodeError: true, reachedChunking: false,
+  }) === false, 'size-limit abort must not be mistaken for a source failure');
+}
+
 // ---- mezzanine: ffmpeg lossless pre-pass (fallback for lsmas-undecodable sources) ----
 
 async function mezzanineLosslessVideoOnlyIntra() {
@@ -259,6 +313,8 @@ const TESTS = [
   ['vsSource: downscale lines after source', vsSourceDownscaleAfterSource],
   ['vsSource: av1anReachedChunking gate (chunks.json)', av1anReachedChunkingGate],
   ['vsSource: sceneDetectProducedScenes gate', sceneDetectProducedScenesGate],
+  ['vsSource: detects lsmas frame-delivery failure', sourceDecodeErrorLineDetection],
+  ['vsSource: mezzanine retry decision (mid-encode + pre-chunking)', mezzanineRetryDecision],
   ['mezzanine: lossless ffv1, video-only, intra', mezzanineLosslessVideoOnlyIntra],
   ['mezzanine: input/output arg order', mezzanineInputBeforeOutput],
   ['sanitizeFile: returns sanitized file as working file', sanitizeReturnsSanitizedFileAsWorkingFile],
