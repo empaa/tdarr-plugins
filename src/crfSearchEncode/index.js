@@ -101,7 +101,9 @@ const plugin = async (args) => {
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs, buildAbAv1DownscaleArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
-  const { buildSourceVpy, sceneDetectProducedScenes } = require('../shared/vsSource');
+  const {
+    buildSourceVpy, sceneDetectProducedScenes, isSourceDecodeErrorLine, shouldRetryWithMezzanine,
+  } = require('../shared/vsSource');
   const { buildMezzanineArgs } = require('../shared/mezzanine');
 
   const inputs = args.inputs || {};
@@ -217,11 +219,47 @@ const plugin = async (args) => {
     '--verbose',
   ];
 
+  // Set when lsmas reports a frame-delivery failure during an av1an run. lsmas
+  // can fail at any stage -- including mid-encode, long after it has indexed and
+  // scene-detected the file -- so this is the reliable source-failure signal.
+  let sawSourceDecodeError = false;
+  const watchSourceDecode = (l) => { if (isSourceDecodeErrorLine(l)) sawSourceDecodeError = true; };
+
+  const runSceneDetect = () => {
+    sawSourceDecodeError = false;
+    return pm.spawnAsync(BIN.av1an, scOnlyArgs, {
+      cwd: vsDir,
+      onLine: watchSourceDecode,
+      filter: (l) => /scenecut|error|warn|lsmas|split scores/i.test(l),
+    });
+  };
+
+  let mezzanineBuilt = false;
+
+  // Build the lossless mezzanine, re-point lsmas at it, and re-derive scenes.json
+  // from it. The scenes MUST be regenerated: the mezzanine holds exactly the
+  // frames ffmpeg could decode, which need not match what lsmas reported for the
+  // original, so the old scene boundaries may not be valid.
+  // @returns {Promise<number>} scene-detection exit code on the mezzanine
+  const buildMezzanineAndRedetect = async (tag) => {
+    updateWorker({ status: 'Transcoding source (lossless)' });
+    const mezzExit = await runMezzanine();
+    if (mezzExit !== 0 || !fs.existsSync(mezzPath) || fs.statSync(mezzPath).size === 0) {
+      pm.cleanup();
+      try { fs.rmSync(mezzPath, { force: true }); } catch (_) {}
+      throw new Error('mezzanine transcode failed -- source could not be decoded for encoding');
+    }
+    mezzanineBuilt = true;
+    jobLog(`[${tag}] mezzanine ready (${humanSize(fs.statSync(mezzPath).size)}); re-running scene detection via lsmas`);
+    try { fs.rmSync(scenesPath, { force: true }); } catch (_) {}
+    sourcePath = mezzPath;
+    await prepareSource();
+    updateWorker({ status: 'Scene Detection' });
+    return runSceneDetect();
+  };
+
   jobLog(`[scene-detect] starting in background: av1an ${scOnlyArgs.join(' ')}`);
-  const sceneDetectPromise = pm.spawnAsync(BIN.av1an, scOnlyArgs, {
-    cwd: vsDir,
-    filter: (l) => /scenecut|error|warn/i.test(l),
-  });
+  const sceneDetectPromise = runSceneDetect();
 
   // ── Phase 1: CRF Search ──────────────────────────────────────────────
   jobLog('='.repeat(64));
@@ -356,29 +394,14 @@ const plugin = async (args) => {
   }
   let sceneDetectExit = await sceneDetectPromise;
 
-  // If lsmas scene detection failed to produce scenes (e.g. it cannot decode
-  // this VC-1 stream), re-wrap the video losslessly to an FFV1 mezzanine that
-  // lsmas can decode, then retry. Phase 2 reuses the same vpyScript (now pointing
-  // at the mezzanine), keeping the job consistent. (ab-av1 phase 1 already ran on
-  // the original via ffmpeg, so its found CRF stays valid for the lossless copy.)
-  if (sceneDetectExit !== 0 && !sceneDetectProducedScenes(scenesPath)) {
-    jobLog('[scene-detect] lsmas failed before producing scenes -- building a lossless mezzanine (ffmpeg FFV1)...');
-    updateWorker({ status: 'Transcoding source (lossless)' });
-    const mezzExit = await runMezzanine();
-    if (mezzExit !== 0 || !fs.existsSync(mezzPath) || fs.statSync(mezzPath).size === 0) {
-      pm.cleanup();
-      try { fs.rmSync(mezzPath, { force: true }); } catch (_) {}
-      throw new Error('mezzanine transcode failed -- source could not be decoded for encoding');
-    }
-    jobLog(`[scene-detect] mezzanine ready (${humanSize(fs.statSync(mezzPath).size)}); re-running scene detection via lsmas`);
-    try { fs.rmSync(scenesPath, { force: true }); } catch (_) {}
-    sourcePath = mezzPath;
-    await prepareSource();
-    updateWorker({ status: 'Scene Detection' });
-    sceneDetectExit = await pm.spawnAsync(BIN.av1an, scOnlyArgs, {
-      cwd: vsDir,
-      filter: (l) => /scenecut|error|warn|lsmas|split scores/i.test(l),
-    });
+  // If lsmas could not scene-detect this source (e.g. it cannot decode this VC-1
+  // stream), re-wrap the video losslessly to an FFV1 mezzanine that lsmas can
+  // decode, then retry. Phase 2 reuses the same vpyScript (now pointing at the
+  // mezzanine), keeping the job consistent. (ab-av1 phase 1 already ran on the
+  // original via ffmpeg, so its found CRF stays valid for the lossless copy.)
+  if (sceneDetectExit !== 0 && (sawSourceDecodeError || !sceneDetectProducedScenes(scenesPath))) {
+    jobLog('[scene-detect] lsmas could not decode this source -- building a lossless mezzanine (ffmpeg FFV1)...');
+    sceneDetectExit = await buildMezzanineAndRedetect('scene-detect');
   }
 
   if (sceneDetectExit !== 0) {
@@ -390,8 +413,6 @@ const plugin = async (args) => {
   jobLog(`[scene-detect] scenes written to ${scenesPath}`);
 
   // ── Phase 2: av1an Chunked Encode ─────────────────────────────────────
-  updateWorker({ percentage: 0, status: 'Encoding' });
-
   const audioSizeGb = await probeAudioSize(inputPath, args.workDir, dbg, dbg);
 
   // Build encoder flags for av1an (fixed CRF, no target-quality)
@@ -430,32 +451,65 @@ const plugin = async (args) => {
     if (tracker) tracker.stop();
   });
 
-  updateWorker({ status: 'Encoding' });
+  // Keep lsmas decode errors visible next to av1an's own failures -- they are the
+  // reason a run gets retried on a lossless mezzanine.
+  const AV1AN_KEEP = /scenecut|error|warn|panic|crash|failed|lsmas|Failed to retrieve|failed to output/i;
 
-  tracker = createAv1anTracker({
-    workBase,
-    scenesFile: scenesPath,
-    audioSizeGb,
-    sourceSizeGb,
-    maxEncodedPercent,
-    updateWorker,
-    jobLog,
-    dbg,
-    onSizeExceeded: () => {
-      sizeExceeded = true;
-      pm.killAll();
-    },
-  });
-  tracker.start();
+  const runPhase2Attempt = async () => {
+    updateWorker({ percentage: 0, status: 'Encoding' });
+    sawSourceDecodeError = false;
+    tracker = createAv1anTracker({
+      workBase,
+      scenesFile: scenesPath,
+      audioSizeGb,
+      sourceSizeGb,
+      maxEncodedPercent,
+      updateWorker,
+      jobLog,
+      dbg,
+      onSizeExceeded: () => {
+        sizeExceeded = true;
+        pm.killAll();
+      },
+    });
+    tracker.start();
+    const exit = await pm.spawnAsync(BIN.av1an, av1anArgs, {
+      cwd: vsDir,
+      onLine: watchSourceDecode,
+      filter: (l) => AV1AN_KEEP.test(l),
+      onSpawn: (pid) => pm.startPpidWatcher(pid),
+    });
+    tracker.stop();
+    return exit;
+  };
 
-  const AV1AN_KEEP = /scenecut|error|warn|panic|crash|failed/i;
-  const av1anExit = await pm.spawnAsync(BIN.av1an, av1anArgs, {
-    cwd: vsDir,
-    filter: (l) => AV1AN_KEEP.test(l),
-    onSpawn: (pid) => pm.startPpidWatcher(pid),
-  });
+  let av1anExit = await runPhase2Attempt();
 
-  tracker.stop();
+  // Phase 2 can hit an lsmas frame-delivery failure that scene detection did not:
+  // a chunk worker seeks into a region lsmas cannot decode. The 2026-08-01 VC-1
+  // remux died exactly this way -- scene-detected into 914 chunks, then failed on
+  // chunk 913 frame 196. Scene detection already proved lsmas can index this
+  // source, so pass reachedChunking: true -- only the explicit lsmas error (never
+  // a mere early exit) is grounds for the expensive lossless retry here.
+  if (!mezzanineBuilt && shouldRetryWithMezzanine({
+    exitCode: av1anExit, sizeExceeded, sawSourceDecodeError, reachedChunking: true,
+  })) {
+    jobLog('='.repeat(64));
+    jobLog('[phase 2] lsmas failed to deliver a frame -- source is not reliably decodable (e.g. VC-1).');
+    jobLog('[phase 2] building a lossless mezzanine (ffmpeg FFV1) and re-encoding via lsmas...');
+    jobLog('='.repeat(64));
+    const scExit = await buildMezzanineAndRedetect('phase 2');
+    if (scExit !== 0) {
+      pm.cleanup();
+      try { fs.rmSync(mezzPath, { force: true }); } catch (_) {}
+      throw new Error(`Scene detection on the lossless mezzanine failed (exit ${scExit})`);
+    }
+    // Chunks already encoded are keyed to the original's frame boundaries, which
+    // the re-detected scenes need not match -- restart from a clean temp dir.
+    try { fs.rmSync(av1anTemp, { recursive: true, force: true }); } catch (_) {}
+    fs.mkdirSync(av1anTemp, { recursive: true });
+    av1anExit = await runPhase2Attempt();
+  }
 
   let encodeOk = false;
   if (sizeExceeded) {

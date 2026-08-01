@@ -89,7 +89,9 @@ const plugin = async (args) => {
   const { shouldDownscale, buildVsDownscaleLines, buildAv1anVmafResArgs } = require('../shared/downscale');
   const { probeAudioSize, mergeAudioVideo } = require('../shared/audioMerge');
   const { createAv1anTracker } = require('../shared/progressTracker');
-  const { buildSourceVpy, av1anReachedChunking } = require('../shared/vsSource');
+  const {
+    buildSourceVpy, av1anReachedChunking, isSourceDecodeErrorLine, shouldRetryWithMezzanine,
+  } = require('../shared/vsSource');
   const { buildMezzanineArgs } = require('../shared/mezzanine');
 
   const inputs = args.inputs || {};
@@ -215,6 +217,10 @@ const plugin = async (args) => {
 
   let tracker;
   let sizeExceeded = false;
+  // Set when lsmas reports a frame-delivery failure during an attempt. lsmas can
+  // fail at any point, not just before chunking, so this -- not chunks.json --
+  // is the reliable source-failure signal once an encode is under way.
+  let sawSourceDecodeError = false;
 
   pm.installCancelHandler(() => {
     if (tracker) tracker.stop();
@@ -226,6 +232,7 @@ const plugin = async (args) => {
 
   const runAv1anAttempt = async () => {
     updateWorker({ status: 'Scene Detection' });
+    sawSourceDecodeError = false;
     tracker = createAv1anTracker({
       workBase,
       audioSizeGb,
@@ -242,6 +249,7 @@ const plugin = async (args) => {
     tracker.start();
     const exit = await pm.spawnAsync(BIN.av1an, av1anArgs, {
       cwd: vsDir,
+      onLine: (l) => { if (isSourceDecodeErrorLine(l)) sawSourceDecodeError = true; },
       filter: (l) => AV1AN_KEEP.test(l),
       onSpawn: (pid) => pm.startPpidWatcher(pid),
     });
@@ -276,15 +284,26 @@ const plugin = async (args) => {
   await prepareSource();
   let av1anExit = await runAv1anAttempt();
 
-  // Source-decode failure signature: non-zero exit with no chunks.json means
-  // av1an died at/before scene-splitting (e.g. lsmas cannot decode this VC-1
-  // stream, starving scene detection -> split/mod.rs panic). Re-wrap the video
-  // losslessly to an FFV1 mezzanine that lsmas can decode and seek cheaply, then
-  // retry once. (Direct BestSource decoded VC-1 but its per-chunk seeking made a
-  // full-length encode take 200h+, so it was removed.)
-  if (!sizeExceeded && av1anExit !== 0 && !av1anReachedChunking(av1anTemp)) {
+  // Source-decode failure. Two signatures, either of which warrants the retry:
+  //   * lsmas reported a frame-delivery failure. This can happen mid-encode on a
+  //     partially decodable stream -- the 2026-08-01 VC-1 remux indexed and
+  //     scene-detected into 914 chunks, then died on chunk 913 frame 196 with
+  //     "lsmas: failed to output a video frame".
+  //   * no chunks.json: av1an died at/before scene-splitting, i.e. lsmas starved
+  //     scene detection -> split/mod.rs panic.
+  // Re-wrap the video losslessly to an FFV1 mezzanine that lsmas can decode and
+  // seek cheaply, then retry once. (Direct BestSource decoded VC-1 but its
+  // per-chunk seeking made a full-length encode take 200h+, so it was removed.)
+  if (shouldRetryWithMezzanine({
+    exitCode: av1anExit,
+    sizeExceeded,
+    sawSourceDecodeError,
+    reachedChunking: av1anReachedChunking(av1anTemp),
+  })) {
     jobLog('='.repeat(64));
-    jobLog('[av1an] lsmas failed before chunking -- likely an undecodable source (e.g. VC-1).');
+    jobLog(sawSourceDecodeError
+      ? '[av1an] lsmas failed to deliver a frame -- source is not reliably decodable (e.g. VC-1).'
+      : '[av1an] lsmas failed before chunking -- likely an undecodable source (e.g. VC-1).');
     jobLog('[av1an] building a lossless mezzanine (ffmpeg FFV1) and retrying via lsmas...');
     jobLog('='.repeat(64));
     updateWorker({ status: 'Transcoding source (lossless)' });
