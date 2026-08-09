@@ -13,19 +13,51 @@ const path = require('path');
 const escPy = (s) => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 /**
+ * Frames of decoder run-up forced before every delivered frame.
+ *
+ * lsmas does not prime the decoder's reorder buffer after a seek: the first
+ * outputs of a cold seek come back as featureless mid-grey, with no error. av1an
+ * gives every chunk worker exactly one cold seek (`vspipe -s START -e END`), so
+ * the blanks land on chunk boundaries -- the grey frames reported on 2026-08-09.
+ *
+ * Measured on The Conjuring's 998 chunk starts, probed in randomised (cold) order:
+ *   run-up 0 -> 21 grey   run-up 4 -> 1 grey   run-up 8+ -> 0 grey
+ * 8 is the first depth that reaches zero; the extra frames are cache hits during
+ * sequential decode, so the cost is paid only at a chunk start.
+ */
+const RUNUP_FRAMES = 8;
+
+/**
  * Build the full lsmas .vpy text.
  * @param {object} o
  * @param {string} o.inputPath      source media path (original or mezzanine)
  * @param {string} o.cachePath      lsmas .lwi cache path
  * @param {string[]} [o.downscaleLines]  VapourSynth lines that transform `src`
+ * @param {number} [o.runupFrames]  decoder run-up depth; 0 disables the wrapper
  * @returns {string} .vpy text (trailing newline)
  */
-function buildSourceVpy({ inputPath, cachePath, downscaleLines }) {
+function buildSourceVpy({ inputPath, cachePath, downscaleLines, runupFrames = RUNUP_FRAMES }) {
   const lines = ['import vapoursynth as vs', 'core = vs.core'];
   const src = escPy(inputPath);
   const cache = escPy(cachePath);
+  const runup = Math.max(0, Math.floor(Number(runupFrames) || 0));
 
   lines.push(`src = core.lsmas.LWLibavSource(source='${src}', cachefile='${cache}')`);
+
+  // Make frame n depend on n-1..n-RUNUP so the decoder is primed before the frame
+  // is handed over. The run-up clips are cropped to a corner: the decode is the
+  // point, and holding 16x16 instead of full frames keeps this off the 4K memory
+  // ceiling. Output is bit-identical -- ModifyFrame returns source frame n itself.
+  if (runup > 0) {
+    lines.push(
+      '# lsmas cold-seek run-up -- see RUNUP_FRAMES in src/shared/vsSource.js',
+      `_ru_n, _ru_w, _ru_h = src.num_frames, min(16, src.width), min(16, src.height)`,
+      '_runup = [core.std.Crop(core.std.DuplicateFrames(src, [0] * j)[:_ru_n],'
+        + ' right=src.width - _ru_w, bottom=src.height - _ru_h)'
+        + ` for j in range(1, ${runup + 1})]`,
+      'src = core.std.ModifyFrame(src, [src] + _runup, lambda n, f: f[0].copy())',
+    );
+  }
 
   if (Array.isArray(downscaleLines)) {
     for (const l of downscaleLines) lines.push(l);
@@ -202,6 +234,7 @@ function sceneDetectProducedScenes(scenesJsonPath) {
 }
 
 module.exports = {
+  RUNUP_FRAMES,
   buildSourceVpy,
   av1anReachedChunking,
   sceneDetectProducedScenes,
