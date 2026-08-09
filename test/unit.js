@@ -204,6 +204,49 @@ async function vsSourceDownscaleAfterSource() {
     `ordering wrong: src=${iSrc} down=${iDown} out=${iOut}\n${vpy}`);
 }
 
+async function vsSourceRunupWrapsSource() {
+  const { buildSourceVpy, RUNUP_FRAMES } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const vpy = buildSourceVpy({ inputPath: '/m.mkv', cachePath: '/tmp/s.lwi' });
+  assert(vpy.includes('core.std.ModifyFrame(src, [src] + _runup'),
+    `run-up wrapper missing -- lsmas returns blank frames on cold seeks without it:\n${vpy}`);
+  assert(vpy.includes(`for j in range(1, ${RUNUP_FRAMES + 1})`),
+    `run-up depth must be RUNUP_FRAMES (${RUNUP_FRAMES}):\n${vpy}`);
+  // The wrapper must sit on the decode, i.e. between the source and anything else.
+  const iSrc = vpy.indexOf('core.lsmas.LWLibavSource');
+  const iRunup = vpy.indexOf('core.std.ModifyFrame');
+  const iOut = vpy.indexOf('set_output');
+  assert(iSrc >= 0 && iRunup > iSrc && iOut > iRunup,
+    `ordering wrong: src=${iSrc} runup=${iRunup} out=${iOut}\n${vpy}`);
+}
+
+async function vsSourceRunupBeforeDownscale() {
+  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const { buildVsDownscaleLines } = require(path.join(SRC, 'shared', 'downscale.js'));
+  const vpy = buildSourceVpy({
+    inputPath: '/m.mkv', cachePath: '/tmp/s.lwi',
+    downscaleLines: buildVsDownscaleLines('1080p'),
+  });
+  // Run-up primes the decoder, so it belongs on the decoded source -- not on the
+  // resized clip, where it would warm nothing.
+  assert(vpy.indexOf('core.std.ModifyFrame') < vpy.indexOf('core.resize.Lanczos'),
+    `run-up must precede downscale:\n${vpy}`);
+}
+
+async function vsSourceRunupCroppedForMemory() {
+  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const vpy = buildSourceVpy({ inputPath: '/m.mkv', cachePath: '/tmp/s.lwi' });
+  // Only the decode side-effect is wanted; retaining full run-up frames would add
+  // RUNUP_FRAMES x frame-size per in-flight request on 4K sources.
+  assert(vpy.includes('core.std.Crop('), `run-up clips must be cropped:\n${vpy}`);
+}
+
+async function vsSourceRunupDisablable() {
+  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const vpy = buildSourceVpy({ inputPath: '/m.mkv', cachePath: '/tmp/s.lwi', runupFrames: 0 });
+  assert(!vpy.includes('ModifyFrame'), `runupFrames:0 must emit no wrapper:\n${vpy}`);
+  assert(/src\.set_output\(\)\s*$/.test(vpy), `must still end with set_output():\n${vpy}`);
+}
+
 async function av1anReachedChunkingGate() {
   const { av1anReachedChunking } = require(path.join(SRC, 'shared', 'vsSource.js'));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-gate-'));
@@ -400,6 +443,10 @@ const TESTS = [
   ['vsSource: lsmas line', vsSourceLsmasLine],
   ['vsSource: escapes quotes/backslashes in path', vsSourceEscapesPath],
   ['vsSource: downscale lines after source', vsSourceDownscaleAfterSource],
+  ['vsSource: cold-seek run-up wraps source', vsSourceRunupWrapsSource],
+  ['vsSource: run-up precedes downscale', vsSourceRunupBeforeDownscale],
+  ['vsSource: run-up clips cropped (4K memory)', vsSourceRunupCroppedForMemory],
+  ['vsSource: run-up disablable', vsSourceRunupDisablable],
   ['vsSource: av1anReachedChunking gate (chunks.json)', av1anReachedChunkingGate],
   ['vsSource: sceneDetectProducedScenes gate', sceneDetectProducedScenesGate],
   ['vsSource: detects lsmas frame-delivery failure', sourceDecodeErrorLineDetection],
