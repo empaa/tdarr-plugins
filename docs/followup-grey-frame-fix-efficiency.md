@@ -173,7 +173,92 @@ lsmas serializes on one decoder, so VS thread count is irrelevant (1 and 32 run 
 and 3.4× slower than `ModifyFrame`. The mechanism is not decode ordering; it is that lsmas resolves
 a burst of requests around *n* with a single seek and one forward decode pass.
 
-## 9. Operational notes
+## 9. §3 RESOLVED (2026-08-10): the two encodes share almost nothing
+
+Job reports recovered over the API (`search-job-reports` → `read-job-file`) settle it. The 4.03 GB
+file was produced on **2026-01-10** — job `ZmtCfg1hIT`, footprint `7vR0kW0Sg`, Tdarr 2.58.02,
+**Node[RTX3060]** — with `"newSize":3.7508600605651736` GiB = 4,027,455,323 B, an exact match.
+**This repo's first commit is 2026-04-02.** The pre-fix encode predates these FlowPlugins entirely;
+no version of them produced it.
+
+The av1an invocations, verbatim from the two reports:
+
+**Pre-fix (2026-01-10, RTX3060, predecessor plugin stack, no VapourSynth — av1an read the MKV
+directly):**
+
+```
+av1an --log-file ./../temp/tdarr-workDir2-ZmtCfg1hIT/av1an/log.log -c mkvmerge -e aom
+  -v "--end-usage=q --cq-level=22 --cpu-used=4 --threads=16 --enable-fwd-kf=1 --enable-qm=1
+      --bit-depth=10 --lag-in-frames=48 --tile-columns=1"
+  --sc-downscale-height 720 --scaler lanczos --target-quality 95.5 --probes 5 --qp-range 1-50
+  --chunk-order sequential --probe-res 1280x720 --vmaf-res 1280x720
+```
+
+**Post-fix (2026-08-09, RYZEN9950X, plugins v2.5.0, source.vpy):**
+
+```
+av1an -i .../av1an-work/vs/source.vpy -c mkvmerge -e aom
+  --sc-downscale-height 540 --scaler lanczos --qp-range 10-50 --target-quality 95
+  --vmaf-path /usr/local/share/vmaf/vmaf_v0.6.1.json --probes 6 --chunk-order long-to-short
+  -v "--end-usage=q --cpu-used=4 --tune=ssim --enable-fwd-kf=0 --disable-kf --kf-max-dist=9999
+      --enable-qm=1 --bit-depth=10 --lag-in-frames=48 --tile-columns=0 --tile-rows=0
+      --sb-size=dynamic --deltaq-mode=0 --aq-mode=0 --arnr-strength=1 --arnr-maxframes=4
+      --enable-chroma-deltaq=1 --enable-dnl-denoising=0 --disable-trellis-quant=0
+      --quant-b-adapt=1 --enable-keyframe-filtering=1"
+```
+
+**The dominant size lever: VMAF measurement resolution.** The January encode probed *and scored*
+VMAF at **1280x720** (`--probe-res` + `--vmaf-res`); downscaled VMAF is far more lenient, so
+target 95.5@720p converges at a much lower bitrate than target 95 at native 1080p. On top of that:
+different source file (re-pulled remux is a different mux: 22.148 vs 22.180 GiB), different
+keyframe policy (`--enable-fwd-kf=1` vs `--disable-kf --kf-max-dist=9999`), `--tune=ssim`,
+different qp-range/probes/scene-detect settings, and a different node (so the *time* comparison
+between these two encodes is also apples-to-oranges).
+
+**Conclusion: the +30.6% is settings/source drift across seven months, not the run-up wrapper** —
+consistent with the controlled A/B in §3 (+0.15% size). The keyframe delta (998 → 1020) likewise
+falls out of the different scene-detect settings and source. Remaining open question: wrapper
+*time* cost under target-quality on the same node (§4.1) — made moot if §10 ships.
+
+## 10. RECOMMENDED superior fix: scope run-up to the actual cold seek via `/proc/self/cmdline`
+
+Supersedes §5A/§5B. The run-up is only needed for the first ~RUNUP frames after a cold seek, and
+every av1an chunk worker / target-quality probe is a **fresh vspipe process whose own command line
+contains the seek target** (`vspipe -s START -e END script.vpy`). vspipe evaluates the script
+in-process, so the `.vpy` can read it directly — no scenes.json pre-pass (§5B's cost), no shim,
+no sibling-repo change:
+
+```python
+import os
+_argv = open('/proc/self/cmdline','rb').read().split(b'\0')
+_start = 0
+for _i, _a in enumerate(_argv):
+    if _a in (b'-s', b'--start') and _i + 1 < len(_argv):
+        _start = int(_argv[_i + 1]); break
+
+wrapped = _runup(src)                      # the existing, validated 8-clip construct
+a = min(_start, src.num_frames)
+b = min(_start + RUNUP_FRAMES, src.num_frames)
+parts = ([src[:a]] if a else []) + [wrapped[a:b]] + ([src[b:]] if b < src.num_frames else [])
+out = core.std.Splice(parts)               # absolute frame numbering preserved
+```
+
+- Frames outside `[START, START+8)` request plain lsmas frames — **zero** added scheduling, so
+  hypotheses §4.1/2/3 (probe multiplication, node overhead, cache pressure) all go to ~0 at once.
+- The frames that *do* need priming keep the byte-identical proven construct — minimal
+  re-validation risk. (§5A's single-far-run-up becomes irrelevant: 8 frames × 8 deps per process
+  is noise.)
+- No `-s` on the cmdline (av1an `--sc-only` pass, `vspipe --info`, manual runs) → START=0, which
+  primes the head of the clip: harmless and correct.
+- Linux-only (`/proc`) — fine, this only ever runs in the Docker stack.
+- **Risk to gate on:** any consumer that cold-seeks *mid-process* (a second seek inside one vspipe
+  run) would be missed. All observed failures were at chunk starts, but this is exactly what §6's
+  randomised 998-probe gate + full-file scan must confirm. Also verify ab-av1's vspipe invocation
+  shape in `crfSearchEncode` (per-sample `-s` → covered; anything else → needs its own look).
+
+The §6 correctness gate remains mandatory and unchanged.
+
+## 11. Operational notes
 
 - Tdarr is **running**; 14 of 16 re-pulled titles are still importing and will re-encode under
   v2.5.0 over the coming days. Any change here affects those.
