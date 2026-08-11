@@ -284,7 +284,15 @@ out = core.std.Splice(parts)               # absolute frame numbering preserved
 
 The §6 correctness gate remains mandatory and unchanged.
 
-**Status 2026-08-11: implemented** on `feature/scoped-runup`, merged to dev. Unit-tested (the
+**VALIDATED — RESULT: PASS, 2026-08-11 06:15** on the re-pulled SM5 AVC remux (gate run inside
+`tdarr_server`, scenes = production sc-only args, 1299 chunk starts): control sweep (wrapper
+disabled) 32/1299 grey — the same count as the damaged encode's confirmed bursts; candidate sweep
+**0**; hammer phase 0/32 bad starts grey across 10 repeats each; chunk-worker shape 0; framemd5
+bit-exact. One gate FAIL along the way earned its keep: at depth 8 start 77745 stayed grey 6/10
+(depth need is per-source — §5C's warning made real, and a latent hole in v2.5.0 too);
+**RUNUP_FRAMES is now 16**, which scoping makes free. Shipped as v2.6.0.
+
+Earlier status: implemented on `feature/scoped-runup`, merged to dev. Unit-tested (the
 emitted parser is executed standalone by `test/unit.js`; generated `.vpy` is ast-validated), and
 the .vpy consumer audit is done: ab-av1 takes `--input <raw file>` and never reads the `.vpy`, so
 the only consumers are av1an chunk workers/probes (`-s`), our pre-flight probes (`--start`), and
