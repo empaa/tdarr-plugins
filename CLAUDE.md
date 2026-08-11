@@ -46,6 +46,25 @@ This repo lives on a Linux VM (`10.0.0.76`) that is itself a guest on the Unraid
 
 User feedback and preferences are tracked in the memory system and should inform all suggestions. Check memory at the start of sessions.
 
+## Headless runs (claude -p)
+
+When invoked non-interactively (an agentic `claude -p` call), write ONE run record before
+finishing, to
+`~/.claude/projects/-mnt-vm-data-ClaudeProjects-tdarr-plugins/agent-runs/YYYY-MM-DD-HHMM-<slug>.md`:
+
+- task received (one line)
+- actions taken — files changed, commits/pushes, deploys, host/container commands that mutated state
+- outcomes with the evidence (test results, verification output)
+- loose ends the next session must pick up
+
+Keep it under ~20 lines — a handoff note, not a transcript. If the run failed or was interrupted,
+write the record anyway with what was attempted; a missing record after a mutating run is worse
+than a failed run. This complements (does not replace) the mempalace diary when that tool is
+available.
+
+Interactive sessions: at session start, alongside the inbox, glance at `agent-runs/` for files
+newer than your last session and fold anything relevant into your picture of current state.
+
 ## Sibling Protocol
 
 This repo is part of a two-repo project. The sibling repo is at `../tdarr-av1` (Docker images with the AV1 encoding stack).
