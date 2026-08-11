@@ -174,10 +174,11 @@ async function runScenario(scenario, sampleFile) {
       return false;
     }
 
-    // Verify AV1 codec via ffprobe
+    // Verify AV1 codec via ffprobe — inside the test node container: the VM
+    // itself has no ffprobe, and the container's is the stack's own build.
     try {
       const probe = execSync(
-        `ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "${path.join(scenarioDir, outputFiles[0])}"`,
+        `docker exec tdarr-interactive-node ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "${containerDir}/${outputFiles[0]}"`,
         { encoding: 'utf8' },
       ).trim();
 
