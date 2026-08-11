@@ -48,9 +48,12 @@ User feedback and preferences are tracked in the memory system and should inform
 
 ## Headless runs (claude -p)
 
-When invoked non-interactively (an agentic `claude -p` call), write ONE run record before
-finishing, to
-`~/.claude/projects/-mnt-vm-data-ClaudeProjects-tdarr-plugins/agent-runs/YYYY-MM-DD-HHMM-<slug>.md`:
+When invoked non-interactively (an agentic `claude -p` call), keep ONE run record at
+`~/.claude/projects/-mnt-vm-data-ClaudeProjects-tdarr-plugins/agent-runs/YYYY-MM-DD-HHMM-<slug>.md`.
+**Write it FIRST** — before doing any work, create the file with the task line and
+`status: started`; update it as significant actions complete and finalize it before finishing.
+A killed or wedged run then still leaves a trail (2026-08-11: two headless runs died leaving
+nothing — an end-of-run-only record cannot survive a kill). Contents:
 
 - task received (one line)
 - actions taken — files changed, commits/pushes, deploys, host/container commands that mutated state
