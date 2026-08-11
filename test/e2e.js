@@ -25,6 +25,12 @@ function findSampleFile() {
     return findSampleFile();
   }
 
+  // readdir order is filesystem-dependent; full-movie remuxes may sit next to
+  // purpose-built clips. Pick the smallest sample so scenarios fit the poll timeout.
+  videos.sort((a, b) =>
+    fs.statSync(path.join(SAMPLES_DIR, a)).size - fs.statSync(path.join(SAMPLES_DIR, b)).size,
+  );
+
   return path.join(SAMPLES_DIR, videos[0]);
 }
 
