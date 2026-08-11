@@ -220,6 +220,29 @@ consistent with the controlled A/B in §3 (+0.15% size). The keyframe delta (998
 falls out of the different scene-detect settings and source. Remaining open question: wrapper
 *time* cost under target-quality on the same node (§4.1) — made moot if §10 ships.
 
+### 9.1 Production A/B confirmed (2026-08-11): Scary Movie 5, near-perfect natural experiment
+
+Emil's suggestion. The damaged SM5 encode ran **2026-04-13** (job `vV3--bm0I7`) under the
+April-era plugin with an av1an command **verbatim identical** to today's, on the same node
+(RYZEN9950X); the re-pulled source is byte-identical in size (`oldSize` matches to the last
+digit), and both encodes produced **identical chunking: 1299 scenes → 1453 chunks**. The re-encode
+under v2.5.0 (job `Nu_648nsk`, finished 2026-08-11 05:41 CEST) differs only by the v2.5.0-era
+plugin internals — dominated by the run-up wrapper (both eras use lsmas; the v2.4.0 pre-flight
+probe costs seconds).
+
+| | pre-fix 2026-04-13 | post-fix 2026-08-11 | delta |
+|---|---|---|---|
+| size | 6,208,198,800 B | 6,313,896,626 B | **+1.70%** |
+| av1an phase | 09:08:30→≈13:51 ≈ 4 h 43 m | 22:00:39→≈03:41 ≈ 5 h 40 m | **+20.3%** |
+| tail fps | 7.5 | 6.2 | −17% |
+
+- **Size: the wrapper is exonerated.** +1.7%, and part of that is legitimate: the pre-fix output
+  had ≥32 confirmed grey bursts — flat grey compresses to almost nothing and grey probe frames
+  converge chunks to lower bitrate; the post-fix file encodes the real content there.
+- **Time: the cost is real, ≈ +20% under production target-quality** — §4 hypothesis 1 confirmed
+  (the ~3% fixed-CRF overhead is multiplied by 6 probes + VMAF passes). This is exactly what the
+  §10 scoped run-up eliminates.
+
 ## 10. RECOMMENDED superior fix: scope run-up to the actual cold seek via `/proc/self/cmdline`
 
 Supersedes §5A/§5B. The run-up is only needed for the first ~RUNUP frames after a cold seek, and
