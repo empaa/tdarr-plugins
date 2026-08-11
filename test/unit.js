@@ -244,7 +244,72 @@ async function vsSourceRunupDisablable() {
   const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
   const vpy = buildSourceVpy({ inputPath: '/m.mkv', cachePath: '/tmp/s.lwi', runupFrames: 0 });
   assert(!vpy.includes('ModifyFrame'), `runupFrames:0 must emit no wrapper:\n${vpy}`);
+  assert(!vpy.includes('Splice') && !vpy.includes('cmdline'),
+    `runupFrames:0 must emit no scoping machinery either:\n${vpy}`);
   assert(/src\.set_output\(\)\s*$/.test(vpy), `must still end with set_output():\n${vpy}`);
+}
+
+async function vsSourceRunupScopedToColdSeek() {
+  const { buildSourceVpy, RUNUP_FRAMES } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const vpy = buildSourceVpy({ inputPath: '/m.mkv', cachePath: '/tmp/s.lwi' });
+  // The wrapper must apply only around this vspipe process's own seek target,
+  // read from /proc/self/cmdline -- not tax every frame of every target-quality
+  // probe (+20% av1an-phase time measured on Scary Movie 5, 2026-08-11). Frames
+  // outside [start, start+RUNUP) must be the bare lsmas clip via a splice.
+  assert(vpy.includes('/proc/self/cmdline'), `must read the process cmdline:\n${vpy}`);
+  assert(vpy.includes("b'-s'") && vpy.includes("b'--start'"),
+    `must recognise both vspipe seek flags:\n${vpy}`);
+  assert(vpy.includes(`min(_ru_a + ${RUNUP_FRAMES}`),
+    `window width must be RUNUP_FRAMES (${RUNUP_FRAMES}):\n${vpy}`);
+  assert(vpy.includes('TDARR_RUNUP_START_OVERRIDE'),
+    `test/emergency env override missing:\n${vpy}`);
+  const iSrc = vpy.indexOf('core.lsmas.LWLibavSource');
+  const iWrap = vpy.indexOf('core.std.ModifyFrame');
+  const iSplice = vpy.indexOf('core.std.Splice');
+  const iOut = vpy.indexOf('set_output');
+  assert(iSrc >= 0 && iWrap > iSrc && iSplice > iWrap && iOut > iSplice,
+    `ordering wrong: src=${iSrc} wrap=${iWrap} splice=${iSplice} out=${iOut}\n${vpy}`);
+}
+
+async function vsSourceRunupStartParserBehaviour() {
+  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const vpy = buildSourceVpy({ inputPath: '/m.mkv', cachePath: '/tmp/s.lwi' });
+  // Execute the ACTUAL parser emitted into the .vpy (marker-delimited), not a
+  // copy of it, against the vspipe invocation shapes we must support.
+  const m = /# >>> runup-start parser[\s\S]*?# <<< runup-start parser/.exec(vpy);
+  assert(m, `parser markers missing from .vpy:\n${vpy}`);
+  const harness = [
+    m[0],
+    "assert _runup_start([b'vspipe', b'-s', b'123', b'x.vpy']) == 123, 'av1an chunk worker'",
+    "assert _runup_start([b'vspipe', b'--start', b'7', b'x.vpy', b'--']) == 7, 'pre-flight probe'",
+    "assert _runup_start([b'vspipe', b'--info', b'x.vpy']) == 0, 'info query'",
+    "assert _runup_start([b'vspipe', b'x.vpy', b'-']) == 0, 'sequential full decode'",
+    "assert _runup_start([b'vspipe', b'-s', b'junk', b'x.vpy']) == 0, 'unparsable value'",
+    "assert _runup_start([b'vspipe', b'-s', b'-9', b'x.vpy']) == 0, 'negative clamps to 0'",
+    "assert _runup_start([b'vspipe', b'x.vpy', b'-s']) == 0, 'trailing flag without value'",
+  ].join('\n');
+  const r = require('child_process').spawnSync('python3', ['-c', harness], { encoding: 'utf8' });
+  assert(r.status === 0, `parser behaviour wrong:\n${r.stderr || r.stdout}`);
+}
+
+async function vsSourceVpyIsValidPython() {
+  const { buildSourceVpy } = require(path.join(SRC, 'shared', 'vsSource.js'));
+  const { buildVsDownscaleLines } = require(path.join(SRC, 'shared', 'downscale.js'));
+  const variants = {
+    default: buildSourceVpy({ inputPath: '/m.mkv', cachePath: '/tmp/s.lwi' }),
+    downscale: buildSourceVpy({
+      inputPath: '/m.mkv', cachePath: '/tmp/s.lwi',
+      downscaleLines: buildVsDownscaleLines('1080p'),
+    }),
+    noRunup: buildSourceVpy({ inputPath: '/m.mkv', cachePath: '/tmp/s.lwi', runupFrames: 0 }),
+  };
+  for (const [name, vpy] of Object.entries(variants)) {
+    const r = require('child_process').spawnSync(
+      'python3', ['-c', 'import ast, sys; ast.parse(sys.stdin.read())'],
+      { input: vpy, encoding: 'utf8' },
+    );
+    assert(r.status === 0, `generated .vpy (${name}) is not valid Python:\n${r.stderr}\n${vpy}`);
+  }
 }
 
 async function av1anReachedChunkingGate() {
@@ -447,6 +512,9 @@ const TESTS = [
   ['vsSource: run-up precedes downscale', vsSourceRunupBeforeDownscale],
   ['vsSource: run-up clips cropped (4K memory)', vsSourceRunupCroppedForMemory],
   ['vsSource: run-up disablable', vsSourceRunupDisablable],
+  ['vsSource: run-up scoped to cold-seek window', vsSourceRunupScopedToColdSeek],
+  ['vsSource: runup-start parser behaviour (python3)', vsSourceRunupStartParserBehaviour],
+  ['vsSource: generated .vpy is valid Python', vsSourceVpyIsValidPython],
   ['vsSource: av1anReachedChunking gate (chunks.json)', av1anReachedChunkingGate],
   ['vsSource: sceneDetectProducedScenes gate', sceneDetectProducedScenesGate],
   ['vsSource: detects lsmas frame-delivery failure', sourceDecodeErrorLineDetection],
