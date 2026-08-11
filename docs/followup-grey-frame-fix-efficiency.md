@@ -242,6 +242,9 @@ probe costs seconds).
 - **Time: the cost is real, ≈ +20% under production target-quality** — §4 hypothesis 1 confirmed
   (the ~3% fixed-CRF overhead is multiplied by 6 probes + VMAF passes). This is exactly what the
   §10 scoped run-up eliminates.
+- **Correctness verified 2026-08-11** (detector run by Emil inside `tdarr_server`):
+  `CLEAN,0,8,8,1453,…[AV1]-KRaLiMaRKo.mkv` — all 8 candidates checked, 0 grey, vs the pre-fix
+  file's 32 confirmed grey bursts. Two titles re-encoded under v2.5.0, two definitive CLEANs.
 
 ## 10. RECOMMENDED superior fix: scope run-up to the actual cold seek via `/proc/self/cmdline`
 
