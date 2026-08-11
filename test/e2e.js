@@ -68,6 +68,7 @@ async function runScenario(scenario, sampleFile) {
   const libId = `lib-${runId}`;
   const scenarioDir = path.join(HOST_OUTPUT_DIR, runId);
   const containerDir = `${CONTAINER_OUTPUT}/${runId}`;
+  let keepScenarioDir = false;
 
   try {
     // Copy sample to working dir
@@ -140,10 +141,18 @@ async function runScenario(scenario, sampleFile) {
     await api.requeueFile(containerFile);
 
     // Poll for completion (by library ID, since file ID may change after encode)
-    const result = await api.pollJobStatus(libId, 900000);
+    const result = await api.pollJobStatus(libId, { runId });
 
     // Assert output
     const elapsed = ((Date.now() - start) / 1000).toFixed(0);
+
+    if (result.status === 'timeout') {
+      console.log(`${label} ... FAIL (${result.reason}) (${elapsed}s)`);
+      // Job may still be running — leave the workdir so we don't yank files
+      // from under an active worker; DB records are still cleaned up.
+      keepScenarioDir = true;
+      return false;
+    }
 
     if (result.status === 'skipped') {
       console.log(`${label} ... FAIL (job skipped — check flow/library config) (${elapsed}s)`);
@@ -191,8 +200,12 @@ async function runScenario(scenario, sampleFile) {
     catch (e) { console.warn(`  [teardown] failed to remove library ${libId}: ${e.message}`); }
     try { await api.cruddb('FileJSONDB', 'removeByDB', libId); }
     catch (e) { console.warn(`  [teardown] failed to remove file records: ${e.message}`); }
-    try { fs.rmSync(scenarioDir, { recursive: true, force: true }); }
-    catch (e) { console.warn(`  [teardown] failed to remove ${scenarioDir}: ${e.message}`); }
+    if (keepScenarioDir) {
+      console.warn(`  [teardown] keeping ${scenarioDir} (job may still be running)`);
+    } else {
+      try { fs.rmSync(scenarioDir, { recursive: true, force: true }); }
+      catch (e) { console.warn(`  [teardown] failed to remove ${scenarioDir}: ${e.message}`); }
+    }
   }
 }
 
@@ -229,7 +242,14 @@ async function e2eTest(filterPlugin) {
 
   let failures = 0;
   for (const scenario of scenarios) {
-    const passed = await runScenario(scenario, sampleFile);
+    // A scenario that throws (network hiccup, API error) fails alone — the
+    // remaining scenarios still run.
+    let passed = false;
+    try {
+      passed = await runScenario(scenario, sampleFile);
+    } catch (err) {
+      console.log(`e2e:   ${scenario.pluginName}: ${scenario.name} ... FAIL (${err.message})`);
+    }
     if (!passed) failures++;
   }
 

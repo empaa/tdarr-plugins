@@ -2,8 +2,26 @@
 
 const BASE_URL = process.env.TDARR_URL || 'http://localhost:8265';
 
+// Per-request timeout: without it a single hung request freezes callers
+// (pollJobStatus) forever with no error and no teardown.
+const REQUEST_TIMEOUT_MS = 30000;
+const REQUEST_RETRIES = 3;
+
+async function fetchWithRetry(url, options = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= REQUEST_RETRIES; attempt++) {
+    try {
+      return await fetch(url, { ...options, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    } catch (err) {
+      lastErr = err;
+      if (attempt < REQUEST_RETRIES) await new Promise((r) => setTimeout(r, 2000 * attempt));
+    }
+  }
+  throw new Error(`${url} failed after ${REQUEST_RETRIES} attempts: ${lastErr.message}`);
+}
+
 async function post(path, body) {
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await fetchWithRetry(`${BASE_URL}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -48,13 +66,13 @@ async function requeueFile(fileId) {
 }
 
 async function getNodes() {
-  const res = await fetch(`${BASE_URL}/api/v2/get-nodes`);
+  const res = await fetchWithRetry(`${BASE_URL}/api/v2/get-nodes`);
   if (!res.ok) throw new Error(`get-nodes returned ${res.status}`);
   return res.json();
 }
 
 async function syncPlugins() {
-  const res = await fetch(`${BASE_URL}/api/v2/sync-plugins`, {
+  const res = await fetchWithRetry(`${BASE_URL}/api/v2/sync-plugins`, {
     method: 'POST',
   });
   if (!res.ok) throw new Error(`sync-plugins returned ${res.status}`);
@@ -67,10 +85,22 @@ async function alterWorkerLimit(nodeID, workerType, process) {
   });
 }
 
-async function pollJobStatus(libraryId, timeoutMs = 300000) {
+// Activity-aware wait. A fixed wall-clock budget can undershoot a real encode
+// (aom on the 1 GB sample runs ~19 min), so the deadline only advances while
+// the node shows no worker on this run's files: idleTimeoutMs of continuous
+// inactivity fails the wait, hardTimeoutMs caps a runaway job. Returns
+// { status: 'timeout' } instead of throwing so one slow scenario cannot abort
+// the whole suite.
+async function pollJobStatus(libraryId, opts = {}) {
+  const idleTimeoutMs = opts.idleTimeoutMs || 600000;
+  const hardTimeoutMs = opts.hardTimeoutMs || 3600000;
+  const runId = opts.runId || libraryId.replace(/^lib-/, '');
   const start = Date.now();
   const poll = 3000;
-  while (Date.now() - start < timeoutMs) {
+  let lastActive = Date.now();
+  let lastHeartbeat = 0;
+
+  while (Date.now() - start < hardTimeoutMs) {
     const files = await cruddb('FileJSONDB', 'getAll');
     const file = Array.isArray(files) ? files.find((f) => f.DB === libraryId) : null;
     if (file) {
@@ -78,9 +108,32 @@ async function pollJobStatus(libraryId, timeoutMs = 300000) {
       if (file.TranscodeDecisionMaker === 'Transcode success') return { status: 'success', file };
       if (file.TranscodeDecisionMaker === 'Transcode error') return { status: 'error', file };
     }
+
+    // Worker file paths embed the runId; stringify-scan survives get-nodes
+    // schema drift across Tdarr versions.
+    let active = false;
+    try {
+      active = JSON.stringify(await getNodes()).includes(runId);
+    } catch { /* transient get-nodes failure — treat as inactive this tick */ }
+    if (active) lastActive = Date.now();
+
+    const now = Date.now();
+    if (now - lastHeartbeat >= 60000) {
+      lastHeartbeat = now;
+      console.log(
+        `  [poll] ${libraryId} elapsed=${Math.round((now - start) / 1000)}s`
+        + ` state=${file ? file.TranscodeDecisionMaker : 'no-record'}`
+        + ` workerActive=${active} idle=${Math.round((now - lastActive) / 1000)}s`,
+      );
+    }
+
+    if (now - lastActive > idleTimeoutMs) {
+      return { status: 'timeout', reason: `no worker activity for ${idleTimeoutMs / 1000}s` };
+    }
+
     await new Promise((r) => setTimeout(r, poll));
   }
-  throw new Error(`Timed out after ${timeoutMs / 1000}s waiting for job in library ${libraryId}`);
+  return { status: 'timeout', reason: `hard cap ${hardTimeoutMs / 1000}s reached` };
 }
 
 module.exports = {
