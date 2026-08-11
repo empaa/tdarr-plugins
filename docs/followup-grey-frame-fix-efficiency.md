@@ -246,6 +246,32 @@ probe costs seconds).
   `CLEAN,0,8,8,1453,…[AV1]-KRaLiMaRKo.mkv` — all 8 candidates checked, 0 grey, vs the pre-fix
   file's 32 confirmed grey bursts. Two titles re-encoded under v2.5.0, two definitive CLEANs.
 
+### 9.2 CLOSED (2026-08-11): v2.6.0 production A/B — §4.1 attribution CORRECTED
+
+Third same-source/settings/node/chunking encode, under deployed v2.6.0 (job `vxPpCeN1X`):
+
+| SM5 encode | av1an phase | size | grey scan |
+|---|---|---|---|
+| pre-fix (2026-04-13, libaom 3.13.3, no wrapper) | 4 h 43 m | 6,208,198,800 B | 32 bursts |
+| v2.5.0 (2026-08-10, libaom 3.14.1, full wrapper) | 5 h 40 m | 6,313,896,626 B | CLEAN 0/8 |
+| v2.6.0 (2026-08-11, libaom 3.14.1, scoped d16) | 5 h 46 m | 6,316,384,776 B | CLEAN 0/8 |
+
+v2.6.0 ≈ v2.5.0 within run noise ⇒ **the wrapper's time cost was ~0 all along; §9.1's "+20.3%
+wrapper cost / hypothesis 1 confirmed" was a misattribution.** The whole April→August slowdown is
+the 2026-06-21 sibling stack bump (libaom 3.13.3 → 3.14.1 — release notes advertise compression
+gains at speeds 2–3, i.e. more work per frame at the same cpu-used). Under aomenc target-quality
+the pipeline is encoder-CPU-bound and lsmas decode overhead vanishes; the +3%-under-fixed-CRF
+A/B (fast SVT preset, decode-sensitive) extrapolated wrongly. Emil's policy: upgrade-only, the
+libaom cost is accepted — recover time elsewhere.
+
+v2.6.0's real value: closes the depth-8 correctness hole (77745-class starts), makes depth free,
+ships the gate. Its first production encode: detector `CLEAN,0,8,8,1453`.
+
+**VMAF share measured** (self-VMAF minus decode-only baseline, tdarr_server, 1080p): libvmaf ≈
+440 fps machine-wide ⇒ pure VMAF ≈ 19–29 min of a 5 h 40 m encode = **~6–9% of wall** at 4–6
+probes. Probe *sub-encodes* dominate target-quality cost, not scoring. vmaf-cuda patch brief +
+config alternatives (probing-rate, probes 6→4) handed to `../tdarr-av1` (inbox 2026-08-11).
+
 ## 10. RECOMMENDED superior fix: scope run-up to the actual cold seek via `/proc/self/cmdline`
 
 Supersedes §5A/§5B. The run-up is only needed for the first ~RUNUP frames after a cold seek, and
