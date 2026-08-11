@@ -13,7 +13,7 @@ const path = require('path');
 const escPy = (s) => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 
 /**
- * Frames of decoder run-up forced before every delivered frame.
+ * Frames of decoder run-up forced ahead of a cold seek's first outputs.
  *
  * lsmas does not prime the decoder's reorder buffer after a seek: the first
  * outputs of a cold seek come back as featureless mid-grey, with no error. av1an
@@ -22,8 +22,14 @@ const escPy = (s) => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
  *
  * Measured on The Conjuring's 998 chunk starts, probed in randomised (cold) order:
  *   run-up 0 -> 21 grey   run-up 4 -> 1 grey   run-up 8+ -> 0 grey
- * 8 is the first depth that reaches zero; the extra frames are cache hits during
- * sequential decode, so the cost is paid only at a chunk start.
+ * 8 is the first depth that reaches zero.
+ *
+ * The wrapper is applied only to the RUNUP_FRAMES frames at the process's own
+ * seek target, read from /proc/self/cmdline (`-s`/`--start`); everything past
+ * the window decodes warm and sequentially, which was never affected. Wrapping
+ * every frame instead costs ~20% av1an-phase time under 6-probe target-quality
+ * (Scary Movie 5 production A/B, 2026-08-11) because every probe re-decodes the
+ * chunk through the wrapper.
  */
 const RUNUP_FRAMES = 8;
 
@@ -44,18 +50,53 @@ function buildSourceVpy({ inputPath, cachePath, downscaleLines, runupFrames = RU
 
   lines.push(`src = core.lsmas.LWLibavSource(source='${src}', cachefile='${cache}')`);
 
-  // Make frame n depend on n-1..n-RUNUP so the decoder is primed before the frame
-  // is handed over. The run-up clips are cropped to a corner: the decode is the
-  // point, and holding 16x16 instead of full frames keeps this off the 4K memory
-  // ceiling. Output is bit-identical -- ModifyFrame returns source frame n itself.
+  // Make a frame depend on its RUNUP predecessors so the decoder is primed
+  // before the frame is handed over, but only inside [start, start+RUNUP) --
+  // the seek target of THIS vspipe process, parsed from its own command line.
+  // Every .vpy consumer seeks exactly once per process (av1an chunk workers and
+  // target-quality probes: `vspipe -s N`; our pre-flight probes: `--start N`;
+  // sequential passes like --sc-only and --info: no flag, window sits at 0),
+  // so frames past the window decode warm and need no priming. The run-up
+  // clips are cropped to a corner: the decode is the point, and holding 16x16
+  // instead of full frames keeps this off the 4K memory ceiling. Output is
+  // bit-identical -- ModifyFrame returns source frame n itself, and the splice
+  // preserves absolute frame numbering.
   if (runup > 0) {
     lines.push(
-      '# lsmas cold-seek run-up -- see RUNUP_FRAMES in src/shared/vsSource.js',
+      'import os',
+      '# lsmas cold-seek run-up, scoped to this process\'s seek -- see src/shared/vsSource.js',
+      '# >>> runup-start parser (executed standalone by test/unit.js -- keep self-contained)',
+      'def _runup_start(argv):',
+      '    for i in range(len(argv) - 1):',
+      "        if argv[i] in (b'-s', b'--start'):",
+      '            try:',
+      '                return max(0, int(argv[i + 1]))',
+      '            except ValueError:',
+      '                return 0',
+      '    return 0',
+      '# <<< runup-start parser',
+      'try:',
+      "    _ru_argv = open('/proc/self/cmdline', 'rb').read().split(b'\\x00')",
+      'except OSError:',
+      '    _ru_argv = []',
+      '_ru_a = _runup_start(_ru_argv)',
+      "_ru_ov = os.environ.get('TDARR_RUNUP_START_OVERRIDE')",
+      'if _ru_ov is not None:',
+      '    try:',
+      '        _ru_a = max(0, int(_ru_ov))',
+      '    except ValueError:',
+      '        pass',
       `_ru_n, _ru_w, _ru_h = src.num_frames, min(16, src.width), min(16, src.height)`,
       '_runup = [core.std.Crop(core.std.DuplicateFrames(src, [0] * j)[:_ru_n],'
         + ' right=src.width - _ru_w, bottom=src.height - _ru_h)'
         + ` for j in range(1, ${runup + 1})]`,
-      'src = core.std.ModifyFrame(src, [src] + _runup, lambda n, f: f[0].copy())',
+      '_ru_wrapped = core.std.ModifyFrame(src, [src] + _runup, lambda n, f: f[0].copy())',
+      '_ru_a = min(_ru_a, _ru_n)',
+      `_ru_b = min(_ru_a + ${runup}, _ru_n)`,
+      '_ru_parts = (([src[:_ru_a]] if _ru_a > 0 else [])'
+        + ' + ([_ru_wrapped[_ru_a:_ru_b]] if _ru_b > _ru_a else [])'
+        + ' + ([src[_ru_b:]] if _ru_b < _ru_n else []))',
+      'src = _ru_parts[0] if len(_ru_parts) == 1 else core.std.Splice(_ru_parts)',
     );
   }
 

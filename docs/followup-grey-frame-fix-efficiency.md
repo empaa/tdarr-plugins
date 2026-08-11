@@ -284,6 +284,20 @@ out = core.std.Splice(parts)               # absolute frame numbering preserved
 
 The §6 correctness gate remains mandatory and unchanged.
 
+**Status 2026-08-11: implemented** on `feature/scoped-runup`, merged to dev. Unit-tested (the
+emitted parser is executed standalone by `test/unit.js`; generated `.vpy` is ast-validated), and
+the .vpy consumer audit is done: ab-av1 takes `--input <raw file>` and never reads the `.vpy`, so
+the only consumers are av1an chunk workers/probes (`-s`), our pre-flight probes (`--start`), and
+sequential passes (no flag → window at 0). **NOT yet §6-validated — do not deploy or version-bump
+until the gate passes.** Harness now lives in-repo (the originals died with the scratch share):
+`tools/gen-vpy.js` regenerates the production `.vpy`; `tools/validate-scoped-runup.sh` runs the
+full gate inside a container with vspipe/ffmpeg/jq — phase A randomized cold-seek probe over all
+chunk starts (expect 0 grey), phase B control arm with the wrapper pushed past EOF via
+`TDARR_RUNUP_START_OVERRIDE` (expect ≥15/21 grey — proves harness sensitivity), phase C
+chunk-worker shape on the known-bad starts (expect 0), phase D framemd5 bit-exactness candidate
+vs control (expect identical). The override env var is test-only: it freezes ONE window for every
+child process, so never set it on a real encode.
+
 ## 11. Operational notes
 
 - Tdarr is **running**; 14 of 16 re-pulled titles are still importing and will re-encode under
