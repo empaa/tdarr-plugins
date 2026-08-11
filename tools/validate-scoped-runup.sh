@@ -86,6 +86,21 @@ GREY_A=$(grep -c . "$W/grey.candidate")
 [ "$GREY_A" -gt 0 ] && sed 's/^/  /' "$W/grey.candidate"
 echo "phase A: $GREY_A grey chunk starts (expect 0)"
 
+# Cold-seek grey is INTERMITTENT (SM5 start 77745: 6/10 at depth 8), so one
+# probe per start can miss a coin-flip failure. Hammer the discovered bad set.
+REPEATS="${REPEATS:-10}"
+echo "=== phase A2 ($(date '+%T')): candidate x$REPEATS over the $NBAD bad starts ==="
+GREY_A2=0
+for S in $BAD; do
+  H=0
+  for _ in $(seq 1 "$REPEATS"); do
+    R=$(probe "$S")
+    [ -n "$R" ] && H=$((H+1))
+  done
+  if [ "$H" -gt 0 ]; then GREY_A2=$((GREY_A2+1)); echo "  start $S grey $H/$REPEATS"; fi
+done
+echo "phase A2: $GREY_A2 of $NBAD bad starts ever grey across $REPEATS repeats (expect 0)"
+
 echo "=== phase C ($(date '+%T')): chunk-worker shape (-s N -e N+59) over bad set ==="
 GREY_C=0
 for S in $BAD; do
@@ -110,6 +125,7 @@ echo
 PASS=1
 [ "$NBAD" -ge "$SENS_MIN" ] || { echo "FAIL: control sweep found only $NBAD grey -- harness not sensitive on this source"; PASS=0; }
 [ "$GREY_A" -eq 0 ]         || { echo "FAIL: candidate sweep still grey"; PASS=0; }
+[ "$GREY_A2" -eq 0 ]        || { echo "FAIL: candidate repeats still grey"; PASS=0; }
 [ "$GREY_C" -eq 0 ]         || { echo "FAIL: chunk-worker shape still grey"; PASS=0; }
 [ "$D" = PASS ]             || { echo "FAIL: wrapper altered pixels"; PASS=0; }
 if [ "$PASS" -eq 1 ]; then echo "RESULT: PASS"; else echo "RESULT: FAIL"; exit 1; fi

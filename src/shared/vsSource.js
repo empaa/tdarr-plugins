@@ -22,7 +22,11 @@ const escPy = (s) => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
  *
  * Measured on The Conjuring's 998 chunk starts, probed in randomised (cold) order:
  *   run-up 0 -> 21 grey   run-up 4 -> 1 grey   run-up 8+ -> 0 grey
- * 8 is the first depth that reaches zero.
+ * 8 was the first depth reaching zero there -- but depth need is PER-SOURCE:
+ * Scary Movie 5's chunk start 77745 still came back grey 6/10 at depth 8
+ * (2026-08-11 gate run), and clean 0/10 at 16 and 24. Scoping made depth
+ * nearly free (it costs per process now, not per frame), so 16 buys the same
+ * 2x margin over the worst observed need that 8 bought over The Conjuring's 4.
  *
  * The wrapper is applied only to the RUNUP_FRAMES frames at the process's own
  * seek target, read from /proc/self/cmdline (`-s`/`--start`); everything past
@@ -31,7 +35,7 @@ const escPy = (s) => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
  * (Scary Movie 5 production A/B, 2026-08-11) because every probe re-decodes the
  * chunk through the wrapper.
  */
-const RUNUP_FRAMES = 8;
+const RUNUP_FRAMES = 16;
 
 /**
  * Build the full lsmas .vpy text.
