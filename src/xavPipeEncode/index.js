@@ -46,12 +46,16 @@ const details = () => ({
       ].join(' '),
     },
     {
-      label: 'Fallback CRF',
-      name: 'fallback_crf',
-      type: 'number',
-      defaultValue: '25',
-      inputUI: { type: 'text' },
-      tooltip: 'CRF used if target-quality is not available on piped input.',
+      label: 'If Target Quality Did Not Run',
+      name: 'tq_unavailable_action',
+      type: 'string',
+      defaultValue: 'fail',
+      inputUI: { type: 'dropdown', options: ['fail', 'accept'] },
+      tooltip: [
+        'Target-quality probes need random access, which a pipe may not provide.',
+        'If no chunk reports a measured score the encode landed at some unverified CRF:',
+        '"fail" throws so Tdarr keeps the original, "accept" keeps the output with a warning.',
+      ].join(' '),
     },
     {
       label: 'TQ Aggregation Mode',
@@ -137,7 +141,7 @@ const plugin = async (args) => {
 
   const resolution = String(inputs.resolution || '1080p');
   const targetQuality = String(inputs.target_quality || '72.3-72.7');
-  const fallbackCrf = Number(inputs.fallback_crf) || 25;
+  const tqUnavailableAction = String(inputs.tq_unavailable_action || 'fail');
   const tqMode = String(inputs.tq_mode || 'mean');
   const crfRange = String(inputs.crf_range || '10-50');
   const preset = Number(inputs.preset) || 4;
@@ -218,12 +222,23 @@ const plugin = async (args) => {
     onSizeExceeded: () => { sizeExceeded = true; pm.killAll(); },
   });
 
-  // Whether target-quality survives on piped input is unverified upstream: TQ
-  // probes re-encode chunks, which wants random access a pipe cannot give. We
-  // attempt TQ, then check afterwards whether it actually ran. Silently
-  // encoding under a different quality regime than the one requested is the
-  // failure mode this guards against.
+  // The source file is STILL passed as <INPUT> on this path. xav reads scene
+  // detection, crop detection and the frame count from the file; only the
+  // frames themselves arrive on stdin. Omitting it leaves xav with no scene
+  // list and no frame count.
+  //
+  // Target quality does work on piped input, confirmed in xav's source rather
+  // than assumed: enc_all() hands pipe_reader straight to enc_tq() with no
+  // pipe-specific branch, and probes re-encode the fully-decoded in-memory
+  // chunk buffer, so no random access into the source is needed. The
+  // no-score check below remains as a guard in case that changes.
+  //
+  // Two consequences of piping, both deliberate: --hwdec is a hard error when
+  // combined with a pipe, so this plugin never offers it; and pipe resume is
+  // vspipe-only upstream (it appends `-s N` to the producer argv, meaningless
+  // for ffmpeg), so a piped job is not resumable and restarts from zero.
   const xavArgs = buildXavArgs({
+    inputPath,
     outputPath: videoOnlyPath,
     workers,
     buffer: null,
@@ -303,12 +318,16 @@ const plugin = async (args) => {
   const scores = tracker.getChunkScores();
   const crfs = tracker.getChunkCrfs();
   if (scores.length === 0) {
-    jobLog(
-      '[xav] WARNING: no chunk reported a measured SSIMULACRA2 score, so the target-quality '
-      + `search did not run on piped input. This encode is effectively fixed-CRF `
-      + `(requested target ${targetQuality}, fallback CRF ${fallbackCrf}). `
-      + 'Treat its quality as unverified and prefer the native plugin where possible.',
-    );
+    const message = 'no chunk reported a measured SSIMULACRA2 score, so the target-quality '
+      + `search did not run on piped input (requested ${targetQuality}). The encode landed `
+      + 'at an unverified CRF and its quality is unknown.';
+    if (tqUnavailableAction === 'fail') {
+      throw new Error(
+        `${message} Failing so Tdarr keeps the original. Set "If Target Quality Did Not Run" `
+        + 'to "accept" to keep this output anyway, or use the native plugin.',
+      );
+    }
+    jobLog(`[xav] WARNING: ${message} Keeping it because the plugin is set to accept.`);
   } else {
     const mean = scores.reduce((s, v) => s + v, 0) / scores.length;
     jobLog(
@@ -361,9 +380,11 @@ const probeOutput = async (outputPath, pm, dbg) => {
   const fs = require('fs');
   if (!fs.existsSync(outputPath)) return { exists: false };
 
+  const ffprobeBin = ['/usr/local/bin/ffprobe', '/usr/bin/ffprobe']
+    .find((p) => fs.existsSync(p)) || 'ffprobe';
   const bytes = fs.statSync(outputPath).size;
   const out = [];
-  await pm.spawnAsync('/usr/local/bin/ffprobe', [
+  await pm.spawnAsync(ffprobeBin, [
     '-v', 'error',
     '-select_streams', 'v:0',
     '-count_frames',

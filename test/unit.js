@@ -543,7 +543,7 @@ const TESTS = [
   ['xav: validation catches frame drift', xavValidationCatchesFrameDrift],
   ['xav: detects CRF pinning at both bounds', xavDetectsCrfPinning],
   ['xav: argv is video-only and carries TQ', xavArgsAreVideoOnlyAndCarryTq],
-  ['xav: pipe argv omits input, ffmpeg scales', xavPipeArgsOmitInputAndScale],
+  ['xav: pipe argv keeps input, ffmpeg scales', xavPipeArgsKeepInputAndScale],
   ['xav: strips params xav rejects outright', xavFiltersParamsXavRejects],
   ['xav: param filter handles empty and clean input', xavParamFilterHandlesEmptyAndClean],
   ['xav: size projection is frame-proportional', xavProjectionIsFrameProportional],
@@ -787,15 +787,19 @@ async function xavArgsAreVideoOnlyAndCarryTq() {
   assert(args.indexOf('/w/in.mkv') < args.indexOf('/w/out.mkv'), 'input must precede output');
 }
 
-async function xavPipeArgsOmitInputAndScale() {
+async function xavPipeArgsKeepInputAndScale() {
   const { buildXavArgs, buildPipeFfmpegArgs } = require(path.join(SRC, 'shared', 'xav.js'));
 
-  // Pipe path: xav reads Y4M from stdin, so no input path is passed.
+  // Pipe path still passes the source file as <INPUT>: xav reads scene
+  // detection, crop and frame count from it, and only takes frames from stdin.
   const args = buildXavArgs({
-    outputPath: '/w/out.mkv', workers: 2, buffer: 2, preset: 4,
+    inputPath: '/w/in.mkv', outputPath: '/w/out.mkv', workers: 2, preset: 4,
     targetQuality: '72.3-72.7', crfRange: '10-40', vship: 1,
   });
-  assert(args[0] === '/w/out.mkv', `pipe args must start with the output, got ${args[0]}`);
+  assert(args[0] === '/w/in.mkv', `pipe args must still pass the source, got ${args[0]}`);
+  assert(args[1] === '/w/out.mkv', `output must follow the input, got ${args[1]}`);
+  // -b is omitted unless explicitly set; `-b null` is not a valid argument.
+  assert(!args.includes('-b'), `-b must be omitted when unset, got: ${args.join(' ')}`);
 
   const ff = buildPipeFfmpegArgs({ inputPath: '/w/in.mkv', resolution: '1080p' });
   const j = ff.join(' ');

@@ -73,6 +73,15 @@ Three consequences:
 No `-a` is passed, so xav stays video-only; audio and subtitles are merged back
 from the staged file afterwards, as today.
 
+**An av1an parameter string cannot be handed to xav unfiltered.** xav validates
+encoder params itself (`src/svterr.rs`) and aborts with "argument parsing failed"
+before encoding anything. Six of our production flags are hard-rejected —
+`--input-depth`, `--lookahead`, `--keyint`, `--irefresh-type`,
+`--enable-overlays`, `--scm` — which is how the first parameter sweep died on
+all 40 runs in 20 seconds. `filterEncoderParams` strips these plus `--crf`,
+`--rc` and `--scd` (owned by target quality and xav's own scene detection), and
+logs every drop with its reason.
+
 ## Plugin inputs
 
 | input | default | notes |
@@ -136,16 +145,27 @@ ffmpeg applies the scale filter and feeds Y4M to xav's stdin. No intermediate
 file, and no PTY needed — `is_pipe()` becomes true naturally. This plugin never
 uses `script`.
 
-Two things are unverified and must be checked during implementation rather than
-assumed:
+Both open questions were answered from xav's source by hometower, 2026-08-12:
 
-- **Does `-t` still function on piped input?** TQ probes re-encode chunks, which
-  needs random access the pipe does not provide. If TQ is unavailable the pipe
-  path falls back to fixed CRF and says so in the job log — it must never
-  silently degrade to a different quality regime.
-- **Does the TUI still render progress** when stdout is a plain pipe? If it
-  degrades, the pipe path reports coarser progress; the size and validation
-  gates are unaffected either way.
+- **`-t` does work on piped input.** `enc_all()` hands `pipe_reader` straight to
+  `enc_tq()` → `spawn_tq_dec()` with no pipe-specific branch. It does not need
+  random access because the decoder pushes each chunk as a fully-decoded
+  in-memory `WorkPkg` and probes re-encode *that buffer*. The no-score check
+  below stays as a guard in case this changes upstream.
+- **The TUI does render to a non-PTY stdout** — there is no `is_terminal` gate on
+  stdout anywhere. Progress parsing is identical on both paths.
+
+Three constraints this path inherits:
+
+1. **The source file is still required as `<INPUT>`.** xav reads scene
+   detection, crop detection and the frame count from the file; only the frames
+   themselves arrive on stdin. Omitting it leaves xav with no scene list.
+   Geometry is taken from the Y4M header, with the detected crop rescaled.
+2. **`--hwdec` combined with a pipe is a hard error**, so this plugin never
+   offers it.
+3. **Piped jobs are not resumable.** Pipe resume is vspipe-only upstream — it
+   appends `-s N` to the producer's argv, which is meaningless for ffmpeg. A
+   restarted job re-encodes from zero.
 
 Scale filter mirrors the existing `downscale.js` presets:
 `scale=<w>:-2:flags=lanczos`.

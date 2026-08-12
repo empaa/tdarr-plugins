@@ -322,9 +322,11 @@ const probeOutput = async (outputPath, pm, dbg) => {
   const fs = require('fs');
   if (!fs.existsSync(outputPath)) return { exists: false };
 
+  const ffprobeBin = ['/usr/local/bin/ffprobe', '/usr/bin/ffprobe']
+    .find((p) => fs.existsSync(p)) || 'ffprobe';
   const bytes = fs.statSync(outputPath).size;
   const out = [];
-  await pm.spawnAsync('/usr/local/bin/ffprobe', [
+  await pm.spawnAsync(ffprobeBin, [
     '-v', 'error',
     '-select_streams', 'v:0',
     '-count_frames',

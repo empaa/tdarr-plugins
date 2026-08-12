@@ -203,6 +203,7 @@ const XAV_REJECTED_PARAMS = {
   '--keyint': 'xav sets keyint itself -- chunk starts are keyframes',
   '--irefresh-type': "on xav's NOT_RELEVANT list",
   '--enable-overlays': 'xav rejects overlays as always dangerous with svt-av1',
+  '--scm': "on xav's rejected list",
   // TQ owns rate control; passing either fights the target-quality search.
   '--crf': 'target-quality owns rate control',
   '--rc': 'target-quality owns rate control',
@@ -246,7 +247,11 @@ const buildXavArgs = (opts) => {
   args.push(opts.outputPath);
   args.push('-e', opts.encoder || 'svt-av1');
   args.push('-w', String(opts.workers));
-  args.push('-b', String(opts.buffer));
+  // Omit -b entirely unless asked: xav's own default buffering is what the
+  // bake-off measured, and -b 4 took peak RSS from ~19.8 GB past 25 GB.
+  if (opts.buffer != null && opts.buffer !== '' && Number(opts.buffer) > 0) {
+    args.push('-b', String(opts.buffer));
+  }
   args.push('-p', buildEncoderParams(opts));
   if (opts.targetQuality) {
     args.push('-t', String(opts.targetQuality));
