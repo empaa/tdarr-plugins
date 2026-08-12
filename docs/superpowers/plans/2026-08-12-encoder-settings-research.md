@@ -104,13 +104,39 @@ Running on HomeTower, launched 2026-08-12 ~23:05, detached, ~3.5 h expected.
 Results append to `/mnt/vm_data/xav-work/bench/param-sweep-results.tsv` after every run, so
 an interruption loses nothing and a re-run resumes.
 
-First completed row, as a sanity check on the method:
+Mid tier on the hdr build, first results — all `ok`, all converged, nothing pinned:
 
-    mid  xavhdr  baseline  exit 0  197s  190,503,575 bytes  25 chunks
-         mean_score 72.53 (min 72.36 max 72.70)  mean_crf 21.86
-         at_floor 0  at_ceiling 0  1920x1040  ok
+| variant | wall | video bytes | vs baseline |
+|---|---|---|---|
+| **preset2** | 793 s | **182,254,795** | **−4.3%** |
+| baseline (preset4) | 197 s | 190,503,575 | — |
+| preset6 | 114 s | 207,214,xxx | +8.8% |
 
-Converged, nothing pinned, inside the target band.
+That is the frontier in miniature: preset 2 buys 4.3% fewer bytes at matched quality for **4x**
+the wall-clock, preset 6 gives back 8.8% for 1.7x less. Which point is right is a
+tier decision, not a global one — exactly the shape the recommendation should take.
+
+Note this refines, rather than confirms, the earlier `svt-preset-benchmark` finding that low
+presets "waste speed and RAM". Under xav's TQ search preset 2 does buy real compression; it is
+expensive, not useless. The earlier finding was measured under av1an with a VMAF target, where
+the metric could not see the difference it was paying for.
+
+### A methodology trap worth recording
+
+I twice reported this sweep as broken when it was healthy.
+
+The first time I read a stale copy of the results file. The second time I concluded a run had
+**wedged at 65%** and dispatched an intervention to kill it — it had in fact completed cleanly
+four minutes earlier, and the container I nearly had killed was a *different*, healthy run.
+
+Cause: `/mnt/vm_data` is a **virtiofs** mount of the host's `/mnt/cache_nvme_two/vm_data`, and
+this VM's view of listings, sizes and mtimes lags host writes by 30+ minutes. `sync` does not
+help, and new files may not appear at all. Measured: VM saw 1 row / mtime 23:09:33 while the host
+had 8 rows at 23:38.
+
+**Any "has this stopped changing?" watcher run from the VM is guaranteed to false-alarm**, because
+the newest file the VM can see is frozen by construction. Host-side job progress must be checked
+from the host (via hometower), never by polling this mount.
 
 ## Reading the results
 
