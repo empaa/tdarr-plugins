@@ -84,20 +84,35 @@ from the staged file afterwards, as today.
 | `preset` | `4` | via `-p --preset`; TQ allows 0-7 only |
 | `workers` | `4` | `-w` — primary memory driver |
 | `buffer` | `2` | `-b` — secondary memory driver |
-| `resolution` | `''` | empty = no downscale; else `720p`/`1080p`/`1440p` |
+| `resolution` | `1080p` | `xavPipeEncode` only — scale target |
 | `max_encoded_percent` | `100` | size gate; 100 disables |
 | `hwdec` | `false` | `--hwdec` |
 
-## Execution paths
+## Two plugins, gated in the flow
 
-Selected before spawn, mutually exclusive.
+The two execution paths ship as **two separate plugins**, not as a runtime
+branch inside one:
 
-```
-if (scaleEnabled && sourceWidth > targetWidth)  ->  pipe path
-else                                            ->  native path
-```
+- **`xavEncode`** — native path, PTY via `script`. The default for anything
+  already at target resolution.
+- **`xavPipeEncode`** — pipe path, ffmpeg scale into xav's stdin. Used only when
+  downscaling.
 
-### Native path (default)
+The gate lives in the **Tdarr flow**, not in plugin code: the flow author routes
+on resolution (Tdarr's own resolution check plugin) and sends 4K to
+`xavPipeEncode` and everything else to `xavEncode`.
+
+Why split rather than branch: the paths are mutually exclusive at the process
+level — `script` gives the child a PTY on **stdin**, which is precisely what
+`is_pipe()` tests — so a single plugin would carry two spawn shapes, two
+progress-parsing regimes, and a quality mode that is guaranteed on one path and
+contingent on the other. Splitting keeps each plugin's contract honest and makes
+the routing decision visible in the flow where it can be seen and changed.
+
+Shared logic (argv construction, progress tracking, validation, size gate) lives
+in `src/shared/xav.js` so the two plugins cannot drift.
+
+### Native path — `xavEncode`
 
 The plugin writes `xav-run.sh` into `workDir` holding the full argv, then spawns:
 
@@ -115,14 +130,11 @@ resume — everything the bake-off measured.
 TTY it assumes piped Y4M, reads nothing, writes an ~870-byte file, prints
 `DONE 100.00%` and exits 0. `/dev/null` and closed stdin fail identically.
 
-### Pipe path (only when downscaling)
+### Pipe path — `xavPipeEncode`
 
 ffmpeg applies the scale filter and feeds Y4M to xav's stdin. No intermediate
-file, and no PTY needed — `is_pipe()` becomes true naturally.
-
-**This path cannot use `script`**, because `script` gives the child a PTY on
-stdin, which is precisely what `is_pipe()` tests. Path selection therefore
-determines spawn shape.
+file, and no PTY needed — `is_pipe()` becomes true naturally. This plugin never
+uses `script`.
 
 Two things are unverified and must be checked during implementation rather than
 assumed:
@@ -249,8 +261,8 @@ it is the only lever available given xav's fixed temp-dir behaviour.
 - **Plugin functest** with stubbed binaries, using the established keep-alive
   pattern (bare-node functests need a keep-alive timer because `spawnAsync`
   `unref()`s children).
-- **Path-selection unit tests** — native vs pipe, at and either side of the
-  scale threshold.
+- **Shared-module unit tests** — argv construction for both plugins, scale
+  filter derivation, validation thresholds, size-gate convergence rule.
 
 ## Blocked on others
 
