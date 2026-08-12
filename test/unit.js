@@ -547,6 +547,8 @@ const TESTS = [
   ['xav: strips params xav rejects outright', xavFiltersParamsXavRejects],
   ['xav: param filter handles empty and clean input', xavParamFilterHandlesEmptyAndClean],
   ['xav: size projection is frame-proportional', xavProjectionIsFrameProportional],
+  ['xavEncode: happy path replays real xav output', xavEncodePluginHappyPath],
+  ['xavEncode: refuses input outside workDir', xavEncodeRefusesInputOutsideWorkDir],
 ];
 
 async function sanitizeStagesAlreadyCleanFileIntoWorkDir() {
@@ -857,6 +859,157 @@ async function xavProjectionIsFrameProportional() {
   assert(projectVideoBytes(500, 1000, 2000) === 1000, 'half the frames should project double');
   assert(projectVideoBytes(0, 1000, 2000) === 0, 'no bytes yet projects zero');
   assert(projectVideoBytes(500, 0, 2000) === 0, 'no frames yet projects zero');
+}
+
+// Plugin-level test: replays the REAL captured xav output through xavEncode with
+// every binary stubbed, so the whole path -- launcher, tracker, validation,
+// mux, propagation -- is exercised with no xav, no GPU and no container.
+function injectXavPluginStubs(opts) {
+  const pmPath = require.resolve(path.join(SRC, 'shared', 'processManager.js'));
+  const captured = opts.captured;
+
+  require.cache[pmPath] = {
+    id: pmPath,
+    filename: pmPath,
+    loaded: true,
+    exports: {
+      createProcessManager: () => ({
+        spawnAsync: async (bin, spawnArgs, spawnOpts) => {
+          const o = spawnOpts || {};
+          if (bin.endsWith('script')) {
+            // Feed the real fixture through the tracker, then produce output.
+            if (o.onLine) {
+              for (const line of captured.split(/[\r\n]/)) {
+                if (line.trim()) o.onLine(line);
+              }
+            }
+            fs.writeFileSync(opts.videoOnlyPath, 'x'.repeat(opts.outputBytes));
+            return opts.exitCode != null ? opts.exitCode : 0;
+          }
+          if (bin.includes('ffprobe')) {
+            for (const line of opts.probeLines) if (o.onLine) o.onLine(line);
+            return 0;
+          }
+          // mkvmerge mux
+          const oi = spawnArgs.indexOf('-o');
+          if (oi >= 0) fs.writeFileSync(spawnArgs[oi + 1], 'muxed');
+          return 0;
+        },
+        cleanup: () => {},
+        installCancelHandler: () => {},
+        removeCancelHandler: () => {},
+        killAll: () => {},
+        adopt: (c) => c,
+        startPpidWatcher: () => {},
+        stopPpidWatchers: () => {},
+      }),
+    },
+  };
+}
+
+async function xavEncodePluginHappyPath() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xav-func-'));
+  const workDir = path.join(tmp, 'work');
+  fs.mkdirSync(workDir);
+
+  const inputPath = path.join(workDir, 'staged.mkv');
+  fs.writeFileSync(inputPath, 'y'.repeat(400 * 1024 * 1024 / 1024)); // small stand-in
+
+  const videoOnlyPath = path.join(workDir, 'xav-video.mkv');
+  const captured = fs.readFileSync(XAV_FIXTURE, 'utf8');
+
+  injectXavPluginStubs({
+    captured,
+    videoOnlyPath,
+    outputBytes: 8 * 1024 * 1024,
+    probeLines: [
+      'width=1920', 'height=1040', 'codec_name=av1',
+      'nb_read_frames=2899', 'duration=120.910000',
+    ],
+  });
+
+  // xav is discovered by existsSync; pretend it is mounted.
+  const realExists = fs.existsSync;
+  fs.existsSync = (p) => (p === '/usr/local/bin/xav' ? true : realExists(p));
+
+  const updates = [];
+  let result;
+  try {
+    delete require.cache[require.resolve(path.join(SRC, 'xavEncode', 'index.js'))];
+    const { plugin } = require(path.join(SRC, 'xavEncode', 'index.js'));
+    result = await plugin({
+      inputFileObj: {
+        _id: inputPath,
+        file: inputPath,
+        ffProbeData: {
+          streams: [{ codec_type: 'video', width: 1920, height: 1080, nb_frames: '2899' }],
+          format: { duration: '120.910000' },
+        },
+      },
+      workDir,
+      inputs: { target_quality: '72.3-72.7', crf_range: '10-50', preset: 4 },
+      variables: {},
+      jobLog: () => {},
+      updateWorker: (f) => updates.push(f),
+    });
+  } finally {
+    fs.existsSync = realExists;
+  }
+
+  assert(result.outputNumber === 1, `expected success port 1, got ${result.outputNumber}`);
+  assert(result.outputFileObj._id === path.join(workDir, 'xav-output.mkv'),
+    `working file must point at the muxed output, got ${result.outputFileObj._id}`);
+  assert(result.outputFileObj.file === result.outputFileObj._id, '_id and file must agree');
+
+  // The dashboard must have received real numbers parsed from the fixture.
+  const statuses = updates.filter((u) => u.status).map((u) => u.status);
+  assert(statuses.includes('Encoding'), `never reported Encoding, got: ${statuses}`);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+async function xavEncodeRefusesInputOutsideWorkDir() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xav-func-'));
+  const workDir = path.join(tmp, 'work');
+  const libDir = path.join(tmp, 'library');
+  fs.mkdirSync(workDir); fs.mkdirSync(libDir);
+
+  const inputPath = path.join(libDir, 'movie.mkv');
+  fs.writeFileSync(inputPath, 'z');
+
+  injectXavPluginStubs({
+    captured: '', videoOnlyPath: path.join(workDir, 'xav-video.mkv'),
+    outputBytes: 1024, probeLines: [],
+  });
+
+  const realExists = fs.existsSync;
+  fs.existsSync = (p) => (p === '/usr/local/bin/xav' ? true : realExists(p));
+
+  let threw = null;
+  try {
+    delete require.cache[require.resolve(path.join(SRC, 'xavEncode', 'index.js'))];
+    const { plugin } = require(path.join(SRC, 'xavEncode', 'index.js'));
+    await plugin({
+      inputFileObj: { _id: inputPath, file: inputPath, ffProbeData: { streams: [], format: {} } },
+      workDir,
+      inputs: {},
+      variables: {},
+      jobLog: () => {},
+      updateWorker: () => {},
+    });
+  } catch (err) {
+    threw = err;
+  } finally {
+    fs.existsSync = realExists;
+  }
+
+  // xav writes its temp dir next to the input; a library-path input must be
+  // refused rather than scattering hashed temp dirs across the library.
+  assert(threw !== null, 'must refuse an input outside workDir');
+  assert(/working directory/i.test(threw.message),
+    `error must explain the workDir requirement, got: ${threw.message}`);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
 }
 
 async function unitTest(filterPlugin) {
