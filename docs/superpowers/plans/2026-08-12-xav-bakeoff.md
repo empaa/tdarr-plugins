@@ -14,6 +14,9 @@
 - **No sibling repo edits.** Findings go to `../tdarr-av1` via the inbox, not by editing their files.
 - **Nothing runs against production.** Prod (`tdarr_node_hometower`, `10.0.0.3:8265`) is read-only. All work is local to this VM.
 - **VM hardware (measured 2026-08-12):** 12 vCPU · 7 GB RAM total (~2 GB free at rest) · no GPU (QXL paravirtual only) · `/` has 29 GB free · `/mnt/vm_data` has 794 GB free. Every task must respect these; put all build artifacts on `/mnt/vm_data`.
+- **CPU passthrough confirmed:** the VM reports the host's AMD Ryzen 9950X with AVX-512 (avx512f/avx512bw), so `-march=native` here targets the same CPU as the Unraid host and enables xav's AVX-512 asm paths. **A binary built during this bake-off is directly deployable to the host** — no separate portable build, no cross-CPU concerns. Only RAM and GPU differ between VM and host.
+- **We are the consumer, not a publisher.** The end state is: build xav natively on our own hardware, mount the single binary into the *official* Tdarr image, and stop maintaining a Docker image. Multi-arch, reproducible builds for third parties, hardening flags for redistribution and aarch64 support are therefore **explicitly out of scope** — they were obligations of publishing `../tdarr-av1`, and shedding them is part of the prize.
+- **The rollback unit is the binary itself.** Record the xav commit hash for every build and keep the last known-good `xav` binary. Reverting is a file swap, not an image retag.
 - **Samples available (all 1080p):** `test/samples/jurassic_sample.mkv` (980 MB, fast iteration), `Frozen II (2019) ... [TrueHD Atmos 7.1][x265]-playBD.mkv` (14 GB, HEVC + Atmos), `Snow White (2025) ... [TrueHD Atmos 7.1][AV1]-ATELiER.mkv` (5 GB, AV1 source). **No 4K/HDR sample exists locally** — the 4K question cannot be answered in Phase A.
 - **Encoder parity:** baseline prod builds **mainline SVT-AV1 v4.2.0** (`../tdarr-av1/Dockerfile:34`). xav must be built against the same fork and pinned to the same tag, or the speed comparison is meaningless.
 - **Primary metric is encode FPS** (established project convention), with peak RSS and output size as co-equal guardrails.
@@ -132,7 +135,7 @@ git clone --branch v4.2.0 https://gitlab.com/AOMediaCodec/SVT-AV1.git /mnt/vm_da
 git -C /mnt/vm_data/xav-build/SVT-AV1 describe --tags
 ```
 
-Expected: `v4.2.0`. Record in the results doc that opus/dav1d/FFmpeg remain unpinned HEAD clones — that is a real reproducibility problem for the sibling image and must be reported regardless of the bake-off outcome.
+Expected: `v4.2.0`. This pin exists **only to make Task 4's speed comparison honest** — same encoder version on both sides. It is not a shipping requirement: as a consumer we can build whatever SVT we like later. opus/dav1d/FFmpeg stay as unpinned HEAD clones; record which commits they landed on so a future build can be reproduced if one ever regresses.
 
 - [ ] **Step 5: Clone and build xav**
 
@@ -310,7 +313,55 @@ Note any metadata the custom muxer drops (chapters, attachments, subtitle tracks
 
 ---
 
-### Task 6: Decision and hand-off
+### Task 6: Does the binary run inside a stock Tdarr image?
+
+This is the load-bearing question for the whole end state. If a `-march=native` static binary mounted into the *official* Tdarr image works, the sibling Docker image can be retired on our own hardware. If it doesn't, xav is only ever a component inside an image we still maintain — which removes most of the prize.
+
+xav uses `io_uring` heavily (`src/uring.rs`). Docker's seccomp profile is the thing most likely to block it.
+
+**Files:**
+- Modify: `docs/xav-bakeoff-results.md`
+
+- [ ] **Step 1: Run the binary in a stock Tdarr container**
+
+```bash
+docker run --rm -v /mnt/vm_data/xav/target/release/xav:/usr/local/bin/xav:ro \
+  --entrypoint /usr/local/bin/xav ghcr.io/haveagitgat/tdarr_node:latest -h | head -20
+```
+
+Expected: the help text. A crash, "Operation not permitted", or a syscall error points at seccomp.
+
+- [ ] **Step 2: Run a real encode inside the stock image**
+
+```bash
+docker run --rm \
+  -v /mnt/vm_data/xav/target/release/xav:/usr/local/bin/xav:ro \
+  -v /mnt/vm_data/ClaudeProjects/tdarr-plugins/test/samples:/samples:ro \
+  -v /mnt/vm_data/xav-work:/work \
+  -w /work --entrypoint /usr/local/bin/xav \
+  ghcr.io/haveagitgat/tdarr_node:latest \
+  /samples/jurassic_sample.mkv /work/stock-image-test.mkv -w 2 -p "preset 8 crf 30" 2>&1 | tail -20
+```
+
+A help text that prints proves nothing about io_uring — only a real encode exercises it. This must complete and produce a playable file.
+
+- [ ] **Step 3: If it fails, isolate the cause before concluding anything**
+
+```bash
+docker run --rm --security-opt seccomp=unconfined \
+  -v /mnt/vm_data/xav/target/release/xav:/usr/local/bin/xav:ro \
+  ... same encode command ...
+```
+
+If it succeeds unconfined but fails confined, it's seccomp — solvable with a custom profile on our own host, but record it as a real operational cost. If it fails both ways, it's something else; diagnose before writing it off.
+
+- [ ] **Step 4: Record and commit**
+
+Record: stock image tag tested, whether the encode completed, any seccomp or permission findings, and whether `ffprobe` in the stock image is present for the plugins' own probing needs.
+
+---
+
+### Task 7: Decision and hand-off
 
 **Files:**
 - Modify: `docs/xav-bakeoff-results.md`
@@ -327,7 +378,7 @@ State a go/no-go using these thresholds, decided *before* seeing the numbers:
 | Peak RAM | Not worse than baseline at matched worker count. |
 | Quality at matched CRF | Within VMAF noise (±0.5) or better. |
 | Audio/mux fidelity | No silent metadata loss that integration can't cheaply restore. |
-| Build reproducibility | The unpinned opus/dav1d/FFmpeg clones must be pinnable, or the sibling image can't ship it. |
+| Stock-image compatibility | The binary must run a real encode inside the official Tdarr image. This is what converts a good encoder into "we stop maintaining a Docker image." |
 
 - [ ] **Step 2: Note the Phase B triggers explicitly**
 
@@ -335,7 +386,7 @@ Whatever the verdict, record what Phase A *could not* test: per-scene target qua
 
 - [ ] **Step 3: If go — message the sibling**
 
-Only if the verdict is go. Write to the sibling inbox: what xav is, what it would replace, the exact host toolchain it needs, the pinning problem, and the fact that its build disables standard hardening flags (`-fno-pie`, `-D_FORTIFY_SOURCE=0`, no stack protector, no unwind tables) — a deliberate choice by upstream that the sibling must consciously accept before shipping it in an image. **Do not edit sibling files; inbox message plus telling Emil is the only channel.**
+Only if the verdict is go, and the message is not "adopt xav" — it's **"the image may not need to exist for our own nodes."** Write to the sibling inbox: what xav is, that it statically links dav1d/opus/SVT-AV1/FFmpeg into one binary, that Task 6 showed whether it runs in the stock Tdarr image, and what that implies for the sibling's scope. The sibling still owns any decision about what it publishes for other people — that call is theirs and Emil's, not ours. **Do not edit sibling files; inbox message plus telling Emil is the only channel.**
 
 - [ ] **Step 4: Commit, push, and report**
 
