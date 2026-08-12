@@ -531,7 +531,235 @@ const TESTS = [
   ['subtitles: drop commentary, keep SDH/forced when off', subtitlesDropCommentaryKeepSdhForcedWhenOff],
   ['subtitles: keep commentary when on', subtitlesKeepCommentaryWhenOn],
   ['isCommentary: title or flag, not SDH/forced', commentaryDetection],
+  ['xav: parses real encode master lines', xavParsesRealEncodeLine],
+  ['xav: parses CROP/SCD phase lines', xavParsesPhaseLines],
+  ['xav: phase totals survive segment boundaries', xavPhaseTotalsAreNotGlued],
+  ['xav: parses per-worker CRF and score', xavParsesWorkerCrfAndScore],
+  ['xav: reports newest state from glued segments', xavStripsAnsiAndGluedSegments],
+  ['xav: size gate needs progress and stability', xavSizeGateNeedsProgressAndStability],
+  ['xav: validation catches the no-TTY artefact', xavValidationCatchesNoTtyArtefact],
+  ['xav: validation allows autocropped dimensions', xavValidationAllowsAutocroppedDimensions],
+  ['xav: validation catches frame drift', xavValidationCatchesFrameDrift],
+  ['xav: detects CRF pinning at both bounds', xavDetectsCrfPinning],
+  ['xav: argv is video-only and carries TQ', xavArgsAreVideoOnlyAndCarryTq],
+  ['xav: pipe argv omits input, ffmpeg scales', xavPipeArgsOmitInputAndScale],
+  ['xav: size projection is frame-proportional', xavProjectionIsFrameProportional],
 ];
+
+// --- xav ------------------------------------------------------------------
+// The fixture is a real capture from the Avatar bake-off (1080p, TQ, 2 workers),
+// escape codes and all, so the parser is tested against genuine xav output
+// rather than strings we invented to match our own regexes.
+
+const XAV_FIXTURE = path.join(__dirname, 'fixtures', 'xav-tui-sample.log');
+
+async function xavParsesRealEncodeLine() {
+  const { parseXavLine } = require(path.join(SRC, 'shared', 'xav.js'));
+  const raw = fs.readFileSync(XAV_FIXTURE, 'utf8');
+
+  const events = raw.split(/[\r\n]/).map(parseXavLine).filter(Boolean);
+  const encodes = events.filter((e) => e.type === 'encode');
+  assert(encodes.length > 0, 'no encode master lines parsed from the real fixture');
+
+  for (const e of encodes) {
+    assert(e.totalFrames === 2899, `totalFrames should be 2899, got ${e.totalFrames}`);
+    assert(e.frames >= 0 && e.frames <= e.totalFrames, `frames out of range: ${e.frames}`);
+    assert(e.percent >= 0 && e.percent <= 100, `percent out of range: ${e.percent}`);
+    assert(e.chunksTotal > 0, 'chunksTotal must be positive');
+    assert(e.megabytes >= 0, 'megabytes must be non-negative');
+  }
+}
+
+async function xavParsesPhaseLines() {
+  const { parseXavEvents } = require(path.join(SRC, 'shared', 'xav.js'));
+  const raw = fs.readFileSync(XAV_FIXTURE, 'utf8');
+  const phases = raw.split(/[\r\n]/).flatMap(parseXavEvents)
+    .filter((e) => e.type === 'phase').map((e) => e.phase);
+  // CROP and SCD arrive glued into a single read by cursor addressing, so this
+  // only passes if segmentation splits them rather than reporting the newest.
+  assert(phases.includes('CROP'), `CROP phase not seen, got: ${[...new Set(phases)]}`);
+  assert(phases.includes('SCD'), `SCD phase not seen, got: ${[...new Set(phases)]}`);
+  assert(phases.includes('MUX'), `MUX phase not seen, got: ${[...new Set(phases)]}`);
+}
+
+async function xavPhaseTotalsAreNotGlued() {
+  const { parseXavEvents } = require(path.join(SRC, 'shared', 'xav.js'));
+  const raw = fs.readFileSync(XAV_FIXTURE, 'utf8');
+  const events = raw.split(/[\r\n]/).flatMap(parseXavEvents).filter((e) => e.type === 'phase');
+  // The CROP phase counts 13 items and SCD counts 2899 frames. Matching across
+  // a segment boundary produced 1300 / 289900 before segmentation was added.
+  for (const e of events) {
+    if (e.phase === 'CROP') {
+      assert(e.totalFrames === 13, `CROP total should be 13, got ${e.totalFrames}`);
+    }
+    if (e.phase === 'SCD' || e.phase === 'MUX') {
+      assert(e.totalFrames === 2899, `${e.phase} total should be 2899, got ${e.totalFrames}`);
+    }
+  }
+}
+
+async function xavParsesWorkerCrfAndScore() {
+  const { parseXavLine } = require(path.join(SRC, 'shared', 'xav.js'));
+  const raw = fs.readFileSync(XAV_FIXTURE, 'utf8');
+  const workers = raw.split(/[\r\n]/).map(parseXavLine).filter(Boolean)
+    .flatMap((e) => e.workers || []);
+  assert(workers.length > 0, 'no per-worker lines parsed');
+  assert(workers.every((w) => isFinite(w.crf)), 'every worker line must carry a CRF');
+  // The score field is blank until the chunk has been measured; both forms occur.
+  assert(workers.some((w) => w.score === null), 'expected some unscored worker lines');
+}
+
+async function xavStripsAnsiAndGluedSegments() {
+  const { parseXavLine, parseXavEvents } = require(path.join(SRC, 'shared', 'xav.js'));
+  // Stripping CSI glues consecutive TUI updates together with no separator.
+  // `912/2899` runs straight into the next segment's `00:00`, which naive
+  // matching reads as `912/289900`.
+  const glued = '00:00 SCD: [##------] 31%, 912 FPS, -00:00, 912/2899'
+    + '00:00 SCD: [########] 100%, 2899 FPS, -00:00, 2899/2899';
+
+  const events = parseXavEvents(glued);
+  assert(events.length === 2, `expected 2 segments, got ${events.length}`);
+  assert(events[0].frames === 912 && events[0].totalFrames === 2899,
+    `first segment wrong: ${JSON.stringify(events[0])}`);
+  assert(events[1].frames === 2899 && events[1].totalFrames === 2899,
+    `second segment wrong: ${JSON.stringify(events[1])}`);
+
+  const newest = parseXavLine(glued);
+  assert(newest.frames === 2899, `newest should be 2899, got ${newest.frames}`);
+}
+
+async function xavSizeGateNeedsProgressAndStability() {
+  const { sizeGateDecision } = require(path.join(SRC, 'shared', 'xav.js'));
+  const opts = { maxEncodedPercent: 50, sourceBytes: 1000, nonVideoBytes: 0 };
+
+  // Too early: percent below the floor, even though projection is over budget.
+  const early = [
+    { percent: 10, projectedBytes: 900 },
+    { percent: 12, projectedBytes: 800 },
+    { percent: 15, projectedBytes: 700 },
+  ];
+  assert(sizeGateDecision(early, opts).abort === false, 'must not abort below the progress floor');
+
+  // Rising projection: xav's size curve is front-loaded, so a still-rising
+  // estimate is not yet trustworthy.
+  const rising = [
+    { percent: 40, projectedBytes: 700 },
+    { percent: 45, projectedBytes: 800 },
+    { percent: 50, projectedBytes: 900 },
+  ];
+  assert(sizeGateDecision(rising, opts).abort === false, 'must not abort on a rising projection');
+
+  // Converged and genuinely over budget.
+  const settled = [
+    { percent: 40, projectedBytes: 900 },
+    { percent: 45, projectedBytes: 850 },
+    { percent: 50, projectedBytes: 800 },
+  ];
+  const d = sizeGateDecision(settled, opts);
+  assert(d.abort === true, `should abort at 80% of source against a 50% limit, got ${JSON.stringify(d)}`);
+
+  // Converged and within budget.
+  const ok = [
+    { percent: 40, projectedBytes: 400 },
+    { percent: 45, projectedBytes: 350 },
+    { percent: 50, projectedBytes: 300 },
+  ];
+  assert(sizeGateDecision(ok, opts).abort === false, 'must not abort when within budget');
+}
+
+async function xavValidationCatchesNoTtyArtefact() {
+  const { validateOutput } = require(path.join(SRC, 'shared', 'xav.js'));
+  const source = { frames: 2899, duration: 120.9 };
+
+  const noTty = validateOutput(
+    { exists: true, bytes: 870, width: 0, height: 0, frames: 0, duration: 0 }, source, {},
+  );
+  assert(noTty.ok === false, 'the ~870-byte no-TTY artefact must fail validation');
+  assert(/no-TTY signature/.test(noTty.problems.join(' ')),
+    `error must name the no-TTY cause, got: ${noTty.problems.join(' | ')}`);
+
+  const missing = validateOutput({ exists: false }, source, {});
+  assert(missing.ok === false, 'a missing output must fail');
+}
+
+async function xavValidationAllowsAutocroppedDimensions() {
+  const { validateOutput } = require(path.join(SRC, 'shared', 'xav.js'));
+  // xav autocrops: 1920x1080 legitimately becomes 1920x1040. That must pass.
+  const r = validateOutput(
+    {
+      exists: true, bytes: 200 * 1024 * 1024, width: 1920, height: 1040,
+      codec: 'av1', frames: 2899, duration: 120.9,
+    },
+    { frames: 2899, duration: 120.9 }, {},
+  );
+  assert(r.ok === true, `autocropped output must validate, got: ${r.problems.join(' | ')}`);
+}
+
+async function xavValidationCatchesFrameDrift() {
+  const { validateOutput } = require(path.join(SRC, 'shared', 'xav.js'));
+  const r = validateOutput(
+    {
+      exists: true, bytes: 200 * 1024 * 1024, width: 1920, height: 1040,
+      codec: 'av1', frames: 2894, duration: 120.9,
+    },
+    { frames: 2899, duration: 120.9 }, {},
+  );
+  assert(r.ok === false, 'a 5-frame drift must fail validation');
+  assert(/frame count/.test(r.problems.join(' ')), 'must report the frame count problem');
+}
+
+async function xavDetectsCrfPinning() {
+  const { detectCrfPinning } = require(path.join(SRC, 'shared', 'xav.js'));
+
+  const ceiling = detectCrfPinning([40, 40, 40, 40], '10-40');
+  assert(ceiling.pinned === true && ceiling.bound === 'ceiling',
+    `all-at-ceiling must be flagged, got ${JSON.stringify(ceiling)}`);
+
+  const floor = detectCrfPinning([10, 10, 10], '10-40');
+  assert(floor.pinned === true && floor.bound === 'floor',
+    `all-at-floor must be flagged, got ${JSON.stringify(floor)}`);
+
+  const healthy = detectCrfPinning([16.25, 27.5, 23.8, 40], '10-40');
+  assert(healthy.pinned === false, 'a converged spread must not be flagged as pinned');
+}
+
+async function xavArgsAreVideoOnlyAndCarryTq() {
+  const { buildXavArgs } = require(path.join(SRC, 'shared', 'xav.js'));
+  const args = buildXavArgs({
+    inputPath: '/w/in.mkv', outputPath: '/w/out.mkv',
+    workers: 2, buffer: 2, preset: 4, targetQuality: '72.3-72.7',
+    crfRange: '10-40', vship: 1, tqMode: 'mean',
+  });
+  const joined = args.join(' ');
+  assert(!joined.includes('-a '), `xav must stay video-only (no -a), got: ${joined}`);
+  assert(joined.includes('-t 72.3-72.7'), `target quality missing: ${joined}`);
+  assert(joined.includes('-f 10-40'), `crf range missing: ${joined}`);
+  assert(args.indexOf('/w/in.mkv') < args.indexOf('/w/out.mkv'), 'input must precede output');
+}
+
+async function xavPipeArgsOmitInputAndScale() {
+  const { buildXavArgs, buildPipeFfmpegArgs } = require(path.join(SRC, 'shared', 'xav.js'));
+
+  // Pipe path: xav reads Y4M from stdin, so no input path is passed.
+  const args = buildXavArgs({
+    outputPath: '/w/out.mkv', workers: 2, buffer: 2, preset: 4,
+    targetQuality: '72.3-72.7', crfRange: '10-40', vship: 1,
+  });
+  assert(args[0] === '/w/out.mkv', `pipe args must start with the output, got ${args[0]}`);
+
+  const ff = buildPipeFfmpegArgs({ inputPath: '/w/in.mkv', resolution: '1080p' });
+  const j = ff.join(' ');
+  assert(j.includes('scale=1920:-2:flags=lanczos'), `scale filter missing: ${j}`);
+  assert(j.includes('yuv4mpegpipe'), `must emit Y4M: ${j}`);
+  assert(j.includes('-an') && j.includes('-sn'), `pipe must be video-only: ${j}`);
+}
+
+async function xavProjectionIsFrameProportional() {
+  const { projectVideoBytes } = require(path.join(SRC, 'shared', 'xav.js'));
+  assert(projectVideoBytes(500, 1000, 2000) === 1000, 'half the frames should project double');
+  assert(projectVideoBytes(0, 1000, 2000) === 0, 'no bytes yet projects zero');
+  assert(projectVideoBytes(500, 0, 2000) === 0, 'no frames yet projects zero');
+}
 
 async function unitTest(filterPlugin) {
   const targets = filterPlugin
