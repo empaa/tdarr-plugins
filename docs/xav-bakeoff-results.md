@@ -3,8 +3,13 @@
 Evaluation of [emrakyz/xav](https://github.com/emrakyz/xav) against the current
 av1an + ab-av1 stack. Plan: `docs/superpowers/plans/2026-08-12-xav-bakeoff.md`.
 
-**Status: Phase A incomplete — blocked on a silent encode failure (see Findings).**
-No benchmark numbers recorded yet; nothing has been compared against the baseline.
+**Status: xav works. Phase A functional checks pass.** Two integration constraints found
+(TTY, seccomp), both solvable. Baseline comparison not yet run.
+
+> **Correction (2026-08-12):** an earlier revision of this document concluded xav was broken
+> upstream and encoded nothing. That was wrong. The cause was our own test harness — every
+> command was run from a non-interactive shell, and xav switches to pipe-input mode when
+> stdin is not a TTY. See F1.
 
 ---
 
@@ -14,141 +19,131 @@ No benchmark numbers recorded yet; nothing has been compared against the baselin
 |---|---|
 | Date | 2026-08-12 |
 | Host | Ubuntu 24.04 VM on the Unraid box, CPU passthrough |
-| CPU | AMD Ryzen 9 9950X, 24 vCPU exposed, AVX-512 present |
-| RAM | 35 GB (raised from 7 GB mid-session) |
-| GPU | none (QXL only) → `build.sh` selects `HW=vulkan` automatically |
+| CPU | AMD Ryzen 9 9950X, 24 vCPU, AVX-512 present |
+| RAM | 35 GB |
+| GPU | none (QXL) → `build.sh` selects `HW=vulkan` |
 | xav commit | `6896aeb5` (2026-08-06, repo HEAD) |
-| Toolchain | clang 18.1.3, lld, nasm, meson, ninja, cmake, Rust nightly 1.99.0 |
+| Final build | `static_tq`, SVT-AV1 `hdr` fork, FFmpeg n8.1.2, Rust nightly 1.99.0 |
+
+## First real numbers (not yet a comparison)
+
+Real 5-minute 1080p sample (h264 + DTS 7.1), `-w 4 -p "--preset 8 --crf 32 --lp 3" -a "auto 1"`:
+
+| | |
+|---|---|
+| Encode rate | **223 fps** (32 s of encode time for 5 min of 1080p) |
+| Size | 857.97 MB → 93.01 MB (**89.16% reduction**) |
+| Video | AV1 **1920x960** yuv420p10le — autocrop correctly removed letterboxing |
+| Audio | Opus, **7.1 layout preserved** |
+| Integrity | duration within 0.05 s of source; full ffmpeg decode with zero errors |
+
+These are xav-only figures at settings not yet matched to the baseline. **No comparison has
+been made yet** — Task 1 (baseline) and Task 4 (matched bake-off) are still outstanding.
 
 ## Build
 
-Builds successfully on Ubuntu, in ~6 minutes, producing a **22 MB** binary.
+Builds on Ubuntu in ~6 minutes, 22 MB binary. **One local patch required.**
 
-**Local patches required (1):**
+**Patch 1 — dav1d pkg-config libdir (Debian/Ubuntu portability bug).** Upstream rewrites
+dav1d's `.pc` with `sed "s|libdir=\${prefix}/lib|libdir=\${prefix}/build/src|"`. On Arch meson
+writes `libdir=${prefix}/lib`, so it works; on Debian/Ubuntu meson writes
+`libdir=${prefix}/lib/x86_64-linux-gnu`, leaving a dangling multiarch suffix pointing at a
+nonexistent path. FFmpeg's configure then fails with the misleading
+`dav1d >= 1.0.0 not found using pkg-config` — pkg-config resolves it fine; the *link test*
+fails. Fix: replace the whole `libdir=` line.
 
-1. `build_dav1d()` — upstream rewrites dav1d's pkg-config `libdir` with
-   `sed "s|libdir=\${prefix}/lib|libdir=\${prefix}/build/src|"`. On Arch (upstream's
-   platform) meson writes `libdir=${prefix}/lib`, so this works. On Debian/Ubuntu meson
-   writes `libdir=${prefix}/lib/x86_64-linux-gnu`, leaving a dangling multiarch suffix and
-   a path that does not exist. FFmpeg's configure then fails with the misleading
-   `dav1d >= 1.0.0 not found using pkg-config` — pkg-config resolves the package fine; it is
-   the *link test* that fails. Fix: replace the whole `libdir=` line.
+**Not statically linked**, despite the README's "NO system-side dependency": links `libc`,
+`libm`, `libgcc_s`, requires **GLIBC_2.38**. The official Tdarr image is Ubuntu 24.04 /
+glibc 2.39, so this is satisfied.
 
-**Not statically linked**, despite the README's "NO system-side dependency": links
-`libc`, `libm`, `libgcc_s`, and requires **GLIBC_2.38**.
-
-## Deployment viability — positive
-
-- Official Tdarr image `ghcr.io/haveagitgat/tdarr:2.86.01` is **Ubuntu 24.04 / glibc 2.39**,
-  so the GLIBC_2.38 floor is satisfied.
-- The binary **runs inside the stock official image** (`xav -h`, exit 0).
-- Crop detection, scene detection and audio parsing all run correctly inside the container.
-- **The container is not a blocker.** `io_uring` vs Docker seccomp was never reached as an
-  issue; the encode failure below reproduces identically outside any container.
-- **Integration constraint:** xav writes its hashed temp directory *next to the source file*,
-  so the source directory must be writable (`os error 30`/EROFS on a read-only mount).
+**FFmpeg version is not constrained:** xav compiles cleanly against both n8.1.2 (major 62)
+and n9.1-dev (major 63). It will not fight our stack's FFmpeg 8.1.2 pin.
 
 ## Findings
 
-### F1 — Silent encode failure (BLOCKING, unresolved)
+### F1 — xav requires a TTY on stdin (CRITICAL for plugin integration)
 
-xav completes crop detection and scene detection, enumerates chunks, then encodes **zero**
-of them, muxes an ~865-byte file, prints `DONE` with `100.00%`, deletes its temp dir, and
-**exits 0**.
+xav switches to **pipe-input mode** when stdin is not a TTY. In that mode it reads video from
+stdin, gets nothing, muxes an ~870-byte file, prints `DONE 100.00%` with `Video 0x0`, and
+**exits 0**. With an audio track present it instead SIGSEGVs (exit 139); one run hung
+indefinitely waiting on stdin.
 
+Confirmed by elimination — identical failure across both SVT forks, FFmpeg 8.1.2 and
+9.1-dev, TQ on and off, every source type (including synthetic 8-bit and 10-bit), natively
+and in-container, at 1/2/4 workers, with default and explicit params. The tell was the only
+useful error message produced all session, from `--hwdec`:
+`Hardware accelerated decoding can not be used with a pipe`.
+
+**`/dev/null` and closed stdin also fail.** Only a real TTY works:
+
+```bash
+script -qec "xav in.mkv out.mkv -w 4 -p '--preset 8 --crf 32'" /dev/null
 ```
-┃ Size  ┃ 857.97 MB (22822 kb/s)  0 KB (0 kb/s) 󰛀 100.00% ┃
-┃ Video ┃    0x0    ┃ 23.976 fps ┃ 00:05:00              ┃
-┃ Time  ┃ 00:00:00 @ 14074.81 fps                        ┃
-```
 
-Reproduced on: the 1080p h264+DTS sample (which instead **SIGSEGVs**, exit 139, once an
-audio track is present), an ffmpeg remux of it with audio stripped, a 30 s excerpt, and
-clean synthetic 1080p sources in both 8-bit h264 and 10-bit HEVC. Reproduces natively and
-in the container.
+**Consequence for a Tdarr plugin:** Tdarr spawns processes via Node `child_process` with no
+TTY, so a naive plugin would silently produce empty files in production. The plugin **must**
+allocate a PTY. `script` (util-linux 2.39.3) is present in the official Tdarr image and works.
 
-`strings` on the binary reveals error paths that are **never printed**:
-`svt_av1_enc_init failed`, `svt_av1_enc_set_parameter failed`, `svt_av1_enc_init_handle failed`.
-So SVT initialisation is failing and the error is swallowed.
+### F2 — Docker's default seccomp blocks io_uring (mux fails)
 
-Ruled out on evidence:
-- Encoder parameters — defaults fail identically.
-- FFmpeg ABI drift — xav's hand-declared `AVStream` and `AVCodecParameters` match the linked
-  FFmpeg 63 field-for-field, and fps/duration parse correctly (only the *output* reads 0x0).
-- The SVT-AV1 build itself — `SvtAv1EncApp` from the same build encodes fine standalone
-  (60 frames, 342 fps, valid 102 KB output).
-- Source-specific problems — clean synthetic sources fail too.
-- Container/seccomp — fails natively as well.
+Inside the stock official Tdarr image, xav encodes correctly but fails at the mux stage with
+`io_uring_setup failed (errno 1)` (EPERM). With `--security-opt seccomp=unconfined` the same
+command completes and produces a valid AV1 file.
 
-**Eight hypotheses tested and refuted** (each with a genuine relink — see F3):
+Needs either `seccomp=unconfined` or a custom profile allowing `io_uring_setup`/`_enter`/
+`_register`. On our own hardware that is our call to make, but it is a real deployment
+constraint and weakens container isolation.
 
-| # | Hypothesis | Result |
-|---|---|---|
-| 1 | Our encoder params | Defaults fail identically |
-| 2 | FFmpeg ABI drift | `AVStream`/`AVCodecParameters` match FFmpeg 63 field-for-field |
-| 3 | Our SVT v4.2.0 pin | Unpinned mainline HEAD fails identically |
-| 4 | Wrong SVT fork | `hdr` fork (upstream's first-listed) fails identically |
-| 5 | Source-specific | Synthetic 1080p 8-bit h264 and 10-bit HEVC fail too |
-| 6 | Container / seccomp | Fails natively as well |
-| 7 | FFmpeg 9 incompatibility | Rebuilt against **n8.1.2** (major 62, matching our stack) — fails identically. xav compiles cleanly against both 8.1.2 and 9.1-dev |
-| 8 | TQ/vship on a GPU-less box | `static_notq` build (vship off) fails identically |
+### F3 — Interrupted PGO builds leave a poisoned artifact
 
-**xav's own test suite passes on this machine for everything not GPU-dependent:**
-32 passed / 68 failed, and *every* failure is `hw_*` (20), `dim_hw_*` (6) or `tq::*` (42) —
-i.e. hardware decode and target quality, both of which need a GPU we don't have.
-The passing set covers software decode at 8- and 10-bit with crop/stride/fast/raw variants,
-and `tests.rs` calls `svt_av1_enc_init_handle` directly — so **SVT initialisation and
-encoding work inside xav's own harness on this exact build**.
+`cleanup_existing()` decides a component is complete purely by whether its artifact exists. A
+build interrupted between SVT's PGO *generate* and *use* stages leaves an instrumented
+`libSvtAv1Enc.a` that looks finished; later runs link it and fail with
+`undefined symbol: __llvm_profile_instrument_target`.
+**Rule: if a build is interrupted, wipe the component directory — never trust the resume.**
 
-(Note: running the suite requires `git submodule update --init` for `test_files`; without it
-all media-based tests fail with `decoder: open failed`, which is a missing-fixture artefact,
-not a defect.)
+### F4 — Changing an external library does not trigger a relink
 
-**Conclusion:** components work, unit tests pass, but the end-to-end CLI pipeline encodes
-zero chunks. This is an upstream bug, not a misconfiguration on our side. Next step is a bug
-report with this reproduction, not further local debugging — the binary is stripped, `no_std`
-and fat-LTO'd, so the cost of going deeper without upstream's help is steep.
+`build.sh` runs `cargo clean` only in its interactive path; with a preset it skips it, and
+cargo does not track `libSvtAv1Enc.a`. Swapping the SVT fork silently relinks nothing and
+reports "Build complete" in zero seconds against the old binary — this invalidated one of our
+own test results before it was caught.
+**Rule: always `cargo clean` before rebuilding after any dependency change.**
 
-### F2 — Interrupted PGO builds leave a poisoned artifact
+### F5 — No aomenc support
 
-`cleanup_existing()` decides a component is complete purely by whether its artifact file
-exists. A build interrupted between SVT's PGO *generate* and *use* stages leaves an
-instrumented `libSvtAv1Enc.a` that looks finished. Every later run links it and fails at the
-final link with `undefined symbol: __llvm_profile_instrument_target`.
-**Operational rule: if a build is interrupted, wipe the component directory — never trust the resume.**
+Zero mentions of aomenc/libaom in the 134 KB guide. Encoders: SVT-AV1, AVM (AV2), vvenc,
+x265, x264. Adopting xav means **switching encoders**, not just swapping the orchestrator.
+Emil has accepted this provided SVT-AV1 delivers.
 
-### F3 — Changing an external library does not trigger a relink
+### F6 — Other operational notes
 
-`build.sh` runs `cargo clean` only in its interactive path; with a preset (`static_tq`) it
-skips it. Cargo does not track `libSvtAv1Enc.a`, so swapping the SVT fork or version
-**silently relinks nothing** and reports "Build complete" in zero seconds against the old
-binary. This invalidated one of our own test results before it was caught.
-**Operational rule: always `cargo clean` before rebuilding after any dependency change.**
+- **Writable source directory required:** xav writes its hashed temp dir next to the input
+  (`os error 30`/EROFS on a read-only mount).
+- **Resume reuses `cmd.txt`:** re-running after an interrupted job replays the *original*
+  command, including its output filename, ignoring newly-passed arguments.
+- **Refuses to overwrite an existing scene file** — it exits rather than regenerate.
+- **Unpinned upstream clones:** opus, dav1d and FFmpeg are cloned from HEAD. Tolerable for a
+  consumer who keeps the built binary, but rebuilds are not reproducible.
+- **AVX-512 effectively required:** 15 hard `target_feature = "avx512bw"` gates with no
+  fallback; the build fails to compile at `-C target-cpu=x86-64-v3`.
+- **Test suite** needs `git submodule update --init` for `test_files`. With it: 32 passed,
+  68 failed, and every failure is `hw_*`/`dim_hw_*`/`tq::*` — i.e. GPU-dependent, expected
+  on this GPU-less box.
 
-### F4 — No aomenc support
+## Requirements for any future xav plugin
 
-Zero mentions of aomenc/libaom in the 134 KB guide. Encoders are SVT-AV1, AVM (AV2),
-vvenc, x265, x264. Since aomenc is our primary encoder today, adopting xav means
-**switching encoders**, not just swapping the orchestrator. Emil has accepted this
-trade-off provided SVT-AV1 delivers the results.
+1. **Allocate a PTY** (F1) — without it, silent empty output.
+2. **Validate the output before reporting success**: non-zero dimensions, frame count within
+   tolerance of source, duration match, minimum size floor. Throw on failure so Tdarr's error
+   handling runs and the original is never discarded.
+3. **Ensure io_uring is permitted** in the node container (F2).
+4. **Source directory must be writable** (F6).
 
-### F5 — Unpinned upstream clones
+## Still to do
 
-opus, dav1d and FFmpeg are cloned from HEAD with no pinning; FFmpeg landed on `n9.1-dev`
-built from a commit dated the same day. As a consumer this is tolerable (we keep the built
-binary), but a rebuild is not reproducible and can drift under us.
-
-## Requirements this imposes on any future xav plugin
-
-- **Validate the output before reporting success**: non-zero dimensions, frame count within
-  tolerance of the source, duration match, and a minimum size floor. Throw on failure so
-  Tdarr's own error handling runs and the original is never discarded. F1 is precisely the
-  failure mode this guards against — exit 0, plausible-looking file, no content.
-
-## Still not measured
-
-Baseline (Task 1), decode-correctness comparison (Task 3), speed/RAM bake-off (Task 4),
-audio/mux fidelity (Task 5). All gated on F1.
+Task 1 (baseline), Task 3 (decode-correctness comparison), Task 4 (matched speed/RAM
+bake-off), Task 5 (audio/mux fidelity vs current stack).
 
 **Comparison ground rule** (Emil, 2026-08-12): xav as its author intended vs our stack as we
 intended it — both sides use their own chosen component versions. No artificial pinning.
