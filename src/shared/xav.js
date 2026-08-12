@@ -191,9 +191,50 @@ const sizeGateDecision = (samples, opts) => {
 // argv construction
 // ---------------------------------------------------------------------------
 
+// xav validates encoder params itself (upstream src/svterr.rs) and ABORTS with
+// "argument parsing failed" before encoding anything if it disagrees. Handing it
+// an av1an param string unfiltered produces an instant, total failure -- our
+// first sweep launch died on all 40 runs in 20 seconds this way.
+//
+// Each entry is a param xav rejects outright, with its stated reason.
+const XAV_REJECTED_PARAMS = {
+  '--input-depth': 'xav only ever encodes yuv420p10le; setting depth is an error',
+  '--lookahead': 'svt-av1 locks lookahead internally; xav requires it be removed',
+  '--keyint': 'xav sets keyint itself -- chunk starts are keyframes',
+  '--irefresh-type': "on xav's NOT_RELEVANT list",
+  '--enable-overlays': 'xav rejects overlays as always dangerous with svt-av1',
+  // TQ owns rate control; passing either fights the target-quality search.
+  '--crf': 'target-quality owns rate control',
+  '--rc': 'target-quality owns rate control',
+  // xav does its own scene detection.
+  '--scd': 'xav owns scene detection',
+};
+
+// Strips params xav will reject, returning the cleaned string plus what was
+// dropped so the caller can log it rather than fail mysteriously.
+const filterEncoderParams = (raw) => {
+  const tokens = String(raw || '').trim().split(/\s+/).filter(Boolean);
+  const kept = [];
+  const dropped = [];
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (Object.prototype.hasOwnProperty.call(XAV_REJECTED_PARAMS, t)) {
+      const hasValue = i + 1 < tokens.length && !tokens[i + 1].startsWith('--');
+      dropped.push({ param: t, value: hasValue ? tokens[i + 1] : null, reason: XAV_REJECTED_PARAMS[t] });
+      if (hasValue) i++;
+      continue;
+    }
+    kept.push(t);
+  }
+
+  return { params: kept.join(' '), dropped };
+};
+
 const buildEncoderParams = (opts) => {
+  const extra = filterEncoderParams(opts.extraParams);
   const parts = [`--preset ${opts.preset}`];
-  if (opts.extraParams) parts.push(String(opts.extraParams).trim());
+  if (extra.params) parts.push(extra.params);
   return parts.join(' ');
 };
 
@@ -445,6 +486,8 @@ module.exports = {
   parseXavLine,
   projectVideoBytes,
   sizeGateDecision,
+  XAV_REJECTED_PARAMS,
+  filterEncoderParams,
   buildEncoderParams,
   buildXavArgs,
   shouldDownscale,

@@ -356,8 +356,32 @@ const plugin = async (args) => {
 
   if (isMkv && noImages && audioMatch && subMatch && orderCorrect) {
     log('File already clean — no changes needed');
+
+    // Still stage into workDir. Downstream encoders rely on the working file
+    // living there: xav creates its temp directory NEXT TO ITS INPUT with no
+    // way to relocate it, so returning the library path would scatter hashed
+    // temp dirs across the library and fail outright (os error 30) on a
+    // read-only share. Hardlink when we can, copy when we must.
+    const stagedPath = path.join(args.workDir, `${path.parse(filePath).name}.staged.mkv`);
+    try {
+      const sameDevice = fs.statSync(filePath).dev === fs.statSync(args.workDir).dev;
+      if (sameDevice) {
+        try { fs.unlinkSync(stagedPath); } catch (_) {}
+        fs.linkSync(filePath, stagedPath);
+        log(`Staged to workDir by hardlink: ${stagedPath}`);
+      } else {
+        fs.copyFileSync(filePath, stagedPath);
+        log(`Staged to workDir by copy (different filesystem): ${stagedPath}`);
+      }
+    } catch (err) {
+      // A hardlink can fail even on one device (e.g. across a bind mount), so
+      // fall back to copying rather than handing on the library path.
+      log(`Staging via link failed (${err.message}) — copying instead`);
+      fs.copyFileSync(filePath, stagedPath);
+    }
+
     return {
-      outputFileObj: args.inputFileObj,
+      outputFileObj: Object.assign({}, args.inputFileObj, { _id: stagedPath, file: stagedPath }),
       outputNumber: 2,
       variables: args.variables,
     };

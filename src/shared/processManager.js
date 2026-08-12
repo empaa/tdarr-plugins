@@ -116,6 +116,18 @@ const createProcessManager = (jobLog, dbg) => {
     });
   };
 
+  // Register a child spawned outside spawnAsync so cancellation, the ppid
+  // watchdog and cleanup cover it too. The pipe encode path spawns ffmpeg and
+  // xav directly in order to wire stdout to stdin, and an unregistered child
+  // survives a cancelled job as an orphaned encoder.
+  const adopt = (child) => {
+    if (!child || !child.pid) return child;
+    activeChildren.add(child);
+    child.once('close', () => activeChildren.delete(child));
+    dbg(`[ADOPT] tracking pid=${child.pid}`);
+    return child;
+  };
+
   let cancelHandler = null;
 
   const installCancelHandler = (onCancel) => {
@@ -148,6 +160,7 @@ const createProcessManager = (jobLog, dbg) => {
 
   return {
     spawnAsync,
+    adopt,
     startPpidWatcher,
     stopPpidWatchers,
     killAll,

@@ -526,6 +526,7 @@ const TESTS = [
   ['mezzanine: lossless ffv1, video-only, intra', mezzanineLosslessVideoOnlyIntra],
   ['mezzanine: input/output arg order', mezzanineInputBeforeOutput],
   ['sanitizeFile: returns sanitized file as working file', sanitizeReturnsSanitizedFileAsWorkingFile],
+  ['sanitizeFile: stages already-clean file into workDir', sanitizeStagesAlreadyCleanFileIntoWorkDir],
   ['audio: drops commentaries when keep off', audioDropsCommentariesWhenOff],
   ['audio: keeps additional-lang commentaries when keep on', audioKeepsAdditionalLangCommentariesWhenOn],
   ['subtitles: drop commentary, keep SDH/forced when off', subtitlesDropCommentaryKeepSdhForcedWhenOff],
@@ -543,8 +544,57 @@ const TESTS = [
   ['xav: detects CRF pinning at both bounds', xavDetectsCrfPinning],
   ['xav: argv is video-only and carries TQ', xavArgsAreVideoOnlyAndCarryTq],
   ['xav: pipe argv omits input, ffmpeg scales', xavPipeArgsOmitInputAndScale],
+  ['xav: strips params xav rejects outright', xavFiltersParamsXavRejects],
+  ['xav: param filter handles empty and clean input', xavParamFilterHandlesEmptyAndClean],
   ['xav: size projection is frame-proportional', xavProjectionIsFrameProportional],
 ];
+
+async function sanitizeStagesAlreadyCleanFileIntoWorkDir() {
+  injectProcessManagerStub();
+  const { plugin } = require(path.join(SRC, 'sanitizeFile', 'index.js'));
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sanitize-staged-'));
+  const libDir = path.join(tmp, 'library');
+  const workDir = path.join(tmp, 'work');
+  fs.mkdirSync(libDir); fs.mkdirSync(workDir);
+
+  const srcFile = path.join(libDir, 'Already Clean (2009).mkv');
+  fs.writeFileSync(srcFile, 'x'.repeat(2048));
+
+  // An MKV with one video + one English audio, in order, no images or subs:
+  // exactly the "already clean" shape that used to return the library path.
+  const args = {
+    inputFileObj: {
+      _id: srcFile,
+      file: srcFile,
+      ffProbeData: {
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'h264' },
+          { index: 1, codec_type: 'audio', codec_name: 'dts', channels: 6, tags: { language: 'eng' } },
+        ],
+      },
+    },
+    workDir,
+    inputs: { audio_language: 'eng' },
+    jobLog: () => {},
+    variables: {},
+  };
+
+  const res = await plugin(args);
+  assert(res.outputNumber === 2, `already-clean must still use port 2, got ${res.outputNumber}`);
+
+  const outPath = res.outputFileObj._id;
+  assert(outPath !== srcFile,
+    'already-clean file must NOT be handed on at its library path -- xav would write its '
+    + 'temp dir there');
+  assert(path.dirname(fs.realpathSync(outPath)) === fs.realpathSync(workDir),
+    `staged file must live in workDir, got ${outPath}`);
+  assert(res.outputFileObj.file === outPath, '_id and file must both point at the staged copy');
+  assert(fs.statSync(outPath).size === 2048, 'staged copy must have the original content');
+  assert(fs.existsSync(srcFile), 'the original library file must be left untouched');
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
 
 // --- xav ------------------------------------------------------------------
 // The fixture is a real capture from the Avatar bake-off (1080p, TQ, 2 workers),
@@ -752,6 +802,50 @@ async function xavPipeArgsOmitInputAndScale() {
   assert(j.includes('scale=1920:-2:flags=lanczos'), `scale filter missing: ${j}`);
   assert(j.includes('yuv4mpegpipe'), `must emit Y4M: ${j}`);
   assert(j.includes('-an') && j.includes('-sn'), `pipe must be video-only: ${j}`);
+}
+
+async function xavFiltersParamsXavRejects() {
+  const { filterEncoderParams } = require(path.join(SRC, 'shared', 'xav.js'));
+  // Our real production av1an SVT param string. Handed to xav unfiltered it
+  // aborts with "argument parsing failed" before encoding anything -- this is
+  // exactly how the first parameter sweep died on all 40 runs in 20 seconds.
+  const av1anParams = '--scd 0 --crf 25 --rc 0 --preset 4 --tune 1 --input-depth 10 '
+    + '--lookahead 48 --keyint -1 --irefresh-type 2 --enable-overlays 1 '
+    + '--enable-variance-boost 1 --variance-boost-strength 2 --enable-qm 1 --tile-columns 1';
+
+  const { params, dropped } = filterEncoderParams(av1anParams);
+  const droppedNames = dropped.map((d) => d.param);
+
+  for (const rejected of ['--input-depth', '--lookahead', '--keyint', '--irefresh-type',
+    '--enable-overlays', '--crf', '--rc', '--scd']) {
+    assert(droppedNames.includes(rejected), `${rejected} must be dropped, got: ${droppedNames}`);
+    assert(!params.includes(rejected), `${rejected} survived into: ${params}`);
+  }
+
+  // Everything xav accepts must survive untouched.
+  for (const kept of ['--preset 4', '--tune 1', '--enable-variance-boost 1',
+    '--variance-boost-strength 2', '--enable-qm 1', '--tile-columns 1']) {
+    assert(params.includes(kept), `${kept} should have been kept, got: ${params}`);
+  }
+
+  // Negative values must be consumed as values, not mistaken for the next flag.
+  assert(!params.includes('-1'), `a dropped param's negative value leaked: ${params}`);
+  assert(dropped.every((d) => d.reason && d.reason.length > 0), 'every drop needs a stated reason');
+}
+
+async function xavParamFilterHandlesEmptyAndClean() {
+  const { filterEncoderParams, buildEncoderParams } = require(path.join(SRC, 'shared', 'xav.js'));
+  assert(filterEncoderParams('').params === '', 'empty input yields empty params');
+  assert(filterEncoderParams(undefined).dropped.length === 0, 'undefined input drops nothing');
+
+  const clean = filterEncoderParams('--tune 1 --sharpness 1');
+  assert(clean.dropped.length === 0, `clean params must not be filtered: ${JSON.stringify(clean.dropped)}`);
+
+  // buildEncoderParams always supplies the preset and filters the rest.
+  const built = buildEncoderParams({ preset: 6, extraParams: '--lookahead 48 --tune 2' });
+  assert(built.includes('--preset 6'), `preset missing: ${built}`);
+  assert(built.includes('--tune 2'), `tune should survive: ${built}`);
+  assert(!built.includes('--lookahead'), `lookahead should be stripped: ${built}`);
 }
 
 async function xavProjectionIsFrameProportional() {
