@@ -80,12 +80,34 @@ Ruled out on evidence:
 - Source-specific problems — clean synthetic sources fail too.
 - Container/seccomp — fails natively as well.
 
-Leading hypothesis: **SVT-AV1 fork mismatch.** xav hardcodes `EbSvtAv1EncConfiguration`
-(with a fixed `_padding: [u8; 128]` tail) and carries fork-specific compile-time handling
-(`Cargo.toml` has an `svt-essential` feature that `build.sh` enables only for that fork), so
-the forks' struct layouts genuinely differ — with **no compile-time check**. All testing so
-far used `mainline`, chosen by us; upstream lists `hdr` first and prompts interactively.
-Test in progress.
+**Eight hypotheses tested and refuted** (each with a genuine relink — see F3):
+
+| # | Hypothesis | Result |
+|---|---|---|
+| 1 | Our encoder params | Defaults fail identically |
+| 2 | FFmpeg ABI drift | `AVStream`/`AVCodecParameters` match FFmpeg 63 field-for-field |
+| 3 | Our SVT v4.2.0 pin | Unpinned mainline HEAD fails identically |
+| 4 | Wrong SVT fork | `hdr` fork (upstream's first-listed) fails identically |
+| 5 | Source-specific | Synthetic 1080p 8-bit h264 and 10-bit HEVC fail too |
+| 6 | Container / seccomp | Fails natively as well |
+| 7 | FFmpeg 9 incompatibility | Rebuilt against **n8.1.2** (major 62, matching our stack) — fails identically. xav compiles cleanly against both 8.1.2 and 9.1-dev |
+| 8 | TQ/vship on a GPU-less box | `static_notq` build (vship off) fails identically |
+
+**xav's own test suite passes on this machine for everything not GPU-dependent:**
+32 passed / 68 failed, and *every* failure is `hw_*` (20), `dim_hw_*` (6) or `tq::*` (42) —
+i.e. hardware decode and target quality, both of which need a GPU we don't have.
+The passing set covers software decode at 8- and 10-bit with crop/stride/fast/raw variants,
+and `tests.rs` calls `svt_av1_enc_init_handle` directly — so **SVT initialisation and
+encoding work inside xav's own harness on this exact build**.
+
+(Note: running the suite requires `git submodule update --init` for `test_files`; without it
+all media-based tests fail with `decoder: open failed`, which is a missing-fixture artefact,
+not a defect.)
+
+**Conclusion:** components work, unit tests pass, but the end-to-end CLI pipeline encodes
+zero chunks. This is an upstream bug, not a misconfiguration on our side. Next step is a bug
+report with this reproduction, not further local debugging — the binary is stripped, `no_std`
+and fat-LTO'd, so the cost of going deeper without upstream's help is steep.
 
 ### F2 — Interrupted PGO builds leave a poisoned artifact
 
