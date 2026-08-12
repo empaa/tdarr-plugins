@@ -143,10 +143,12 @@ Expected: `v4.2.0`. This pin exists **only to make Task 4's speed comparison hon
 git clone https://github.com/emrakyz/xav /mnt/vm_data/xav
 cd /mnt/vm_data/xav
 git log -1 --format='%H %ci' | tee -a /tmp/xav-build.log
-time ./build.sh static_notq mainline 2>&1 | tee -a /tmp/xav-build.log
+time ./build.sh static_tq mainline 2>&1 | tee -a /tmp/xav-build.log
 ```
 
-`static_notq` = mode 2 (no Vship / no TQ), `mainline` = the SVT fork matching prod. This builds opus, dav1d, SVT-AV1 (with a PGO training pass that downloads a 4K sample) and FFmpeg in parallel, then link-time-optimises the Rust binary.
+`static_tq` = mode 1, which additionally builds Vship. On this GPU-less VM `HW=vulkan` is selected automatically and the Vulkan backend compiles without any GPU (see Phase B), so building it now avoids a second full build later. `mainline` = the SVT fork matching prod.
+
+**Fallback:** if the resulting binary won't run without a GPU — e.g. it tries to open a Vulkan device at startup and aborts — rebuild with `./build.sh static_notq mainline` for Phase A and defer the TQ binary to Phase B. Record which one Phase A actually used, since it affects nothing else but must be known when reading the numbers. This builds opus, dav1d, SVT-AV1 (with a PGO training pass that downloads a 4K sample) and FFmpeg in parallel, then link-time-optimises the Rust binary.
 
 **Watch RAM.** With 7 GB total, parallel builds plus fat LTO may OOM. If the OOM killer fires, re-run — the script skips already-completed components (it checks for each artifact and returns early), so a rerun resumes rather than restarting.
 
@@ -392,12 +394,20 @@ Only if the verdict is go, and the message is not "adopt xav" — it's **"the im
 
 ---
 
-## Phase B — gated, requires hardware this VM does not have
+## Phase B — target quality (build here, run on the host's GPU)
 
-**Do not start Phase B unless Phase A returns a go.** Recorded here so the requirements are known, not as scheduled work.
+**Do not start Phase B unless Phase A returns a go.**
 
-Requires: GPU passed through to this VM (for Vship — SSIMU2/Butteraugli, and CUDA specifically for CVVDP), and materially more RAM than 7 GB (4K chunks alone are ~7.5 GB per worker). Also requires sourcing a 4K HDR sample, which does not exist locally today.
+**The VM does not need a GPU.** Vship's Vulkan backend (`vship.mk: buildvulkan`) is a plain clang++ compile with pre-embedded SPIR-V shaders — no GPU, no driver, no Vulkan SDK at build time, and `build.sh` builds Vulkan-Headers and the loader from source itself. Since `has_nvidia()` finds no NVIDIA PCI device here, `HW=vulkan` is selected automatically. So `./build.sh static_tq mainline` produces a TQ-capable binary on this GPU-less VM with no patching, and the GPU is only needed at *runtime*, in a container on the Unraid host — which is far easier to arrange than VM passthrough.
+
+The CUDA backend is **not** buildable here: `buildcuda` runs `nvcc -arch=native`, which queries an installed GPU to pick the compute capability. Building it would require the CUDA toolkit in the VM plus patching `-arch=native` to an explicit `-arch=sm_XX`. Not worth it for what it buys.
+
+What the Vulkan build costs: **CVVDP is unavailable** (CUDA-only), leaving Butteraugli (target < 8) and SSIMULACRA2 (target > 10) — SSIMU2 being the one that matters most for AV1. FFmpeg also gets Vulkan hwaccels rather than nvdec/cuvid, so `--hwdec` works via a different path and CUDA-only VC-1 hardware decode is out.
+
+Runtime prerequisite to verify: a Vulkan binary in a container needs the NVIDIA ICD exposed, so the container needs `NVIDIA_DRIVER_CAPABILITIES` to include `graphics` (not just `compute,utility`) for nvidia-container-toolkit to mount `nvidia_icd.json`.
+
+Still requires, and therefore still deferred: materially more RAM than 7 GB for 4K work (~7.5 GB per worker per 4K 10-bit chunk), and a 4K HDR sample, which does not exist locally today.
 
 Would test: per-scene target-quality convergence and its real cost (upstream claims 2.0–3.5× encode time), quality-per-bitrate versus ab-av1's VMAF-targeted search at matched output size, 4K HDR memory ceiling versus the current stack's OOM behaviour, and GPU-accelerated decode throughput.
 
-Build command changes to `./build.sh static_tq mainline` (mode 1, clones and builds Vship).
+**Execution note:** Phase B runs on the Unraid host, which this VM cannot `docker exec` into. It needs Emil to run the commands, or to be driven from the sibling `../hometower` project.
