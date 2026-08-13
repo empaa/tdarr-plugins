@@ -627,8 +627,42 @@ async function sourceDurationComesFromVideoStream() {
     'unparseable tag falls through to container');
 }
 
+// The mean alone cannot distinguish "the band is unreachable, widen it" from
+// "a few chunks are stuck at the CRF floor and nothing will fix them". Those
+// need opposite responses, and detectCrfPinning stays silent unless EVERY chunk
+// pins -- so starved chunks were previously invisible.
+async function targetHitSummarySeparatesFailureModes() {
+  const { summariseTargetHit } = require(path.join(SRC, 'shared', 'xav.js'));
+
+  // Uniform near-miss: everything just under the band, nothing at the floor.
+  // Diagnosis is "band too narrow", and there is nothing starved.
+  const uniform = [78.9, 79.0, 79.1, 79.2].map((score, i) => ({ chunk: i, crf: 14, score }));
+  const u = summariseTargetHit(uniform, '79.8-80.2', '5-63');
+  assert(u.inBand === 0 && u.below === 4, `uniform: ${JSON.stringify(u)}`);
+  assert(u.starved.length === 0, 'nothing is starved when no chunk is at the floor');
+
+  // Mixed: most chunks fine, two pinned at the CRF floor and still far short.
+  // Those two are unfixable by any parameter change and must be called out.
+  const mixed = [
+    { chunk: 0, crf: 14, score: 80.0 },
+    { chunk: 1, crf: 14, score: 79.9 },
+    { chunk: 2, crf: 5, score: 49.86 },
+    { chunk: 3, crf: 5, score: 61.2 },
+    { chunk: 4, crf: 5, score: 80.1 },
+  ];
+  const m = summariseTargetHit(mixed, '79.8-80.2', '5-63');
+  assert(m.inBand === 3, `three chunks in band, got ${m.inBand}`);
+  assert(m.atFloor === 3, `three chunks at the floor, got ${m.atFloor}`);
+  assert(m.starved.length === 2,
+    `only the floor chunks that ALSO miss are starved, got ${m.starved.length}`);
+  assert(m.worst[0].score === 49.86, 'worst chunks listed worst-first');
+
+  assert(summariseTargetHit([], '79.8-80.2', '5-63') === null, 'no chunks -> no summary');
+}
+
 const TESTS = [
   ['processManager: killAll spares later children', killAllDoesNotReachLaterChildren],
+  ['xav: target-hit summary separates failure modes', targetHitSummarySeparatesFailureModes],
   ['xav: source duration comes from the video stream', sourceDurationComesFromVideoStream],
   ['xav: argv carries the researched param set', xavArgvCarriesResearchedParams],
   ['vsSource: lsmas line', vsSourceLsmasLine],

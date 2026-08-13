@@ -156,7 +156,7 @@ const plugin = async (args) => {
   const { probeNonVideoSize, mergeAudioVideo } = require('../shared/audioMerge');
   const {
     buildXavArgs, buildPipeFfmpegArgs, filterEncoderParams, resolveParamSet, createXavTracker, sourceVideoDuration,
-    validateOutput, detectCrfPinning, shouldDownscale, RESOLUTION_PRESETS,
+    validateOutput, detectCrfPinning, logTargetHit, shouldDownscale, RESOLUTION_PRESETS,
   } = require('../shared/xav');
 
   const inputs = args.inputs || {};
@@ -366,6 +366,7 @@ const plugin = async (args) => {
       `[xav] achieved SSIMULACRA2: mean ${mean.toFixed(2)}, `
       + `worst ${Math.min(...scores).toFixed(2)} across ${scores.length} chunks`,
     );
+    logTargetHit(jobLog, tracker.getChunkStats(), targetQuality, crfRange);
     const pinning = detectCrfPinning(crfs, crfRange);
     if (pinning.pinned) {
       jobLog(

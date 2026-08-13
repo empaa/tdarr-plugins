@@ -468,6 +468,57 @@ const formatEta = (seconds) => {
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 };
 
+// Why a run missed its target band. `mean` is not enough to act on: a uniform
+// offset (the band is unreachable, widen it), a few chunks stuck at the CRF
+// floor (unencodable content, nothing to tune), and a genuinely scattered search
+// all produce the same mean and call for different responses.
+//
+// Note detectCrfPinning only fires when EVERY chunk pins, so individual chunks
+// sitting at the floor and scoring far below target are otherwise invisible.
+const summariseTargetHit = (stats, targetQuality, crfRange) => {
+  if (!stats || !stats.length) return null;
+  const [lo, hi] = String(targetQuality).split('-').map(Number);
+  if (!(lo > 0)) return null;
+  const [crfLo] = String(crfRange).split('-').map(Number);
+
+  const below = stats.filter((s) => s.score < lo);
+  const above = stats.filter((s) => s.score > (hi || lo));
+  const inBand = stats.length - below.length - above.length;
+  const atFloor = stats.filter((s) => Math.abs(s.crf - crfLo) < 0.01);
+  // Chunks that are both at the CRF floor AND still short of the target had
+  // nowhere left to go -- no parameter change reaches them.
+  const starved = atFloor.filter((s) => s.score < lo);
+
+  // Sort here rather than trusting the caller -- worst-first is part of this
+  // function's contract, not an accident of how the tracker happens to store it.
+  const worst = stats.slice().sort((a, b) => a.score - b.score).slice(0, 3);
+
+  return { total: stats.length, inBand, below: below.length, above: above.length,
+    atFloor: atFloor.length, starved, worst };
+};
+
+// Renders summariseTargetHit for the job log. Shared so both plugins report the
+// same diagnosis in the same words.
+const logTargetHit = (jobLog, stats, targetQuality, crfRange) => {
+  const t = summariseTargetHit(stats, targetQuality, crfRange);
+  if (!t) return;
+  jobLog(
+    `[xav] target ${targetQuality}: ${t.inBand}/${t.total} chunks in band, `
+    + `${t.below} below, ${t.above} above; ${t.atFloor} at the CRF floor`,
+  );
+  if (t.starved.length) {
+    jobLog(
+      `[xav] WARNING: ${t.starved.length} chunk(s) sat at the CRF floor and still `
+      + 'missed the target -- the target is unreachable on that content, so no '
+      + 'parameter change will fix it. These drag the mean down on their own.',
+    );
+  }
+  if (t.inBand < t.total) {
+    jobLog(`[xav] worst chunks: ${t.worst.map(
+      (w) => `#${w.chunk} crf ${w.crf.toFixed(2)} -> ${w.score.toFixed(2)}`).join(', ')}`);
+  }
+};
+
 const createXavTracker = (opts) => {
   const {
     updateWorker, jobLog, dbg, onSizeExceeded,
@@ -577,6 +628,13 @@ const createXavTracker = (opts) => {
     wasAborted: () => aborted,
     getChunkCrfs: () => Array.from(chunkCrfs.values()),
     getChunkScores: () => Array.from(chunkScores.values()),
+    // Per-chunk (crf, score) pairs. The mean alone hides why a run misses its
+    // target: a uniform offset and a handful of chunks stuck at the CRF floor
+    // look identical in the mean, and need opposite responses.
+    getChunkStats: () => Array.from(chunkScores.keys())
+      .filter((c) => chunkCrfs.has(c))
+      .map((c) => ({ chunk: c, crf: chunkCrfs.get(c), score: chunkScores.get(c) }))
+      .sort((a, b) => a.score - b.score),
     getState: () => state,
   };
 };
@@ -605,6 +663,8 @@ module.exports = {
   validateOutput,
   sourceVideoDuration,
   detectCrfPinning,
+  summariseTargetHit,
+  logTargetHit,
   createXavTracker,
   formatEta,
 };
