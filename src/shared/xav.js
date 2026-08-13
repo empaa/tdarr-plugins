@@ -33,6 +33,8 @@ const DURATION_TOLERANCE_S = 0.5;
 // progress AND a projection that has stopped rising before aborting.
 const GATE_MIN_PERCENT = 30;
 const GATE_STABLE_SAMPLES = 3;
+// Max spread across the recent samples for the projection to count as settled.
+const GATE_STABLE_TOLERANCE = 0.05;
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -157,11 +159,32 @@ const PHASE_STATUS = {
 // Estimation and the size gate
 // ---------------------------------------------------------------------------
 
-// Projected final video bytes from bytes-so-far scaled by frame progress.
-// Biased high early (see GATE_MIN_PERCENT) and converges as chunks complete.
-const projectVideoBytes = (bytesSoFar, frames, totalFrames) => {
-  if (!frames || !totalFrames || bytesSoFar <= 0) return 0;
-  return Math.round(bytesSoFar * (totalFrames / frames));
+// The `m` field of xav's master line is ALREADY a whole-file projection --
+// kbps x TOTAL duration -- not bytes written so far. Two proofs, both from our
+// own captured fixture (test/fixtures/xav-tui-sample.log):
+//
+//   63%  1838/2899  57605k  870.6m
+//   66%  1920/2899  57515k  869.3m     <-- fell while progress rose
+//  100%  2899/2899  59239k  895.3m
+//
+// It reads 97% of its final value at 63% progress (bytes-so-far would read
+// ~63%), and it DECREASES between ticks as the running average bitrate falls.
+// Bytes on disk can do neither.
+//
+// It is also base-10 MB: 57527 kbps x (2899/23.976)s / 8 = 869.5e6 bytes, and
+// that line reads "869.5m". The old code multiplied by 1024^2, overstating a
+// further 4.86%.
+//
+// The previous implementation scaled this by totalFrames/frames on top, so the
+// estimate was inflated by exactly 1/progress -- 100x at 1%, 3.3x at 30%, which
+// is precisely where the size gate first becomes eligible. At the shipped 80%
+// default that aborted any encode heading for more than ~24% of source, i.e.
+// nearly all of them. It went unnoticed because every test run used pct=100,
+// which disables the gate outright.
+const MEGABYTE = 1e6;
+const projectedVideoBytes = (megabytes) => {
+  if (!(megabytes > 0)) return 0;
+  return Math.round(megabytes * MEGABYTE);
 };
 
 // Fires only once real progress exists AND the projection has stopped rising,
@@ -175,10 +198,17 @@ const sizeGateDecision = (samples, opts) => {
   const recent = samples.slice(-GATE_STABLE_SAMPLES);
   if (recent[recent.length - 1].percent < GATE_MIN_PERCENT) return { abort: false };
 
-  // Stable or falling: no sample may exceed the one before it.
-  for (let i = 1; i < recent.length; i++) {
-    if (recent[i].projectedBytes > recent[i - 1].projectedBytes) return { abort: false };
-  }
+  // Require CONVERGENCE, not merely decline. The old guard accepted any
+  // non-increasing run -- which a 1/progress decay satisfies from its first
+  // three samples while still being several times too high, so it licensed
+  // exactly the false aborts it was meant to prevent. Spread-within-tolerance
+  // rejects a curve that is still moving in either direction, and accepts the
+  // small two-way wobble of a converged running average.
+  const values = recent.map((s) => s.projectedBytes);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (!(min > 0)) return { abort: false };
+  if (max / min > 1 + GATE_STABLE_TOLERANCE) return { abort: false };
 
   const projectedTotal = recent[recent.length - 1].projectedBytes + (nonVideoBytes || 0);
   const percent = (projectedTotal / sourceBytes) * 100;
@@ -499,8 +529,7 @@ const createXavTracker = (opts) => {
     }
     if (!state) return;
 
-    const bytesSoFar = Math.round(state.megabytes * 1024 * 1024);
-    const projectedVideo = projectVideoBytes(bytesSoFar, state.frames, state.totalFrames);
+    const projectedVideo = projectedVideoBytes(state.megabytes);
     samples.push({ percent: state.percent, projectedBytes: projectedVideo });
 
     const decision = sizeGateDecision(samples, {
@@ -518,14 +547,12 @@ const createXavTracker = (opts) => {
 
     const remaining = Math.max(0, state.totalFrames - state.frames);
     const etaS = smoothedFps > 0 ? Math.round(remaining / smoothedFps) : state.etaSeconds;
-    const actualGb = bytesSoFar / (1024 ** 3);
     const estFinalGb = (projectedVideo + (nonVideoBytes || 0)) / (1024 ** 3);
 
     push({
       percentage: Math.min(99, state.percent),
       fps: Math.round(smoothedFps * 10) / 10,
       ETA: formatEta(etaS),
-      outputFileSizeInGbytes: actualGb,
       estimatedFinalFileSizeInGbytes: estFinalGb,
       estimatedFinalSize: estFinalGb,
       estSize: estFinalGb,
@@ -559,10 +586,11 @@ module.exports = {
   EMPTY_OUTPUT_FLOOR_BYTES,
   GATE_MIN_PERCENT,
   GATE_STABLE_SAMPLES,
+  GATE_STABLE_TOLERANCE,
   stripAnsi,
   parseXavEvents,
   parseXavLine,
-  projectVideoBytes,
+  projectedVideoBytes,
   sizeGateDecision,
   XAV_REJECTED_PARAMS,
   MAINLINE_PARAMS,

@@ -677,7 +677,8 @@ const TESTS = [
   ['xav: pipe argv keeps input, ffmpeg scales', xavPipeArgsKeepInputAndScale],
   ['xav: strips params xav rejects outright', xavFiltersParamsXavRejects],
   ['xav: param filter handles empty and clean input', xavParamFilterHandlesEmptyAndClean],
-  ['xav: size projection is frame-proportional', xavProjectionIsFrameProportional],
+  ['xav: estimate does not double-extrapolate', xavEstimateDoesNotDoubleExtrapolate],
+  ['xav: size gate waits for convergence', sizeGateWaitsForConvergenceNotJustDecline],
   ['xavEncode: happy path replays real xav output', xavEncodePluginHappyPath],
   ['xavEncode: refuses input outside workDir', xavEncodeRefusesInputOutsideWorkDir],
 ];
@@ -894,11 +895,15 @@ async function xavSizeGateNeedsProgressAndStability() {
   ];
   assert(sizeGateDecision(rising, opts).abort === false, 'must not abort on a rising projection');
 
-  // Converged and genuinely over budget.
+  // Converged and genuinely over budget. NOTE: "converged" now means the spread
+  // is inside GATE_STABLE_TOLERANCE, not merely that the series declines. A
+  // steady decline like 900/850/800 is still moving ~6% per sample and is no
+  // longer accepted -- treating decline as convergence is what let a 1/progress
+  // curve satisfy the guard while several times too high.
   const settled = [
-    { percent: 40, projectedBytes: 900 },
-    { percent: 45, projectedBytes: 850 },
-    { percent: 50, projectedBytes: 800 },
+    { percent: 40, projectedBytes: 810 },
+    { percent: 45, projectedBytes: 800 },
+    { percent: 50, projectedBytes: 805 },
   ];
   const d = sizeGateDecision(settled, opts);
   assert(d.abort === true, `should abort at 80% of source against a 50% limit, got ${JSON.stringify(d)}`);
@@ -1061,11 +1066,78 @@ async function xavParamFilterHandlesEmptyAndClean() {
   assert(!built.includes('--lookahead'), `lookahead should be stripped: ${built}`);
 }
 
-async function xavProjectionIsFrameProportional() {
-  const { projectVideoBytes } = require(path.join(SRC, 'shared', 'xav.js'));
-  assert(projectVideoBytes(500, 1000, 2000) === 1000, 'half the frames should project double');
-  assert(projectVideoBytes(0, 1000, 2000) === 0, 'no bytes yet projects zero');
-  assert(projectVideoBytes(500, 0, 2000) === 0, 'no frames yet projects zero');
+// xav's `m` field is a WHOLE-FILE projection (kbps x TOTAL duration), not bytes
+// written so far. Proof is in our own captured fixture: it reads 870.6 at 63%
+// progress against an 895.3 final -- 97% of the final value, not 63% of it --
+// and it DECREASES between ticks (870.6 -> 869.3 as progress rises) because the
+// running average bitrate falls. Bytes on disk cannot decrease.
+//
+// The old code multiplied it by totalFrames/frames anyway, inflating the
+// estimate by exactly 1/progress: 100x at 1%, 3.3x at 30% -- which is precisely
+// where the size gate first becomes eligible.
+async function xavEstimateDoesNotDoubleExtrapolate() {
+  const { parseXavEvents, projectedVideoBytes } = require(path.join(SRC, 'shared', 'xav.js'));
+  const raw = fs.readFileSync(XAV_FIXTURE, 'utf8');
+  const enc = parseXavEvents(raw).filter((e) => e.type === 'encode' && e.megabytes > 0);
+  assert(enc.length >= 2, 'fixture must contain encode events');
+
+  const finalBytes = projectedVideoBytes(enc[enc.length - 1].megabytes);
+
+  // `m` is base-10 MB: 57527 kbps x (2899/23.976)s / 8 = 869.5e6 bytes, and the
+  // line reads "869.5m". Treating it as MiB overstates by 4.86%.
+  assert(Math.abs(projectedVideoBytes(869.5) - 869500000) < 1,
+    `m must convert as base-10 MB, got ${projectedVideoBytes(869.5)}`);
+
+  // Every mid-encode sample must already be close to the final, because xav has
+  // been averaging bitrate over completed chunks all along.
+  for (const ev of enc) {
+    if (ev.percent < 50) continue;
+    const est = projectedVideoBytes(ev.megabytes);
+    const ratio = est / finalBytes;
+    assert(ratio > 0.9 && ratio < 1.1,
+      `at ${ev.percent}% the estimate is ${(ratio * 100).toFixed(0)}% of final `
+      + `(${(est / 1e6).toFixed(1)} MB vs ${(finalBytes / 1e6).toFixed(1)} MB) -- `
+      + 'this is the double-extrapolation bug');
+  }
+}
+
+// The gate only fires once the projection has CONVERGED. The old guard accepted
+// any non-increasing run, which a 1/progress decay satisfies from its first three
+// samples while still being 3.3x too high -- so at the shipped 80% default it
+// would have aborted essentially every good encode at 30% progress.
+async function sizeGateWaitsForConvergenceNotJustDecline() {
+  const { sizeGateDecision } = require(path.join(SRC, 'shared', 'xav.js'));
+  const opts = { maxEncodedPercent: 80, sourceBytes: 1000e6, nonVideoBytes: 0 };
+
+  // An encode heading for 30% of source, seen through the old 1/progress
+  // inflation: still falling steeply, still far too high. Must NOT abort.
+  const decaying = [10, 20, 30].map((p) => ({
+    percent: p, projectedBytes: 300e6 / (p / 100),
+  }));
+  assert(!sizeGateDecision(decaying, opts).abort,
+    'a steeply falling projection is not converged -- aborting here kills good encodes');
+
+  // Converged and genuinely over the limit: must abort.
+  const overLimit = [40, 45, 50].map((p) => ({ percent: p, projectedBytes: 900e6 }));
+  assert(sizeGateDecision(overLimit, opts).abort, 'converged and over limit must abort');
+
+  // Converged and under the limit: must not abort.
+  const underLimit = [40, 45, 50].map((p) => ({ percent: p, projectedBytes: 300e6 }));
+  assert(!sizeGateDecision(underLimit, opts).abort, 'converged and under limit must not abort');
+
+  // Small wobble around a converged value is still converged -- the corrected
+  // projection is xav's own running average and moves in both directions.
+  const wobble = [
+    { percent: 40, projectedBytes: 900e6 },
+    { percent: 45, projectedBytes: 890e6 },
+    { percent: 50, projectedBytes: 903e6 },
+  ];
+  assert(sizeGateDecision(wobble, opts).abort,
+    'a 1.5% wobble must still count as converged, or the gate never fires');
+
+  // Below the progress floor nothing fires, however stable it looks.
+  const early = [5, 10, 15].map((p) => ({ percent: p, projectedBytes: 900e6 }));
+  assert(!sizeGateDecision(early, opts).abort, 'must respect the progress floor');
 }
 
 // Plugin-level test: replays the REAL captured xav output through xavEncode with
