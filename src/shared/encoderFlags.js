@@ -136,12 +136,15 @@ const svtConfig = (preset, hdrSvt) => {
     // flag we removed measured as contributing nothing, which confirms the
     // "nine of twenty did nothing" finding by measurement rather than by reading.
     //
-    // CAVEAT, deliberately recorded: this is optimal ON SSIMULACRA2, ON CLEAN
-    // DIGITAL CONTENT. The maintainer consensus may well encode banding and
-    // flat-area concerns that a full-reference metric does not reward. Our pipeline
-    // gates on SSIMULACRA2, so optimising for it is self-consistent -- but this is
-    // not evidence the maintainers are wrong, and it is not yet confirmed on grainy
-    // sources (the grain sweep was still running when this was set).
+    // CONFIRMED on a second, very different source (35mm-era film). qm-min 0 is
+    // correctly signed in 6 of 6 tier-source combinations, and the stake is far
+    // larger there: at the top tier it is worth ~6.8% against ~1.2% on clean
+    // digital, symmetric in both directions (qm-min 6 costs +6.78%).
+    //
+    // CAVEAT that still stands: this is optimal ON SSIMULACRA2. Every maintainer
+    // ships 4-6, which may encode banding and flat-area concerns a full-reference
+    // metric does not reward. Our pipeline gates on SSIMULACRA2, so optimising for
+    // it is self-consistent -- but this is not evidence the maintainers are wrong.
     ['qm-min', '0'],
     // Keep QM itself ON regardless: disabling costs +4.3% / +6.6% / +15.6%, worst
     // at the top tier, and +33.9% on the hdr fork. This knob is load-bearing.

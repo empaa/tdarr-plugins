@@ -40,7 +40,20 @@
 # the per-window values. The MIN is the intended discriminator; the others are
 # for calibration and sanity.
 #
-# STATUS 2026-08-13: THE PREMISE IS UNVALIDATED. DO NOT SET A THRESHOLD YET.
+# STATUS 2026-08-13: NOT NEEDED FOR PARAMETER SELECTION. PREMISE STILL UNVALIDATED.
+#
+# The motivation for this script was routing grainy vs clean content to different
+# encoder settings. The grain sweep removed that motivation: the same parameter
+# set wins on both a clean digital source and a 35mm-era one, at every tier. There
+# are no different settings to route to, so no classifier is required. Calibration
+# was cancelled rather than run.
+#
+# It stays in the tree because two live use cases would justify calibrating it,
+# both with clearer success criteria than the original: predicting ENCODE TIME for
+# scheduling, and picking a quality TIER per title. Neither is scoped yet.
+#
+# The measurement notes below remain accurate and are why a threshold must not be
+# set from the two samples we have.
 #
 # First run on our two samples came out INVERTED -- the grainy 35mm source
 # probed 3-5x CHEAPER than the clean digital one, at CRF 12, 22 and 30 alike:

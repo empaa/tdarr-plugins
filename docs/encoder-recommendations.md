@@ -4,8 +4,13 @@ Status 2026-08-13. Every recommendation is tagged by what it rests on:
 **measured** (our own runs), **researched** (community sources, see
 `svt-av1-settings-research.md`), or **untested**.
 
-Grain content is still being measured (job 3), 4K is entirely unmeasured, and
-anything the metric cannot see is marked as such.
+Measured on two very different sources — clean digital (Avatar 1080p remux) and
+35mm-era film (Jurassic Park). 4K is entirely unmeasured, and anything the metric
+cannot see is marked as such.
+
+**One parameter set serves all content types.** The grain sweep found the same
+arms winning on both sources at every tier, so no grain/clean detection or
+routing is needed to choose settings.
 
 ---
 
@@ -113,10 +118,10 @@ What production ships (`src/shared/encoderFlags.js`):
 
 | flag | basis | evidence |
 |---|---|---|
-| `--qm-min 0` | **measured** | beats 4 by 1.2–2.1%, beats 6 by 2.4–3.9% |
+| `--qm-min 0` | **measured, both sources** | correctly signed in **6 of 6** tier-source combinations. Worth ~1.2% on clean digital at top, **~6.8% on 35mm film** |
 | `--enable-qm 1` | **measured** | disabling costs +4.3 / +6.6 / **+15.6%** |
 | `--tf-strength 1` | **measured** | mainline default 3 costs +2.4–3.3% |
-| `--tune 1` | **measured** | tune 0 costs +3.2–9.95%; tune 4 costs +36–56% |
+| `--tune 1` | **measured, both sources** | tune 0 costs +3.2–9.95%; tune 4 is the worst arm in **6 of 6** combinations, +36–56% on clean digital and **+41 to +134%** on film |
 | `--enable-variance-boost 1` | **measured** | disabling costs +9.0% low, +7.7% mid, **+0.46% top** |
 | `--tile-columns 1` | **measured** | byte-neutral (±0.2%); removing it raised top-tier wall-clock to 1.09x |
 | `--keyint -1` | structural | av1an owns keyframes |
@@ -126,10 +131,18 @@ What production ships (`src/shared/encoderFlags.js`):
 **Stock defaults are not good enough**: `bare_defaults` (`--preset 4` alone) cost
 **+18 to +22%**. The parameter work is justified overall.
 
-**`--qm-min 0` carries a caveat.** It is optimal *on SSIMULACRA2, on clean
-digital content*. Every maintainer ships 4–6, which may encode banding and
-flat-area concerns a full-reference metric does not reward. Not yet confirmed on
-grainy sources.
+**`--qm-min 0` is confirmed on both sources** and the stake is content-dependent:
+~1.2% on clean digital at the top tier, **~6.8% on 35mm film**, symmetric in both
+directions (qm-min 6 costs +6.78% there). Five times the stake, same sign.
+
+The caveat that remains: it is optimal *on SSIMULACRA2*. Every maintainer ships
+4–6, which may encode banding and flat-area concerns a full-reference metric does
+not reward. Our pipeline gates on SSIMULACRA2, so optimising for it is
+self-consistent — but this is not evidence the maintainers are wrong.
+
+**Not attributed to grain.** The two samples also differ ~3x in motion, so this
+pair cannot separate grain from motion and detail character. "Content-dependent"
+is what the data supports; grain is an untested hypothesis for the mechanism.
 
 ---
 
@@ -187,7 +200,7 @@ hard-errors on `--variance-boost-curve` above 2.
 
 | question | status |
 |---|---|
-| Grainy content | job 3 running — may reopen `qm-min`, currently set from clean content only |
+| ~~Grainy content~~ | **closed.** Same arms win on both sources; no detection or routing needed. `qm-min 0` confirmed and its stake is 5x larger on film |
 | 4K | entirely unmeasured; no tiered 4K parameter sets exist publicly either |
 | `--enable-overlays` | untestable through xav; needs an av1an run with RSS sampling. Bears on the open 4K OOM problem |
 | sharpness, ac-bias, hdr tune 5 | metric-blind — need visual A/B or stay unresolved |
