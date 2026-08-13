@@ -29,14 +29,20 @@ const details = () => ({
       label: 'Target Quality (SSIMULACRA2)',
       name: 'target_quality',
       type: 'string',
-      defaultValue: '74.8-75.2',
+      defaultValue: '69.8-70.2',
       inputUI: { type: 'text' },
       tooltip: [
-        'Target SSIMULACRA2 band. Tier targets: low 69.8-70.2 (TV / WEB-DL),',
-        'mid 74.8-75.2 (movies that are not 1080p remux), top 79.8-80.2 (1080p remux).',
-        '90+ is visually lossless, 70-90 high, 50-70 medium. Above ~80 the cost curve',
-        'turns steeply non-linear, because the metric scores against the SOURCE file --',
-        'so a high target pays to reproduce the source\'s own compression artifacts.',
+        'Target SSIMULACRA2 band. Tier targets: low 67.3-67.7, mid 69.8-70.2,',
+        'top 72.3-72.7. Measured 2026-08-13 across 28 encodes.',
+        'The previous set (70/75/80) targeted far higher than it appeared to:',
+        'SSIMU2 79.67 measures as VMAF 98.5, well past the VMAF 95 that reads as',
+        'visually lossless. On grain-heavy film that cost everything -- Close',
+        'Encounters needed 100.5% of its source at SSIMU2 80 and 61.9% at 70,',
+        'for 1.44 VMAF points. Above ~76 the cost curve turns steeply non-linear,',
+        'because the metric scores against the SOURCE, so a high target pays to',
+        'reproduce the source\'s own grain and compression artifacts.',
+        'Note the search lands within about +/-2 of the request, so the narrow',
+        'band is a target, not a guarantee.',
       ].join(' '),
     },
     {
@@ -65,9 +71,15 @@ const details = () => ({
       label: 'Preset',
       name: 'preset',
       type: 'number',
-      defaultValue: '4',
+      defaultValue: '6',
       inputUI: { type: 'text' },
-      tooltip: 'SVT-AV1 preset. Target-quality mode accepts 0-7 only; 8+ is rejected.',
+      tooltip: [
+        'SVT-AV1 preset. Target-quality mode accepts 0-7 only; 8+ is rejected.',
+        'Use 6 on every tier: measured head-to-head at a matched target on four',
+        'clips, preset 4 bought 0.9% smaller files for ~25% more encode time,',
+        'and on one clip it was LARGER. The target-quality search dominates,',
+        'so spending the time on a slower preset does not reach the output.',
+      ].join(' '),
     },
     {
       label: 'Workers',
@@ -158,10 +170,10 @@ const plugin = async (args) => {
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
 
-  const targetQuality = String(inputs.target_quality || '74.8-75.2');
+  const targetQuality = String(inputs.target_quality || '69.8-70.2');
   const tqMode = String(inputs.tq_mode || 'mean');
   const crfRange = String(inputs.crf_range || '5-63');
-  const preset = Number(inputs.preset) || 4;
+  const preset = Number(inputs.preset) || 6;
   const workers = Number(inputs.workers) || 2;
   const vship = Number(inputs.vship) || 1;
   const hwdec = inputs.hwdec === true || inputs.hwdec === 'true';

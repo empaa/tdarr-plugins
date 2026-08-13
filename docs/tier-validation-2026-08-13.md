@@ -64,6 +64,61 @@ av1an+AOM's 62.4% on the same film (job `Zcn7fGVw4z`), from SVT-mainline-tuned i
 2-minute sample, theirs the whole film; the sample's 23.66 Mbps sits on the film's average, so
 it is not a flattering excerpt.
 
+## Lean set — results (% of source, m = achieved mean)
+
+| clip | top-lean (72.5) | mid-lean (70) | low-lean (67.5) |
+|---|---|---|---|
+| closeenc | 69.54% m74.14 | 62.07% m69.58 | **56.44%** m68.13 |
+| harrypotter | 66.13% m74.84 | 61.96% m70.99 | **59.39%** m68.38 |
+| topgun | 30.27% m74.49 | 29.42% m71.00 | **29.10%** m68.57 |
+| westworld | 45.89% m72.98 | 37.85% m70.57 | **32.22%** m68.08 |
+| captain (4K HDR) | 19.94% m74.52 | 18.21% m71.77 | not run |
+
+## DECIDED — this is the shipping lineup
+
+Emil's call after reviewing both sets:
+
+| tier | target | crf range | preset |
+|---|---|---|---|
+| top | 72.3-72.7 | 5-50 | **6** |
+| mid | 69.8-70.2 | 10-60 | **6** |
+| low | 67.3-67.7 | 10-60 | **6** |
+
+Stamped into both plugins' defaults (`target_quality` 69.8-70.2, `preset` 6) with the
+reasoning in the tooltips, so a flow built from scratch lands on the measured
+configuration rather than the old one.
+
+**Preset 6 everywhere** because preset 4 does not earn its cost. Measured head to head at
+target 70, CRF 10-60, four clips, only the preset differing:
+
+| clip | preset 6 | preset 4 | size delta | time delta |
+|---|---|---|---|---|
+| closeenc | 61.92% | 62.07% | **+0.15 (worse)** | +26% |
+| harrypotter | 62.66% | 61.96% | -0.70 | +19% |
+| topgun | 29.71% | 29.42% | -0.29 | +28% |
+| westworld | 38.49% | 37.85% | -0.64 | +29% |
+
+~0.9% smaller for ~25% more encode time, and on one clip preset 4 was *larger*. The
+target-quality search dominates the outcome, so the slower preset's work does not reach the
+output. This independently reproduces the existing note that SVT + target-quality prefers
+cpu-used 6-8, but measured in this exact configuration.
+
+**Caveat on the review files:** the `top-lean` and `mid-lean` outputs in `_outputs/` were
+encoded at **preset 4**, since the preset decision came after they ran. The shipping config is
+preset 6. Measured difference is under 1% of size and within noise on quality, so they remain
+valid for judging quality -- but they are not byte-identical to what the tier will now produce.
+
+## What the CRF ranges are actually doing
+
+Across all 28 encodes, bounds were touched **twice**:
+
+- captain (4K HDR) at mid: 2 chunks pinned at the floor of 10 and starved. Top's floor of 5
+  avoided it. This is the only justification for top's wider floor.
+- topgun at low-lean: chunks chose crf 50.25 and 51.75, above top's ceiling of 50.
+
+Everywhere else no chunk came within 10 of a bound. The ranges are a safety rail, not a
+tier-defining parameter -- the **target** is what moves output.
+
 ## Measurement caveat — read before comparing scores
 
 Achieved-quality numbers carry roughly **±3.5 points** of run-to-run noise. harrypotter top vs

@@ -37,10 +37,15 @@ const details = () => ({
       label: 'Target Quality (SSIMULACRA2)',
       name: 'target_quality',
       type: 'string',
-      defaultValue: '74.8-75.2',
+      defaultValue: '69.8-70.2',
       inputUI: { type: 'text' },
       tooltip: [
-        'Target SSIMULACRA2 band. NOTE: target-quality search may be unavailable on piped',
+        'Target SSIMULACRA2 band. Tier targets: low 67.3-67.7, mid 69.8-70.2,',
+        'top 72.3-72.7 (measured 2026-08-13). The previous 80 was unreachable on',
+        'demanding content: this plugin\'s own 4K HDR case starved 13 of 29 chunks',
+        'at the CRF floor at 80, and at 75 it produced a SMALLER file at HIGHER',
+        'achieved quality with nothing pinned.',
+        'NOTE: target-quality search may be unavailable on piped',
         'input, since its probes need random access. The plugin verifies this at runtime',
         'and logs clearly if it falls back to fixed CRF.',
       ].join(' '),
@@ -83,9 +88,12 @@ const details = () => ({
       label: 'Preset',
       name: 'preset',
       type: 'number',
-      defaultValue: '4',
+      defaultValue: '6',
       inputUI: { type: 'text' },
-      tooltip: 'SVT-AV1 preset. Target-quality mode accepts 0-7 only.',
+      tooltip: [
+        'SVT-AV1 preset. Target-quality mode accepts 0-7 only.',
+        'Use 6 on every tier: preset 4 measured 0.9% smaller for ~25% more time.',
+      ].join(' '),
     },
     {
       label: 'Workers',
@@ -166,11 +174,11 @@ const plugin = async (args) => {
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
 
   const resolution = String(inputs.resolution || '1080p');
-  const targetQuality = String(inputs.target_quality || '74.8-75.2');
+  const targetQuality = String(inputs.target_quality || '69.8-70.2');
   const tqUnavailableAction = String(inputs.tq_unavailable_action || 'fail');
   const tqMode = String(inputs.tq_mode || 'mean');
   const crfRange = String(inputs.crf_range || '5-63');
-  const preset = Number(inputs.preset) || 4;
+  const preset = Number(inputs.preset) || 6;
   const workers = Number(inputs.workers) || 2;
   const vship = Number(inputs.vship) || 1;
   const maxEncodedPercent = Number(inputs.max_encoded_percent) || 80;
