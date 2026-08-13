@@ -532,6 +532,10 @@ const TESTS = [
   ['subtitles: drop commentary, keep SDH/forced when off', subtitlesDropCommentaryKeepSdhForcedWhenOff],
   ['subtitles: keep commentary when on', subtitlesKeepCommentaryWhenOn],
   ['isCommentary: title or flag, not SDH/forced', commentaryDetection],
+  ['svt flags: no inert or redundant params', svtFlagsCarryNoInertParams],
+  ['svt flags: deliberate overrides kept', svtFlagsKeepDeliberateOverrides],
+  ['svt flags: qm-min is not 0', svtQmMinIsNotZero],
+  ['ab-av1 flags: exclude encoder-owned params', abAv1SvtFlagsExcludeEncoderOwnedParams],
   ['xav: parses real encode master lines', xavParsesRealEncodeLine],
   ['xav: parses CROP/SCD phase lines', xavParsesPhaseLines],
   ['xav: phase totals survive segment boundaries', xavPhaseTotalsAreNotGlued],
@@ -596,6 +600,63 @@ async function sanitizeStagesAlreadyCleanFileIntoWorkDir() {
   assert(fs.existsSync(srcFile), 'the original library file must be left untouched');
 
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// --- encoder flags --------------------------------------------------------
+// Pins the 2026-08-13 cleanup (docs/svt-av1-settings-research.md). We ship
+// MAINLINE SVT-AV1 v4.2.0; the old set was a psy-fork recipe applied to it.
+
+async function svtFlagsCarryNoInertParams() {
+  const { buildSvtFlags } = require(path.join(SRC, 'shared', 'encoderFlags.js'));
+  const flags = buildSvtFlags(4, '');
+
+  // Inert or redundant against v4.2.0 defaults. Re-adding any of these means
+  // someone reintroduced a no-op -- or worse, pinned a default that may move.
+  for (const dead of ['--rc ', '--irefresh-type', '--variance-boost-strength',
+    '--qm-max', '--chroma-qm-min', '--chroma-qm-max', '--input-depth', '--lookahead',
+    '--variance-octile']) {
+    assert(!flags.includes(dead), `${dead} is inert or redundant and must not be set: ${flags}`);
+  }
+
+  // Roughly doubles picture buffers, multiplied across parallel av1an workers.
+  assert(!flags.includes('--enable-overlays'),
+    `--enable-overlays doubles picture buffers and is off by default upstream: ${flags}`);
+}
+
+async function svtFlagsKeepDeliberateOverrides() {
+  const { buildSvtFlags } = require(path.join(SRC, 'shared', 'encoderFlags.js'));
+  const flags = buildSvtFlags(4, '');
+
+  // Each of these genuinely differs from a v4.2.0 default, or is a decision we
+  // want to survive an upstream default change.
+  for (const kept of ['--preset 4', '--tune 1', '--keyint -1',
+    '--enable-variance-boost 1', '--enable-qm 1', '--tf-strength 1', '--sharpness 1']) {
+    assert(flags.includes(kept), `${kept} must be set explicitly: ${flags}`);
+  }
+}
+
+async function svtQmMinIsNotZero() {
+  const { buildSvtFlags } = require(path.join(SRC, 'shared', 'encoderFlags.js'));
+  const flags = buildSvtFlags(4, '');
+
+  // qm-min 0 has no backing in any guide or fork; every maintainer ships 4-6 and
+  // mainline's SSIMULACRA2-optimised tune hard-selects 4. Disabling QM entirely
+  // measured up to +33.9% bytes in our own sweep, so this knob is load-bearing.
+  assert(!/--qm-min\s+0(\s|$)/.test(flags), `qm-min 0 has no basis: ${flags}`);
+  const m = flags.match(/--qm-min\s+(\d+)/);
+  assert(m, `qm-min must be set: ${flags}`);
+  const v = Number(m[1]);
+  assert(v >= 4 && v <= 6, `qm-min should sit in the 4-6 range maintainers ship, got ${v}`);
+}
+
+async function abAv1SvtFlagsExcludeEncoderOwnedParams() {
+  const { buildAbAv1SvtFlags } = require(path.join(SRC, 'shared', 'encoderFlags.js'));
+  const flags = buildAbAv1SvtFlags();
+  // ab-av1 drives rate control, preset and keyframes itself.
+  for (const owned of ['rc=', 'preset=', 'keyint=', 'input-depth=']) {
+    assert(!flags.includes(owned), `ab-av1 owns ${owned} -- must not be passed: ${flags}`);
+  }
+  assert(flags.includes('--svt qm-min=4'), `qm-min must carry into ab-av1 too: ${flags}`);
 }
 
 // --- xav ------------------------------------------------------------------
