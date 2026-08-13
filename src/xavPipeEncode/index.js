@@ -104,6 +104,21 @@ const details = () => ({
       tooltip: 'Vship (SSIMULACRA2) worker count. Needs GPU access in the container.',
     },
     {
+      label: 'Encoder Parameter Set',
+      name: 'param_set',
+      type: 'string',
+      defaultValue: 'auto',
+      inputUI: { type: 'dropdown', options: ['auto', 'mainline', 'hdr', 'none'] },
+      tooltip: [
+        'Which researched parameter set to send. auto picks by binary name:',
+        'mainline gets the measured set (--tune 1, --enable-qm 1, --qm-min 0,',
+        '--tf-strength 1, --sharpness 1, --tile-columns 1, --enable-variance-boost 1),',
+        'and an hdr build gets preset only because its own defaults are the recipe.',
+        'none sends preset alone -- that is SVT stock, measured at +18-22% bytes.',
+        'Extra Encoder Params are appended after this set and win over it.',
+      ].join(' '),
+    },
+    {
       label: 'Extra Encoder Params',
       name: 'extra_params',
       type: 'string',
@@ -140,7 +155,7 @@ const plugin = async (args) => {
   const { createLogger, humanSize } = require('../shared/logger');
   const { probeNonVideoSize, mergeAudioVideo } = require('../shared/audioMerge');
   const {
-    buildXavArgs, buildPipeFfmpegArgs, filterEncoderParams, createXavTracker,
+    buildXavArgs, buildPipeFfmpegArgs, filterEncoderParams, resolveParamSet, createXavTracker,
     validateOutput, detectCrfPinning, shouldDownscale, RESOLUTION_PRESETS,
   } = require('../shared/xav');
 
@@ -206,6 +221,10 @@ const plugin = async (args) => {
   jobLog(`  preset     : ${preset}   workers ${workers}   metric workers ${vship}`);
   jobLog(`  source     : ${humanSize(sourceBytes)}  ${sourceWidth}x${videoStream.height}`);
 
+  const paramSet = resolveParamSet(inputs.param_set, xavBin);
+  jobLog(`  params     : ${paramSet.why}`);
+  if (paramSet.params) jobLog(`               ${paramSet.params}`);
+
   const extra = filterEncoderParams(inputs.extra_params);
   for (const d of extra.dropped) {
     jobLog(`  [params] dropped ${d.param}${d.value ? ` ${d.value}` : ''} -- ${d.reason}`);
@@ -254,6 +273,8 @@ const plugin = async (args) => {
     workers,
     buffer: null,
     preset,
+    paramSet: inputs.param_set,
+    binPath: xavBin,
     extraParams: inputs.extra_params,
     targetQuality,
     crfRange,

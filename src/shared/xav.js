@@ -14,6 +14,7 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 
 const RESOLUTION_PRESETS = {
   '720p': { width: 1280, height: 720 },
@@ -232,9 +233,56 @@ const filterEncoderParams = (raw) => {
   return { params: kept.join(' '), dropped };
 };
 
+// The researched parameter set for MAINLINE SVT-AV1 v4.2.0, from two sweeps over
+// two sources (clean digital + 35mm film). Emitted by default because without it
+// the plugin sent `-p '--preset N'` and every job ran SVT stock -- measured at
+// +18-22% bytes at matched quality on clean digital, and +31% at the top tier on
+// grain. `--keyint`/`--scm` are omitted deliberately: xav owns both and rejects
+// them (see XAV_REJECTED_PARAMS).
+//
+// Per-flag evidence is in docs/encoder-recommendations.md §3. The load-bearing
+// ones are --tune 1 (tune 4 was the worst arm in 6 of 6 tier/source combinations,
+// up to +134%), --enable-qm 1 (+4.3 to +21.5% to disable) and --qm-min 0
+// (correctly signed 6 of 6, worth ~1.2% on clean digital and ~6.8% on film).
+const MAINLINE_PARAMS = [
+  '--tune 1',
+  '--enable-variance-boost 1',
+  '--enable-qm 1',
+  '--qm-min 0',
+  '--tf-strength 1',
+  '--sharpness 1',
+  '--tile-columns 1',
+].join(' ');
+
+// The hdr fork gets NO parameter string. Its defaults already encode qm 6/10,
+// variance boost, tf-strength 1, sharpness 1 and ac-bias 1.0, and its author
+// states only tuning mode, CRF and preset are required -- our mainline string
+// fights them. Every measurement behind MAINLINE_PARAMS was taken on mainline,
+// so porting it across would be applying untested values, not proven ones.
+const isHdrBinary = (binPath) => /hdr/i.test(path.basename(String(binPath || '')));
+
+// 'auto' picks by binary name, which is how the fork is deployed
+// (/opt/xav/xav-hdr). The explicit modes exist because that is a filename sniff:
+// if it guesses wrong the job log says which set was applied, and this input
+// overrides it.
+const resolveParamSet = (mode, binPath) => {
+  switch (String(mode || 'auto')) {
+    case 'none': return { params: '', why: 'none (preset only, by request)' };
+    case 'mainline': return { params: MAINLINE_PARAMS, why: 'mainline researched set (forced)' };
+    case 'hdr': return { params: '', why: 'hdr fork defaults (forced)' };
+    default:
+      return isHdrBinary(binPath)
+        ? { params: '', why: 'hdr fork defaults -- its own defaults are the recipe' }
+        : { params: MAINLINE_PARAMS, why: 'mainline researched set' };
+  }
+};
+
 const buildEncoderParams = (opts) => {
   const extra = filterEncoderParams(opts.extraParams);
   const parts = [`--preset ${opts.preset}`];
+  const base = resolveParamSet(opts.paramSet, opts.binPath);
+  if (base.params) parts.push(base.params);
+  // extra_params last so a hand-set value wins over the default set.
   if (extra.params) parts.push(extra.params);
   return parts.join(' ');
 };
@@ -492,6 +540,9 @@ module.exports = {
   projectVideoBytes,
   sizeGateDecision,
   XAV_REJECTED_PARAMS,
+  MAINLINE_PARAMS,
+  isHdrBinary,
+  resolveParamSet,
   filterEncoderParams,
   buildEncoderParams,
   buildXavArgs,

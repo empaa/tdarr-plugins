@@ -542,8 +542,61 @@ async function killAllDoesNotReachLaterChildren() {
   }
 }
 
+// Regression: buildEncoderParams emitted only `--preset N`, so every job ran SVT
+// stock and none of the researched settings reached production. The captured
+// launcher read `-p '--preset 4'`. Assert the actual -p payload, not just that
+// the argv builds.
+async function xavArgvCarriesResearchedParams() {
+  const { buildXavArgs, MAINLINE_PARAMS } = require(path.join(SRC, 'shared', 'xav.js'));
+
+  const argvFor = (binPath, paramSet, extraParams) => {
+    const a = buildXavArgs({
+      inputPath: '/w/in.mkv',
+      outputPath: '/w/out.mkv',
+      workers: 2,
+      preset: 4,
+      binPath,
+      paramSet,
+      extraParams,
+      targetQuality: '74.8-75.2',
+      crfRange: '5-63',
+      vship: 1,
+      tqMode: 'mean',
+    });
+    return a[a.indexOf('-p') + 1];
+  };
+
+  const mainline = argvFor('/opt/xav/xav-mainline', 'auto');
+  assert(mainline.startsWith('--preset 4 '), `preset must lead: ${mainline}`);
+  for (const flag of ['--tune 1', '--enable-qm 1', '--qm-min 0', '--tf-strength 1',
+    '--tile-columns 1', '--sharpness 1', '--enable-variance-boost 1']) {
+    assert(mainline.includes(flag), `mainline argv is missing ${flag}: ${mainline}`);
+  }
+  assert(mainline !== '--preset 4', 'mainline must not fall back to SVT stock');
+
+  // xav owns these and rejects them outright; emitting them fails argument validation.
+  assert(!mainline.includes('--keyint'), `must not send --keyint: ${mainline}`);
+  assert(!mainline.includes('--scm'), `must not send --scm: ${mainline}`);
+
+  // The hdr fork's own defaults are the recipe -- our mainline string fights them.
+  assert(argvFor('/opt/xav/xav-hdr', 'auto') === '--preset 4',
+    'hdr build must get preset only');
+  assert(argvFor('/opt/xav/xav-HDR', 'auto') === '--preset 4', 'hdr sniff is case-insensitive');
+
+  // Explicit modes override the filename sniff in both directions.
+  assert(argvFor('/opt/xav/xav-hdr', 'mainline').includes('--qm-min 0'), 'forced mainline');
+  assert(argvFor('/opt/xav/xav-mainline', 'hdr') === '--preset 4', 'forced hdr');
+  assert(argvFor('/opt/xav/xav-mainline', 'none') === '--preset 4', 'none = preset only');
+
+  // extra_params come last so a hand-set value wins over the default set.
+  const overridden = argvFor('/opt/xav/xav-mainline', 'auto', '--qm-min 6');
+  assert(overridden.lastIndexOf('--qm-min 6') > overridden.indexOf(MAINLINE_PARAMS.split(' ')[0]),
+    `extra_params must be appended last: ${overridden}`);
+}
+
 const TESTS = [
   ['processManager: killAll spares later children', killAllDoesNotReachLaterChildren],
+  ['xav: argv carries the researched param set', xavArgvCarriesResearchedParams],
   ['vsSource: lsmas line', vsSourceLsmasLine],
   ['vsSource: escapes quotes/backslashes in path', vsSourceEscapesPath],
   ['vsSource: downscale lines after source', vsSourceDownscaleAfterSource],
