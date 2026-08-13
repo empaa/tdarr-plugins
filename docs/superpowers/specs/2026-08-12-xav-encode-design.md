@@ -286,11 +286,26 @@ it is the only lever available given xav's fixed temp-dir behaviour.
 
 ## Blocked on others
 
-- **io_uring must be permitted on the node container.** Docker's default seccomp
-  blocks it: the encode succeeds and the *mux* fails with
-  `io_uring_setup failed (errno 1)`. Needs `seccomp=unconfined` or a profile
-  allowing `io_uring_setup` / `_enter` / `_register` on the Unraid template. The
-  plugin cannot work around this. Inbox message to hometower required.
+- ~~io_uring must be permitted on the node container.~~ **Resolved 2026-08-13 —
+  this was never a production blocker.** `tdarr_node_hometower` runs
+  `privileged: true`, which disables seccomp confinement entirely
+  (`Seccomp: 0, Seccomp_filters: 0`), so `io_uring_setup` already succeeds
+  there. Measured with controls by hometower: default profile → `errno 1`
+  (exactly our symptom), `seccomp=unconfined` → OK, production node → OK.
+
+  Our original observation came from **ad-hoc `docker run` one-shots**, which are
+  un-privileged and do get the default profile. The fix is one flag in *test*
+  invocations, not a change to the stack:
+
+      docker run --rm --security-opt seccomp=unconfined --entrypoint <cmd> ...
+
+  **Forward-looking risk worth knowing:** the plugin's io_uring dependency is
+  satisfied only by that `privileged: true` flag, which is carried over from the
+  retired ryzen node and exists for `/dev/dri`, not for us. If anyone ever
+  tidies it away, xav encodes will start muxing-failing with `errno 1` and
+  nothing will point at the cause. If that happens, the container needs
+  `seccomp=unconfined` or a profile allowing
+  `io_uring_setup` / `_enter` / `_register`.
 - **GPU access in the node container** for Vship, which TQ depends on.
 - **Which build to mount** — `hdr` and `mainline` both exist at
   `/mnt/cache_nvme_two/xav-{hdr,mainline}`. Measured at matched quality: hdr
