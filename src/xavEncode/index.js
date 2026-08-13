@@ -51,11 +51,14 @@ const details = () => ({
       label: 'CRF Range',
       name: 'crf_range',
       type: 'string',
-      defaultValue: '10-50',
+      defaultValue: '5-63',
       inputUI: { type: 'text' },
       tooltip: [
-        'CRF floor-ceiling the target-quality search may use. Keep it wide:',
-        'a run whose chunks all pin at a bound is a fixed-CRF encode, not target quality.',
+        'CRF floor-ceiling the target-quality search may use. Keep it WIDE:',
+        'a run whose chunks all pin at a bound is a fixed-CRF encode wearing a',
+        'target-quality costume, and the plugin will warn when that happens.',
+        'Measured mean CRF ranges from ~8 on demanding content at the top tier to',
+        '~41 on easy content at the low tier, so 10-50 is too narrow at both ends.',
       ].join(' '),
     },
     {
@@ -142,7 +145,7 @@ const plugin = async (args) => {
 
   const targetQuality = String(inputs.target_quality || '74.8-75.2');
   const tqMode = String(inputs.tq_mode || 'mean');
-  const crfRange = String(inputs.crf_range || '10-50');
+  const crfRange = String(inputs.crf_range || '5-63');
   const preset = Number(inputs.preset) || 4;
   const workers = Number(inputs.workers) || 2;
   const vship = Number(inputs.vship) || 1;

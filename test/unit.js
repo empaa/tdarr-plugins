@@ -546,6 +546,7 @@ const TESTS = [
   ['xav: validation allows autocropped dimensions', xavValidationAllowsAutocroppedDimensions],
   ['xav: validation catches frame drift', xavValidationCatchesFrameDrift],
   ['xav: detects CRF pinning at both bounds', xavDetectsCrfPinning],
+  ['xav: CRF range spans both measured extremes', xavCrfRangeIsWideEnoughForBothEnds],
   ['xav: argv is video-only and carries TQ', xavArgsAreVideoOnlyAndCarryTq],
   ['xav: pipe argv keeps input, ffmpeg scales', xavPipeArgsKeepInputAndScale],
   ['xav: strips params xav rejects outright', xavFiltersParamsXavRejects],
@@ -839,6 +840,20 @@ async function xavDetectsCrfPinning() {
 
   const healthy = detectCrfPinning([16.25, 27.5, 23.8, 40], '10-40');
   assert(healthy.pinned === false, 'a converged spread must not be flagged as pinned');
+}
+
+async function xavCrfRangeIsWideEnoughForBothEnds() {
+  const { details } = require(path.join(SRC, 'xavEncode', 'index.js'));
+  const input = details().inputs.find((i) => i.name === 'crf_range');
+  assert(input, 'crf_range input must exist');
+  const [lo, hi] = String(input.defaultValue).split('-').map(Number);
+
+  // Measured mean CRF spans ~8 (demanding content, top tier) to ~41 (easy
+  // content, low tier). A range that excludes either end silently converts
+  // target-quality into fixed-CRF: chunks pin at the bound and the search
+  // measures nothing. 10-50 was the old default and fails at both ends.
+  assert(lo <= 5, `CRF floor ${lo} is too high -- demanding content reaches ~8`);
+  assert(hi >= 60, `CRF ceiling ${hi} is too low -- easy content reaches ~41 and beyond`);
 }
 
 async function xavArgsAreVideoOnlyAndCarryTq() {
