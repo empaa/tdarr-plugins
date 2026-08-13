@@ -77,10 +77,21 @@ function readReport(runId) {
   const score = /achieved SSIMULACRA2: mean ([\d.]+), worst ([\d.]+) across (\d+)/.exec(text);
   const params = /params\s+:\s*(.+)/.exec(text);
   const applied = /^\s+(--preset .+)$/m.exec(text.replace(/^.*Worker\[[^\]]+\]:/gm, ''));
+  // The per-chunk target-hit diagnostic. The mean says a run missed its band;
+  // only this says whether the miss is uniform (widen the band), concentrated in
+  // chunks stuck at the CRF floor (unreachable content), or scattered (ours).
+  const band = /target \S+: (\d+)\/(\d+) chunks in band, (\d+) below, (\d+) above; (\d+) at the CRF floor/
+    .exec(text);
+  const starved = /WARNING: (\d+) chunk\(s\) sat at the CRF floor/.exec(text);
+  const worstChunks = /worst chunks: (.+)$/m.exec(text);
   return {
     mean: score ? Number(score[1]) : 0,
     worst: score ? Number(score[2]) : 0,
     chunks: score ? Number(score[3]) : 0,
+    band: band ? `${band[1]}/${band[2]} in, ${band[3]} below, ${band[4]} above` : '',
+    atFloor: band ? band[5] : '',
+    starved: starved ? starved[1] : '0',
+    worstChunks: worstChunks ? worstChunks[1].trim() : '',
     paramSet: params ? params[1].trim() : '',
     applied: applied ? applied[1].trim() : '',
     gate: /projected output exceeded the size limit/.test(text) ? 'passthrough' : '',
@@ -182,6 +193,7 @@ function buildFlow(flowId, arm) {
   if (!fs.existsSync(OUT)) {
     row(['clip', 'arm', 'status', 'src_bytes', 'out_bytes', 'pct_of_src',
       'achieved_mean', 'achieved_worst', 'chunks', 'wall_s', 'gate', 'pinned',
+      'band_split', 'at_floor', 'starved', 'worst_chunks',
       'geom', 'pix_fmt', 'hdr_prim/trc/spc/loc', 'param_set', 'applied']);
   }
 
@@ -240,6 +252,7 @@ function buildFlow(flowId, arm) {
         (report.mean || 0).toFixed(2), (report.worst || 0).toFixed(2), report.chunks || 0,
         ((Date.now() - start) / 1000).toFixed(1),
         report.gate || 'encoded', report.pinned || '',
+        report.band || '', report.atFloor || '', report.starved || '', report.worstChunks || '',
         meta.geom || '', meta.pix || '', meta.hdr || '',
         report.paramSet || '', report.applied || '']);
 
