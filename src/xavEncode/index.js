@@ -148,7 +148,7 @@ const plugin = async (args) => {
   const { createLogger, humanSize } = require('../shared/logger');
   const { probeNonVideoSize, mergeAudioVideo } = require('../shared/audioMerge');
   const {
-    buildXavArgs, filterEncoderParams, resolveParamSet, createXavTracker,
+    buildXavArgs, filterEncoderParams, resolveParamSet, createXavTracker, sourceVideoDuration,
     validateOutput, detectCrfPinning,
   } = require('../shared/xav');
 
@@ -201,8 +201,8 @@ const plugin = async (args) => {
   const sourceStreams = (file.ffProbeData && file.ffProbeData.streams) || [];
   const videoStream = sourceStreams.find((s) => s.codec_type === 'video') || {};
   const sourceFrames = Number(videoStream.nb_frames) || 0;
-  const sourceDuration = Number(
-    (file.ffProbeData && file.ffProbeData.format && file.ffProbeData.format.duration) || 0,
+  const sourceDuration = sourceVideoDuration(
+    videoStream, (file.ffProbeData && file.ffProbeData.format) || {},
   );
 
   jobLog('XAV ENCODE');

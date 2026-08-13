@@ -155,7 +155,7 @@ const plugin = async (args) => {
   const { createLogger, humanSize } = require('../shared/logger');
   const { probeNonVideoSize, mergeAudioVideo } = require('../shared/audioMerge');
   const {
-    buildXavArgs, buildPipeFfmpegArgs, filterEncoderParams, resolveParamSet, createXavTracker,
+    buildXavArgs, buildPipeFfmpegArgs, filterEncoderParams, resolveParamSet, createXavTracker, sourceVideoDuration,
     validateOutput, detectCrfPinning, shouldDownscale, RESOLUTION_PRESETS,
   } = require('../shared/xav');
 
@@ -179,8 +179,8 @@ const plugin = async (args) => {
   const videoStream = sourceStreams.find((s) => s.codec_type === 'video') || {};
   const sourceWidth = Number(videoStream.width) || 0;
   const sourceFrames = Number(videoStream.nb_frames) || 0;
-  const sourceDuration = Number(
-    (file.ffProbeData && file.ffProbeData.format && file.ffProbeData.format.duration) || 0,
+  const sourceDuration = sourceVideoDuration(
+    videoStream, (file.ffProbeData && file.ffProbeData.format) || {},
   );
 
   // This plugin exists only to scale. If there is nothing to scale, say so and

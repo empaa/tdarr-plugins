@@ -338,6 +338,31 @@ const buildPipeFfmpegArgs = (opts) => {
 
 // Dimensions are deliberately NOT compared to the source: xav autocrops, so
 // 1920x1080 legitimately becomes e.g. 1920x1040.
+// What validateOutput must compare against. The output under validation is
+// VIDEO-ONLY (audio and subtitles are merged back afterwards), so comparing it
+// to format.duration -- the container duration, i.e. the longest stream -- fails
+// a perfectly good encode whenever a subtitle or audio track outruns the video.
+// Seen live: a clip whose subtitle track ran 1.22 s past the last video frame
+// failed with "duration 25.11s differs from source 26.33s".
+//
+// Matroska usually reports no per-stream duration and carries it in the
+// tags.DURATION string instead, so try: stream duration, then that tag, then the
+// container as a last resort.
+const parseDurationTag = (tag) => {
+  const m = /^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$/.exec(String(tag || '').trim());
+  if (!m) return 0;
+  return (Number(m[1]) * 3600) + (Number(m[2]) * 60) + Number(m[3]);
+};
+
+const sourceVideoDuration = (videoStream, format) => {
+  const v = videoStream || {};
+  const direct = Number(v.duration);
+  if (direct > 0) return direct;
+  const tagged = parseDurationTag((v.tags || {}).DURATION);
+  if (tagged > 0) return tagged;
+  return Number((format || {}).duration) || 0;
+};
+
 const validateOutput = (probe, source, opts) => {
   const o = opts || {};
   const floor = o.floorBytes || EMPTY_OUTPUT_FLOOR_BYTES;
@@ -550,6 +575,7 @@ module.exports = {
   buildScaleFilter,
   buildPipeFfmpegArgs,
   validateOutput,
+  sourceVideoDuration,
   detectCrfPinning,
   createXavTracker,
   formatEta,

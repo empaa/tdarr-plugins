@@ -594,8 +594,42 @@ async function xavArgvCarriesResearchedParams() {
     `extra_params must be appended last: ${overridden}`);
 }
 
+// Regression: the plugins passed format.duration -- the CONTAINER duration, i.e.
+// the longest stream -- as the source duration, then validated a VIDEO-ONLY
+// output against it. A clip whose subtitle track ran 1.22 s past the last video
+// frame failed with "duration 25.11s differs from source 26.33s" on a perfect
+// encode. Prefer the video stream's own duration.
+async function sourceDurationComesFromVideoStream() {
+  const { sourceVideoDuration } = require(path.join(SRC, 'shared', 'xav.js'));
+
+  // Matroska: no per-stream duration, carried in the tags.DURATION string. The
+  // container runs longer because a subtitle cue outlives the video.
+  assert(
+    Math.abs(sourceVideoDuration(
+      { codec_type: 'video', tags: { DURATION: '00:02:00.138000000' } },
+      { duration: '120.870000' },
+    ) - 120.138) < 0.001,
+    'must prefer the video tags.DURATION over the longer container duration',
+  );
+
+  // MP4-style: a real per-stream duration wins outright.
+  assert(sourceVideoDuration({ duration: '25.11' }, { duration: '26.33' }) === 25.11,
+    'stream duration wins over container');
+
+  // Neither available: the container is the only thing left.
+  assert(sourceVideoDuration({}, { duration: '26.33' }) === 26.33, 'falls back to container');
+  assert(sourceVideoDuration({}, {}) === 0, 'no duration at all is 0, which disables the check');
+
+  // Hour-rollover and malformed tags must not silently produce a wrong number.
+  assert(Math.abs(sourceVideoDuration({ tags: { DURATION: '01:30:05.5' } }, {}) - 5405.5) < 0.001,
+    'parses hours');
+  assert(sourceVideoDuration({ tags: { DURATION: 'garbage' } }, { duration: '10' }) === 10,
+    'unparseable tag falls through to container');
+}
+
 const TESTS = [
   ['processManager: killAll spares later children', killAllDoesNotReachLaterChildren],
+  ['xav: source duration comes from the video stream', sourceDurationComesFromVideoStream],
   ['xav: argv carries the researched param set', xavArgvCarriesResearchedParams],
   ['vsSource: lsmas line', vsSourceLsmasLine],
   ['vsSource: escapes quotes/backslashes in path', vsSourceEscapesPath],
