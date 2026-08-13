@@ -48,8 +48,19 @@ RESULTS="${RESULTS:-${WORK}/settings-sweep-results.tsv}"
 
 # Identical across every run compared on wall-clock. The cap is not optional.
 WORKERS="${WORKERS:-2}"; VSHIP="${VSHIP:-1}"; MEMLIMIT="${MEMLIMIT:-16g}"
-CRF_RANGE="${CRF_RANGE:-5-50}"
+# 5-50 is TOO NARROW for easy content. On the Jurassic sample (mean CRF ~36.8)
+# it pinned 2 chunks at the ceiling and landed ABOVE the target band (72.73 for a
+# 72.3-72.7 target) -- i.e. it stopped measuring the encoder and started measuring
+# the bound. 5-63 lands clean at 72.48 with zero pinned.
+#
+# Always read at_floor/at_ceiling per row rather than trusting the mean: a pinned
+# run is a fixed-CRF encode wearing a target-quality costume.
+CRF_RANGE="${CRF_RANGE:-5-63}"
 CRF_LO="${CRF_RANGE%-*}"; CRF_HI="${CRF_RANGE#*-}"
+
+# WARNING: `--sc-only` combined with `-t` prints FAIL regardless of whether the
+# arguments are valid. Do not use that combination to preflight a CRF range --
+# confirm against a known-good range first, or you will reject a good one.
 
 tier_target() {
   case "$1" in
@@ -60,8 +71,18 @@ tier_target() {
   esac
 }
 
-# The cleaned production set (2026-08-13), minus what xav owns.
-NEW_SET="--preset 4 --tune 1 --enable-variance-boost 1 --enable-qm 1 --qm-min 4 --tf-strength 1 --sharpness 1 --tile-columns 1"
+# Current production set, minus what xav owns.
+#
+# HISTORY, because it matters for reading older result files: this carried
+# `--qm-min 4` when the Avatar sweep and the first Jurassic launch ran. That
+# sweep measured qm-min as monotonic in the other direction (0 beat 4 by
+# 1.2-2.1%, 6 lost by 1.2-1.8%), so production reverted to 0 and this followed.
+#
+# Consequence: in result files written BEFORE 2026-08-13, `new_set` means
+# qm-min 4 and `qm_min_0` is the winner. In files written after, `new_set`
+# already IS qm-min 0 and the alternatives are qm_min_4 / qm_min_6. Check the
+# `params` column rather than trusting the arm name across files.
+NEW_SET="--preset 4 --tune 1 --enable-variance-boost 1 --enable-qm 1 --qm-min 0 --tf-strength 1 --sharpness 1 --tile-columns 1"
 
 # The pre-cleanup set, minus what xav rejects. The before/after control.
 LEGACY_SET="--preset 4 --tune 1 --enable-variance-boost 1 --variance-boost-strength 2 --variance-octile 6 --enable-qm 1 --qm-min 0 --qm-max 15 --chroma-qm-min 8 --chroma-qm-max 15 --tf-strength 1 --sharpness 1 --tile-columns 1"
@@ -76,9 +97,9 @@ read -r -d '' VARIANTS <<EOF
 new_set	${NEW_SET}
 legacy_set	${LEGACY_SET}
 bare_defaults	--preset 4
-qm_min_0	${NEW_SET/--qm-min 4/--qm-min 0}
-qm_min_6	${NEW_SET/--qm-min 4/--qm-min 6}
-no_qm	${NEW_SET/--enable-qm 1 --qm-min 4/--enable-qm 0}
+qm_min_4	${NEW_SET/--qm-min 0/--qm-min 4}
+qm_min_6	${NEW_SET/--qm-min 0/--qm-min 6}
+no_qm	${NEW_SET/--enable-qm 1 --qm-min 0/--enable-qm 0}
 tune4	${NEW_SET/--tune 1/--tune 4}
 tile_cols_0	${NEW_SET/--tile-columns 1/--tile-columns 0}
 sharpness_2	${NEW_SET/--sharpness 1/--sharpness 2}
@@ -104,7 +125,7 @@ EOF
 #                not a question SSIMULACRA2 can answer. Do not conclude from a
 #                small delta that sharpness "does nothing".
 
-[ -f "${RESULTS}" ] || printf 'tier\tbinary\tvariant\texit\tseconds\tvideo_bytes\ttotal_bytes\tchunks\tmean_score\tmin_score\tmax_score\tmean_crf\tat_floor\tat_ceiling\tgeom\tverdict\tparams\n' > "${RESULTS}"
+[ -f "${RESULTS}" ] || printf 'tier\tbinary\tvariant\texit\tseconds\tvideo_bytes\ttotal_bytes\tchunks\tmean_score\tmin_score\tmax_score\tmean_crf\tat_floor\tat_ceiling\tgeom\tverdict\tparams\tfinished_at\n' > "${RESULTS}"
 
 echo "== xav settings sweep =="
 echo "  binary  : ${XAV}"
@@ -167,10 +188,15 @@ for TIER in "${TIERS[@]}"; do
       [ "${CEIL:-0}" = "${CHUNKS}" ] && VERDICT="INVALID_pinned_ceiling"
     fi
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    # finished_at is appended LAST so files written by older versions of this
+    # script stay parseable and the resume grep (leading columns) is unaffected.
+    # Without it, identifying rows affected by external CPU contention needs log
+    # forensics -- which is exactly what a contaminated run cost us on 2026-08-13.
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "${TIER}" "${XAVNAME}" "${VNAME}" "${RC:-?}" "${SECS:-0}" "${VB:-0}" "${TOT:-0}" \
       "${CHUNKS:-0}" "${MEAN:-0}" "${MINS:-0}" "${MAXS:-0}" "${MCRF:-0}" \
-      "${FLOOR:-0}" "${CEIL:-0}" "${GEOM:-}" "${VERDICT}" "${PARAMS}" >> "${RESULTS}"
+      "${FLOOR:-0}" "${CEIL:-0}" "${GEOM:-}" "${VERDICT}" "${PARAMS}" \
+      "$(date -Iseconds)" >> "${RESULTS}"
 
     echo "     exit=${RC:-?} ${SECS:-0}s  video=${VB:-0}  score=${MEAN:-0}  crf=${MCRF:-0}  ${VERDICT}"
     rm -f "${WORK}/${OUT}"

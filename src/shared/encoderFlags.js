@@ -121,11 +121,30 @@ const svtConfig = (preset, hdrSvt) => {
     ['keyint', '-1'],          // av1an owns keyframes; chunk starts are keyframes
     ['enable-variance-boost', '1'],
     ['enable-qm', '1'],
-    // Was 0, which has no backing in any guide or fork. Every maintainer ships 4-6,
-    // and mainline's own SSIMULACRA2-optimised tune hard-selects 4. Our sweep also
-    // measured --enable-qm 0 as the single largest effect in the whole matrix
-    // (up to +33.9% bytes), so QM is doing heavy lifting here.
-    ['qm-min', '4'],
+    // MEASURED, and it contradicts the guides. On 2026-08-13 we changed this 0 -> 4
+    // on the strength of maintainer consensus (every fork ships 4-6; mainline's own
+    // SSIMULACRA2-optimised tune hard-selects 4). The settings sweep then measured
+    // qm-min at matched quality on clean 1080p digital, and the response is
+    // monotonic in the other direction:
+    //
+    //   qm-min 0   -1.68% / -2.14% / -1.20% bytes  (low / mid / top)
+    //   qm-min 4    baseline
+    //   qm-min 6   +1.22% / +1.76% / +1.52%
+    //
+    // So it is back to 0. That single flag accounted for essentially the whole
+    // margin by which the old 20-flag string beat the cleaned one -- every other
+    // flag we removed measured as contributing nothing, which confirms the
+    // "nine of twenty did nothing" finding by measurement rather than by reading.
+    //
+    // CAVEAT, deliberately recorded: this is optimal ON SSIMULACRA2, ON CLEAN
+    // DIGITAL CONTENT. The maintainer consensus may well encode banding and
+    // flat-area concerns that a full-reference metric does not reward. Our pipeline
+    // gates on SSIMULACRA2, so optimising for it is self-consistent -- but this is
+    // not evidence the maintainers are wrong, and it is not yet confirmed on grainy
+    // sources (the grain sweep was still running when this was set).
+    ['qm-min', '0'],
+    // Keep QM itself ON regardless: disabling costs +4.3% / +6.6% / +15.6%, worst
+    // at the top tier, and +33.9% on the hdr fork. This knob is load-bearing.
     ['tf-strength', '1'],      // mainline default 3; 1 avoids the tf blocking issue
     ['sharpness', '1'],        // mainline default 0
     // Kept pending measurement. Upstream calls tile threading a known quality

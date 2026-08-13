@@ -534,7 +534,7 @@ const TESTS = [
   ['isCommentary: title or flag, not SDH/forced', commentaryDetection],
   ['svt flags: no inert or redundant params', svtFlagsCarryNoInertParams],
   ['svt flags: deliberate overrides kept', svtFlagsKeepDeliberateOverrides],
-  ['svt flags: qm-min is not 0', svtQmMinIsNotZero],
+  ['svt flags: qm-min matches measurement', svtQmMinMatchesMeasurement],
   ['ab-av1 flags: exclude encoder-owned params', abAv1SvtFlagsExcludeEncoderOwnedParams],
   ['xav: parses real encode master lines', xavParsesRealEncodeLine],
   ['xav: parses CROP/SCD phase lines', xavParsesPhaseLines],
@@ -635,18 +635,23 @@ async function svtFlagsKeepDeliberateOverrides() {
   }
 }
 
-async function svtQmMinIsNotZero() {
+async function svtQmMinMatchesMeasurement() {
   const { buildSvtFlags } = require(path.join(SRC, 'shared', 'encoderFlags.js'));
   const flags = buildSvtFlags(4, '');
 
-  // qm-min 0 has no backing in any guide or fork; every maintainer ships 4-6 and
-  // mainline's SSIMULACRA2-optimised tune hard-selects 4. Disabling QM entirely
-  // measured up to +33.9% bytes in our own sweep, so this knob is load-bearing.
-  assert(!/--qm-min\s+0(\s|$)/.test(flags), `qm-min 0 has no basis: ${flags}`);
+  // Measured, not inherited. The settings sweep found qm-min monotonic at matched
+  // quality on clean digital: 0 beats 4 by 1.2-2.1% and 6 by 2.4-3.9%. An earlier
+  // version of this test asserted 4-6 on maintainer consensus alone; the
+  // measurement overruled it. If a future sweep (grain, or a different gate)
+  // reverses this, change the value AND this test together, with the numbers.
   const m = flags.match(/--qm-min\s+(\d+)/);
-  assert(m, `qm-min must be set: ${flags}`);
-  const v = Number(m[1]);
-  assert(v >= 4 && v <= 6, `qm-min should sit in the 4-6 range maintainers ship, got ${v}`);
+  assert(m, `qm-min must be set explicitly: ${flags}`);
+  assert(Number(m[1]) === 0,
+    `qm-min should be 0 per measurement (0 beat 4 by 1.2-2.1% at matched quality), got ${m[1]}`);
+
+  // QM itself must stay enabled: disabling costs +4.3% to +15.6% on mainline and
+  // +33.9% on the hdr fork. This is the load-bearing half of the pair.
+  assert(/--enable-qm\s+1/.test(flags), `QM must stay enabled: ${flags}`);
 }
 
 async function abAv1SvtFlagsExcludeEncoderOwnedParams() {
@@ -656,7 +661,7 @@ async function abAv1SvtFlagsExcludeEncoderOwnedParams() {
   for (const owned of ['rc=', 'preset=', 'keyint=', 'input-depth=']) {
     assert(!flags.includes(owned), `ab-av1 owns ${owned} -- must not be passed: ${flags}`);
   }
-  assert(flags.includes('--svt qm-min=4'), `qm-min must carry into ab-av1 too: ${flags}`);
+  assert(flags.includes('--svt qm-min=0'), `qm-min (measured value) must carry into ab-av1 too: ${flags}`);
 }
 
 // --- xav ------------------------------------------------------------------
