@@ -1,0 +1,9 @@
+clip	arm	status	src_bytes	out_bytes	pct_of_src	achieved_mean	achieved_worst	chunks	wall_s	param_set	applied
+westworld	auto	success	155490149	59712890	38.40	71.05	63.49	26	124.1	mainline researched set	
+westworld	none	success	155490149	70270745	45.19	69.31	49.50	26	124.1	none (preset only, by request)	
+harrypotter	auto	success	385695638	241591052	62.64	71.49	63.43	41	142.1	mainline researched set	
+harrypotter	none	success	385695638	253518409	65.73	67.00	46.73	41	121.0	none (preset only, by request)	
+closeenc	auto	success	409085458	253111768	61.87	69.53	52.03	17	133.1	mainline researched set	
+closeenc	none	success	409085458	295283945	72.18	68.03	39.84	17	118.0	none (preset only, by request)	
+topgun	auto	success	539686411	160293512	29.70	70.16	54.92	50	133.1	mainline researched set	
+topgun	none	success	539686411	162634782	30.14	70.41	52.33	50	115.1	none (preset only, by request)	

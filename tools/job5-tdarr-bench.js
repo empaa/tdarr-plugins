@@ -25,6 +25,7 @@ const SSH = ['ssh', '-i', `${process.env.HOME}/.ssh/tower`,
 // so every read and write goes over SSH to the host.
 const HOST_LIB = '/mnt/cache_nvme_two/vm_data/xav-work/job5/library';
 const HOST_CLIPS = '/mnt/cache_nvme_two/vm_data/xav-work/job5/clips';
+const HOST_MASTERS = '/mnt/cache_nvme_two/vm_data/xav-work/job5/masters';
 const CONTAINER_LIB = '/mnt/library';
 const REPORTS = '/mnt/cache_nvme_two/vm_data/xav-work/job5/server/Tdarr/DB2/JobReports/undefined';
 
@@ -49,6 +50,12 @@ const BINARY = arg('binary', '/opt/xav/xav-mainline');
 const TARGET = arg('target', '69.8-70.2');
 const PRESET = arg('preset', '6');
 const PCT = arg('pct', '100');   // <100 arms the size gate; 100 disables it
+const KEEP = process.argv.includes('--keep');  // retain outputs for visual A/B
+// xavPipeEncode is the 4K->1080p path: ffmpeg scales, xav reads Y4M from stdin.
+// It is a different plugin with different inputs, so the flow has to know which.
+const PLUGIN = arg('plugin', 'xavEncode');
+const RESOLUTION = arg('resolution', '1080p');
+const CLIPDIR = arg('clipdir', HOST_CLIPS);
 const OUT = arg('out', '/tmp/job5-tdarr-bench.tsv');
 
 const uniqueId = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -77,11 +84,25 @@ function readReport(runId) {
     paramSet: params ? params[1].trim() : '',
     applied: applied ? applied[1].trim() : '',
     gate: /projected output exceeded the size limit/.test(text) ? 'passthrough' : '',
+    pinned: (/all (\d+) chunks pinned at the CRF (\w+)/.exec(text) || [])
+      .slice(1).join('@') || '',
     reportFile: path.basename(file),
   };
 }
 
+function readOutputMeta(hostDir) {
+  try {
+    const f = sh(`ls '${hostDir}'/*.mkv | head -1`).trim();
+    const out = sh(`docker exec tdarr_job5_node ffprobe -v error -select_streams v:0 `
+      + `-show_entries stream=width,height,pix_fmt,color_primaries,color_transfer,`
+      + `color_space,chroma_location -of default=nw=1:nk=1 '${f.replace(/^\/mnt\/cache_nvme_two\/vm_data\/xav-work\/job5\/library/, '/mnt/library')}'`);
+    const [w, h, pix, prim, trc, spc, loc] = out.trim().split('\n');
+    return { geom: `${w}x${h}`, pix, hdr: [prim, trc, spc, loc].join('/') };
+  } catch (e) { return { geom: '', pix: '', hdr: `probe-failed` }; }
+}
+
 function buildFlow(flowId, arm) {
+  const isPipe = PLUGIN === 'xavPipeEncode';
   return {
     _id: flowId,
     name: `job5 bench ${arm.label}`,
@@ -109,9 +130,9 @@ function buildFlow(flowId, arm) {
         inputsDB: {},
       },
       {
-        name: 'AV1 Encode (xav)',
+        name: isPipe ? 'AV1 Encode (xav, scaled)' : 'AV1 Encode (xav)',
         sourceRepo: 'Local',
-        pluginName: 'xavEncode',
+        pluginName: PLUGIN,
         version: '1.0.0',
         id: 'node-encode',
         position: { x: 500, y: 400 },
@@ -126,6 +147,7 @@ function buildFlow(flowId, arm) {
           param_set: arm.paramSet,
           extra_params: arm.extraParams,
           max_encoded_percent: PCT,
+          ...(isPipe ? { resolution: RESOLUTION, tq_unavailable_action: 'fail' } : {}),
         },
       },
       {
@@ -159,7 +181,8 @@ function buildFlow(flowId, arm) {
 (async () => {
   if (!fs.existsSync(OUT)) {
     row(['clip', 'arm', 'status', 'src_bytes', 'out_bytes', 'pct_of_src',
-      'achieved_mean', 'achieved_worst', 'chunks', 'wall_s', 'gate', 'param_set', 'applied']);
+      'achieved_mean', 'achieved_worst', 'chunks', 'wall_s', 'gate', 'pinned',
+      'geom', 'pix_fmt', 'hdr_prim/trc/spc/loc', 'param_set', 'applied']);
   }
 
   for (const clip of CLIPS) {
@@ -172,8 +195,9 @@ function buildFlow(flowId, arm) {
       const start = Date.now();
 
       // Library dirs must be owned 99:100 or the node fails staging with EACCES.
-      sh(`mkdir -p '${hostDir}' && cp '${HOST_CLIPS}/${clip}.mkv' '${hostDir}/' && chown -R 99:100 '${hostDir}'`);
+      sh(`mkdir -p '${hostDir}' && cp '${CLIPDIR}/${clip}.mkv' '${hostDir}/' && chown -R 99:100 '${hostDir}'`);
       const srcBytes = Number(sh(`stat -c %s '${hostDir}/${clip}.mkv'`).trim());
+      let meta = {};
 
       let status = 'unknown';
       let outBytes = 0;
@@ -203,6 +227,7 @@ function buildFlow(flowId, arm) {
         // there now is the job's real output.
         outBytes = Number(sh(`stat -c %s "$(ls '${hostDir}'/*.mkv | head -1)" 2>/dev/null || echo 0`).trim());
         report = readReport(runId);
+        meta = readOutputMeta(hostDir);
       } catch (err) {
         status = `error: ${err.message}`;
       } finally {
@@ -214,10 +239,16 @@ function buildFlow(flowId, arm) {
         outBytes ? ((outBytes / srcBytes) * 100).toFixed(2) : '',
         (report.mean || 0).toFixed(2), (report.worst || 0).toFixed(2), report.chunks || 0,
         ((Date.now() - start) / 1000).toFixed(1),
-        report.gate || 'encoded',
+        report.gate || 'encoded', report.pinned || '',
+        meta.geom || '', meta.pix || '', meta.hdr || '',
         report.paramSet || '', report.applied || '']);
 
-      sh(`rm -rf '${hostDir}'`);
+      if (KEEP) {
+        sh(`mv '${hostDir}' '${hostDir}-${clip}-${arm.label}'`);
+        console.log(`  [keep] ${hostDir}-${clip}-${arm.label}`);
+      } else {
+        sh(`rm -rf '${hostDir}'`);
+      }
     }
   }
   console.log('TDARR BENCH COMPLETE');

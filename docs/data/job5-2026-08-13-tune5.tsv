@@ -1,0 +1,6 @@
+clip	arm	status	src_bytes	out_bytes	pct_of_src	achieved_mean	achieved_worst	chunks	wall_s	gate	pinned	geom	pix_fmt	hdr_prim/trc/spc/loc	param_set	applied
+closeenc	hdr_stock	success	409085458	442167490	108.09	79.48	73.97	17	347.3	encoded		1920x816	yuv420p10le	bt709/bt709/bt709/left	none (preset only, by request)	
+closeenc	hdr_tune5	success	409085458	486254261	118.86	79.61	79.11	17	368.3	encoded		1920x816	yuv420p10le	bt709/bt709/bt709/left	none (preset only, by request)	
+closeenc	hdr_tune5	success	409085458	385584881	94.26	73.62	50.65	17	247.9	encoded		1920x816	yuv420p10le	bt709/bt709/bt709/left	none (preset only, by request)	
+topgun	hdr_tune5	success	539686411	194857109	36.11	76.22	66.65	50	233.0	encoded		1920x1012	yuv420p10le	bt709/bt709/bt709/left	none (preset only, by request)	
+topgun	hdr_tune5	success	539686411	249474262	46.23	79.33	65.36	50	214.9	encoded		1920x1012	yuv420p10le	bt709/bt709/bt709/left	none (preset only, by request)	
