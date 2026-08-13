@@ -1,0 +1,17 @@
+clip	arm	crf	vmaf_mean	vmaf_min	vmaf_1pct	frames
+closeenc	aom_cu4	18	97.421	87.032	91.666	1440
+closeenc	aom_cu4	14	98.296	89.904	94.078	1440
+closeenc	aom_cu4	10	98.928	94.232	95.926	1440
+closeenc	aom_cu4	6	99.439	96.463	97.584	1440
+closeenc	aom_cu4_tuned	18	97.511	87.416	92.882	1440
+closeenc	aom_cu4_tuned	14	98.173	90.353	94.456	1440
+closeenc	aom_cu4_tuned	10	98.830	94.136	96.425	1440
+closeenc	svt_p4	14	98.054	94.428	94.648	1440
+closeenc	svt_p4	10	98.504	95.342	95.546	1440
+closeenc	svt_p4	18	97.477	93.490	93.677	1440
+closeenc	aom_cu4_tuned	6	99.384	96.000	97.708	1440
+closeenc	svt_p6	10	98.508	94.967	95.229	1440
+closeenc	svt_p4	6	98.919	96.152	96.466	1440
+closeenc	svt_p6	14	98.130	94.128	94.490	1440
+closeenc	svt_p6	18	97.653	93.443	93.667	1440
+closeenc	svt_p6	6	98.899	95.883	96.162	1440
