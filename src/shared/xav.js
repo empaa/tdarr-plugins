@@ -54,7 +54,19 @@ const stripAnsi = (s) => String(s)
 const PHASE_RE = /(\d+):(\d+)\s+([A-Z]{2,6}):\s*\[[#\-]*\]\s*(\d+)%,\s*([\d.]+)\s*FPS,\s*-?(\d+):(\d+),\s*(\d+)\/(\d+)/g;
 
 //   00:03 [22/25] [#####-----] 79% 2316/2899 (12.59, -00:00, 57527k, 869.5m)
-const MASTER_RE = /(\d+):(\d+)\s+\[(\d+)\/(\d+)\]\s*\[[#\-]*\]\s*(\d+)%\s+(\d+)\/(\d+)\s*\(\s*([\d.]+),\s*-?(\d+):(\d+),\s*(\d+)k,\s*([\d.]+)m\s*\)/g;
+//
+// The ETA and size fields are DELIBERATELY loose. On 2026-08-13 a feature-length
+// encode (Avatar, 2649 chunks) parsed at chunk 4 and never again, while the
+// encode ran on to 355 -- so the dashboard froze for the whole job. Every clip
+// we had ever tested was ~2 minutes, under 1000 chunks, under an hour of ETA and
+// under 1000m of projected size, so nothing exercised the wider forms.
+//   - ETA accepts H:MM (measured: `-00:28` at 28 minutes remaining) and H:MM:SS.
+//   - size accepts k/m/g, normalised to megabytes below.
+// Being permissive here costs nothing; being strict cost a whole job's progress.
+const MASTER_RE = /(\d+):(\d+)\s+\[(\d+)\/(\d+)\]\s*\[[#\-]*\]\s*(\d+)%\s+(\d+)\/(\d+)\s*\(\s*([\d.]+),\s*-?(?:(\d+):)?(\d+):(\d+),\s*(\d+)k,\s*([\d.]+)([kmg])\s*\)/gi;
+
+// Normalise xav's size field to megabytes regardless of the unit it chose.
+const SIZE_UNIT_SCALE = { k: 0.001, m: 1, g: 1000 };
 
 //   [0000 / F 16.25 / 68.04] [########] 100%, 544.24,  56/ 56
 //   [0000 / F 27.50 /      ] [########] 100%, 141.56,  56/ 56   (score not yet known)
@@ -72,7 +84,12 @@ const firstMatch = (re, text) => {
 // text directly yields `1/1300`. Split on segment starts first: every segment
 // begins either with a HH:MM stamp (phase and master lines) or with `[NNNN /`
 // (per-worker lines).
-const SEGMENT_SPLIT = /(?=\d{2}:\d{2}\s)|(?=\[\d{4}\s*\/)/;
+// The worker-line alternative requires a SPACE after the 4-digit chunk id.
+// Without it, `[1234/2649]` -- a MASTER line once chunks-done reaches four
+// digits -- looks like a worker line, so the split lands mid-master-line and
+// strips the leading timestamp MASTER_RE needs. Every test source had under
+// 1000 chunks and never reached it; a feature film has 2649.
+const SEGMENT_SPLIT = /(?=\d{2}:\d{2}\s)|(?=\[\d{4}\s+\/)/;
 
 const splitSegments = (text) => text.split(SEGMENT_SPLIT).filter((s) => s.trim());
 
@@ -90,6 +107,11 @@ const parseXavEvents = (raw) => {
     const master = firstMatch(MASTER_RE, seg);
     if (master) {
       const workers = [];
+      // Two-field ETA is H:MM (measured against a known frames/fps remainder);
+      // three-field is H:MM:SS.
+      const etaSeconds = master[9] !== undefined
+        ? parseInt(master[9], 10) * 3600 + parseInt(master[10], 10) * 60 + parseInt(master[11], 10)
+        : parseInt(master[10], 10) * 3600 + parseInt(master[11], 10) * 60;
       events.push({
         type: 'encode',
         chunksDone: parseInt(master[3], 10),
@@ -98,9 +120,9 @@ const parseXavEvents = (raw) => {
         frames: parseInt(master[6], 10),
         totalFrames: parseInt(master[7], 10),
         fps: parseFloat(master[8]),
-        etaSeconds: parseInt(master[9], 10) * 3600 + parseInt(master[10], 10) * 60,
-        kbps: parseInt(master[11], 10),
-        megabytes: parseFloat(master[12]),
+        etaSeconds,
+        kbps: parseInt(master[12], 10),
+        megabytes: parseFloat(master[13]) * (SIZE_UNIT_SCALE[master[14].toLowerCase()] || 1),
         workers,
       });
       continue;
@@ -519,10 +541,40 @@ const logTargetHit = (jobLog, stats, targetQuality, crfRange) => {
   }
 };
 
+// Bytes xav has actually written so far, by measuring its chunk directory.
+//
+// Tdarr's outputFileSizeInGbytes is the ACTUAL current size, and xav's master
+// line carries no bytes-written figure -- its `m` field is a whole-file
+// projection. ee1bcc2 correctly stopped feeding the projection into that field
+// (it made the dashboard count backwards) but left nothing in its place, so the
+// field has read 0 ever since. xav does not report this number, but it does
+// leave it on disk: one .obu per completed chunk under <workDir>/.<hash>/encode.
+//
+// Best-effort by design: the directory name is a hash we do not control, and an
+// encode that has not produced a chunk yet legitimately has nothing to measure.
+// Returning 0 (rather than throwing) leaves the field simply unreported.
+const encodedBytesOnDisk = (workDir) => {
+  if (!workDir) return 0;
+  try {
+    const dot = fs.readdirSync(workDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name.startsWith('.'))
+      .map((e) => path.join(workDir, e.name, 'encode'))
+      .find((p) => fs.existsSync(p));
+    if (!dot) return 0;
+    let total = 0;
+    for (const f of fs.readdirSync(dot)) {
+      try { total += fs.statSync(path.join(dot, f)).size; } catch (_) { /* mid-write */ }
+    }
+    return total;
+  } catch (_) {
+    return 0;
+  }
+};
+
 const createXavTracker = (opts) => {
   const {
     updateWorker, jobLog, dbg, onSizeExceeded,
-    sourceBytes, nonVideoBytes, maxEncodedPercent,
+    sourceBytes, nonVideoBytes, maxEncodedPercent, workDir,
   } = opts;
 
   let interval = null;
@@ -537,8 +589,36 @@ const createXavTracker = (opts) => {
 
   const push = (fields) => { try { updateWorker(fields); } catch (_) {} };
 
+  // Output is arriving but nothing parses out of it: the exact failure that
+  // froze the Avatar dashboard for a whole job while xav encoded 355 chunks.
+  // We could not reproduce it afterwards because no test source is long enough,
+  // so capture a sample of the unparsed text at the time instead of guessing at
+  // the format later. Logged once, to av1-debug.log only.
+  let sawEncodeEvent = false;
+  let unparsedSince = 0;
+  let unparsedLogged = false;
+  const UNPARSED_GRACE_MS = 120000;
+
   const onLine = (raw) => {
-    for (const ev of parseXavEvents(raw)) applyEvent(ev);
+    const evs = parseXavEvents(raw);
+    for (const ev of evs) applyEvent(ev);
+
+    if (evs.some((e) => e.type === 'encode')) {
+      sawEncodeEvent = true;
+      unparsedSince = 0;
+      return;
+    }
+    // Only meaningful once encoding has actually started: CROP and SCD legitimately
+    // produce no encode events for minutes at a time.
+    if (!sawEncodeEvent || unparsedLogged || phase !== 'ENC') return;
+    const now = Date.now();
+    if (!unparsedSince) { unparsedSince = now; return; }
+    if (now - unparsedSince < UNPARSED_GRACE_MS) return;
+    unparsedLogged = true;
+    const sample = stripAnsi(String(raw)).replace(/\s+/g, ' ').trim().slice(0, 400);
+    jobLog('[xav] WARNING: progress output has not parsed for 2 minutes -- the dashboard '
+      + 'is frozen but the encode is still running. Sample logged to av1-debug.log.');
+    dbg(`[xav] UNPARSED progress sample: ${sample}`);
   };
 
   const applyEvent = (ev) => {
@@ -600,14 +680,19 @@ const createXavTracker = (opts) => {
     const etaS = smoothedFps > 0 ? Math.round(remaining / smoothedFps) : state.etaSeconds;
     const estFinalGb = (projectedVideo + (nonVideoBytes || 0)) / (1024 ** 3);
 
-    push({
+    const fields = {
       percentage: Math.min(99, state.percent),
       fps: Math.round(smoothedFps * 10) / 10,
       ETA: formatEta(etaS),
       estimatedFinalFileSizeInGbytes: estFinalGb,
       estimatedFinalSize: estFinalGb,
       estSize: estFinalGb,
-    });
+    };
+    // Only report a current size once there is one. Sending 0 is what made the
+    // field look permanently broken; omitting it lets Tdarr keep the last value.
+    const writtenBytes = encodedBytesOnDisk(workDir);
+    if (writtenBytes > 0) fields.outputFileSizeInGbytes = writtenBytes / (1024 ** 3);
+    push(fields);
 
     const now = Date.now();
     if (now - lastProgressLogMs >= LOG_INTERVAL_MS) {

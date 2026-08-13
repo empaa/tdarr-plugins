@@ -254,6 +254,7 @@ const plugin = async (args) => {
     sourceBytes,
     nonVideoBytes,
     maxEncodedPercent,
+    workDir: args.workDir,
     onSizeExceeded: () => { sizeExceeded = true; pm.killAll(); },
   });
 
@@ -298,6 +299,14 @@ const plugin = async (args) => {
     env: Object.assign({}, process.env, { TERM: 'xterm-256color' }),
     silent: true,
     onLine: tracker.onLine,
+    // installCancelHandler only fires if OUR process lives long enough to run a
+    // handler. Tdarr cancelling a job kills the worker outright, and on
+    // 2026-08-13 that left xav running at 1267% CPU holding a deleted 39.6 GB
+    // file (job eUZ3g_6xN) -- the tree had been reparented to PPID 1. The
+    // watchdog is a detached bash that outlives us and group-kills the encoder
+    // when the worker disappears, which is the only thing that covers a kill we
+    // never get to observe.
+    onSpawn: (pid) => pm.startPpidWatcher(pid),
   });
 
   tracker.stop();

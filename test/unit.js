@@ -714,6 +714,10 @@ const TESTS = [
   ['xav: estimate does not double-extrapolate', xavEstimateDoesNotDoubleExtrapolate],
   ['xav: size gate waits for convergence', sizeGateWaitsForConvergenceNotJustDecline],
   ['xavEncode: happy path replays real xav output', xavEncodePluginHappyPath],
+  ['xavEncode: arms the ppid watchdog so cancel cannot orphan xav', xavEncodeArmsPpidWatchdog],
+  ['xav: reports actual bytes written, not a permanent zero', trackerReportsActualBytesWritten],
+  ['xav: master line parses with a four-digit chunk count', masterLineParsesWithFourDigitChunkCount],
+  ['xav: master line tolerates feature-length ETA and size units', masterLineToleratesFeatureLengthFormats],
   ['xavEncode: refuses input outside workDir', xavEncodeRefusesInputOutsideWorkDir],
 ];
 
@@ -1177,9 +1181,14 @@ async function sizeGateWaitsForConvergenceNotJustDecline() {
 // Plugin-level test: replays the REAL captured xav output through xavEncode with
 // every binary stubbed, so the whole path -- launcher, tracker, validation,
 // mux, propagation -- is exercised with no xav, no GPU and no container.
+const STUB_ENCODER_PID = 424242;
+
 function injectXavPluginStubs(opts) {
   const pmPath = require.resolve(path.join(SRC, 'shared', 'processManager.js'));
   const captured = opts.captured;
+  // Pids the plugin asked the ppid watchdog to guard. Cancellation correctness
+  // is invisible from the return value, so the test has to observe this.
+  const watched = opts.watched || [];
 
   require.cache[pmPath] = {
     id: pmPath,
@@ -1190,6 +1199,10 @@ function injectXavPluginStubs(opts) {
         spawnAsync: async (bin, spawnArgs, spawnOpts) => {
           const o = spawnOpts || {};
           if (bin.endsWith('script')) {
+            // The real spawnAsync reports the child pid through onSpawn; the stub
+            // must too, or a plugin that arms the ppid watchdog there looks
+            // identical to one that never arms it.
+            if (o.onSpawn) o.onSpawn(STUB_ENCODER_PID);
             // Feed the real fixture through the tracker, then produce output.
             if (o.onLine) {
               for (const line of captured.split(/[\r\n]/)) {
@@ -1213,11 +1226,163 @@ function injectXavPluginStubs(opts) {
         removeCancelHandler: () => {},
         killAll: () => {},
         adopt: (c) => c,
-        startPpidWatcher: () => {},
+        startPpidWatcher: (pid) => watched.push(pid),
         stopPpidWatchers: () => {},
       }),
     },
   };
+}
+
+// Feature-length encodes produce master lines our 2-minute test clips never
+// did: an ETA past an hour and a projected size past 1000m. The Avatar job
+// (2649 chunks) froze the dashboard for its whole run, and no local source is
+// long enough to reproduce it, so the parser accepts the wider forms rather
+// than pinning the one shape we happened to capture.
+function masterLineToleratesFeatureLengthFormats() {
+  const { parseXavEvents } = require(path.join(SRC, 'shared', 'xav.js'));
+  const enc = (l) => parseXavEvents(l).filter((e) => e.type === 'encode')[0];
+
+  // Baseline, the shape captured from a real run: two-field ETA is H:MM.
+  const a = enc('00:03 [22/25] [#####-----] 79% 2316/2899 (12.59, -00:28, 57527k, 869.5m)');
+  assert(a && a.megabytes === 869.5, `baseline megabytes wrong: ${a && a.megabytes}`);
+  assert(a.etaSeconds === 28 * 60, `two-field ETA must be H:MM, got ${a.etaSeconds}s`);
+
+  // Gigabyte-scale projection -- normalised to megabytes so the size gate and
+  // the estimate keep working in one unit.
+  const g = enc('23:45 [355/2649] [###-----] 13% 38000/283597 (44.60, -01:45, 3000k, 4.3g)');
+  assert(g, 'a gigabyte-scale size field must still parse');
+  assert(Math.abs(g.megabytes - 4300) < 0.001, `4.3g must be 4300 MB, got ${g.megabytes}`);
+
+  // Three-field ETA (H:MM:SS) on a long job.
+  const h = enc('23:45 [355/2649] [###-----] 13% 38000/283597 (44.60, -2:05:30, 3000k, 430.5m)');
+  assert(h, 'a three-field ETA must still parse');
+  assert(h.etaSeconds === 2 * 3600 + 5 * 60 + 30, `H:MM:SS wrong: ${h.etaSeconds}`);
+}
+
+// A master line whose chunks-done has four digits must still parse. The segment
+// splitter used to treat `[1234/` as the start of a per-worker line, splitting
+// mid-master-line and removing the timestamp the master pattern anchors on.
+// Every clip we ever tested had under 1000 chunks; Avatar had 2649.
+function masterLineParsesWithFourDigitChunkCount() {
+  const { parseXavEvents } = require(path.join(SRC, 'shared', 'xav.js'));
+  const line = '23:45 [1234/2649] [####----------------] 21% 38000/283597 '
+    + '(44.60, -01:45, 3000k, 430.5m)';
+  const evs = parseXavEvents(line).filter((e) => e.type === 'encode');
+  assert(evs.length === 1, `four-digit chunk count must yield an encode event, got ${evs.length}`);
+  assert(evs[0].chunksDone === 1234 && evs[0].chunksTotal === 2649,
+    `wrong chunk numbers: ${JSON.stringify(evs[0])}`);
+
+  // The three-digit case must keep working.
+  const evs3 = parseXavEvents('23:45 [355/2649] [####----------------] 21% 38000/283597 '
+    + '(44.60, -01:45, 3000k, 430.5m)').filter((e) => e.type === 'encode');
+  assert(evs3.length === 1 && evs3[0].chunksDone === 355, 'three-digit chunk count regressed');
+}
+
+// ee1bcc2 removed outputFileSizeInGbytes because the value fed to it was a
+// whole-file PROJECTION, which made the dashboard count backwards. Removing it
+// left the field reading 0 forever, which Emil noticed on 2026-08-13: "the
+// current Output file size has always displayed 0 since we fixed the estimated
+// output at finish". xav never prints bytes-written, but it leaves them on disk
+// as one .obu per finished chunk, so the number is measurable even though it is
+// not reported.
+async function trackerReportsActualBytesWritten() {
+  const { createXavTracker } = require(path.join(SRC, 'shared', 'xav.js'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xav-bytes-'));
+  // xav's chunk directory: a dot-dir whose name is a hash we do not control.
+  const encDir = path.join(tmp, '.a1b2c3', 'encode');
+  fs.mkdirSync(encDir, { recursive: true });
+  fs.writeFileSync(path.join(encDir, '0000.obu'), Buffer.alloc(3 * 1024 * 1024));
+  fs.writeFileSync(path.join(encDir, '0001.obu'), Buffer.alloc(1 * 1024 * 1024));
+
+  const updates = [];
+  const tracker = createXavTracker({
+    updateWorker: (f) => updates.push(f),
+    jobLog: () => {}, dbg: () => {},
+    onSizeExceeded: () => {},
+    sourceBytes: 1000 * 1024 * 1024,
+    nonVideoBytes: 0,
+    maxEncodedPercent: 100,
+    workDir: tmp,
+  });
+
+  tracker.onLine('00:03 [22/25] [#####-----] 79% 2316/2899 (12.59, -00:30, 57527k, 869.5m)');
+  tracker.startInterval();
+  await new Promise((r) => setTimeout(r, 5200));   // one POLL_INTERVAL_MS tick
+  tracker.stop();
+
+  const sized = updates.filter((u) => u.outputFileSizeInGbytes != null);
+  assert(sized.length > 0,
+    'tracker must report outputFileSizeInGbytes -- it read 0 forever after ee1bcc2');
+  const gb = sized[sized.length - 1].outputFileSizeInGbytes;
+  const expected = 4 / 1024;                        // 4 MiB of chunks
+  assert(Math.abs(gb - expected) < 1e-6,
+    `expected ${expected} GB from the chunk dir, got ${gb}`);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// Regression test for a PRODUCTION incident (2026-08-13, Avatar, job eUZ3g_6xN).
+// Emil cancelled from the dashboard; Tdarr killed the job worker; xav kept
+// running at 1267% CPU holding a deleted 39.6 GB file open until it was killed
+// by hand. `ps` showed the whole tree reparented to init: PPID 1.
+//
+// installCancelHandler alone cannot cover this. It listens for SIGTERM/SIGINT/
+// disconnect on OUR process -- if that process is killed outright, no handler
+// runs. startPpidWatcher is the safety net for exactly that case: a detached
+// bash that polls the worker pid and group-kills the encoder when it vanishes.
+// av1anEncode armed it; both xav plugins never called it, so the net was not
+// there on the one path that needed it.
+async function xavEncodeArmsPpidWatchdog() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xav-watchdog-'));
+  const workDir = path.join(tmp, 'work');
+  fs.mkdirSync(workDir);
+
+  const inputPath = path.join(workDir, 'staged.mkv');
+  fs.writeFileSync(inputPath, 'y'.repeat(400 * 1024 * 1024 / 1024));
+
+  const watched = [];
+  injectXavPluginStubs({
+    captured: fs.readFileSync(XAV_FIXTURE, 'utf8'),
+    videoOnlyPath: path.join(workDir, 'xav-video.mkv'),
+    // Must clear the no-TTY guard: a tiny output is xav's "encode never ran"
+    // signature and the plugin correctly throws before we reach the assertion.
+    outputBytes: 8 * 1024 * 1024,
+    probeLines: [
+      'width=1920', 'height=1040', 'codec_name=av1',
+      'nb_read_frames=2899', 'duration=120.910000',
+    ],
+    watched,
+  });
+
+  const realExists = fs.existsSync;
+  fs.existsSync = (p) => (p === '/usr/local/bin/xav' ? true : realExists(p));
+  try {
+    delete require.cache[require.resolve(path.join(SRC, 'xavEncode', 'index.js'))];
+    const { plugin } = require(path.join(SRC, 'xavEncode', 'index.js'));
+    await plugin({
+      inputFileObj: {
+        _id: inputPath,
+        file: inputPath,
+        ffProbeData: {
+          streams: [{ codec_type: 'video', width: 1920, height: 1080, nb_frames: '2899' }],
+          format: { duration: '120.910000' },
+        },
+      },
+      workDir,
+      inputs: {},
+      variables: {},
+      jobLog: () => {},
+      updateWorker: () => {},
+    });
+  } finally {
+    fs.existsSync = realExists;
+  }
+
+  assert(watched.includes(STUB_ENCODER_PID),
+    'xavEncode must arm the ppid watchdog on the encoder pid -- without it a cancelled '
+    + `job orphans xav (production incident eUZ3g_6xN). watched=${JSON.stringify(watched)}`);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
 }
 
 async function xavEncodePluginHappyPath() {

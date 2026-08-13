@@ -257,6 +257,7 @@ const plugin = async (args) => {
     sourceBytes,
     nonVideoBytes,
     maxEncodedPercent,
+    workDir: args.workDir,
     onSizeExceeded: () => { sizeExceeded = true; pm.killAll(); },
   });
 
@@ -314,6 +315,14 @@ const plugin = async (args) => {
 
     pm.adopt(ff);
     pm.adopt(xav);
+
+    // Both halves of the pipe need guarding, not just xav: killing only the
+    // encoder leaves ffmpeg decoding into a pipe nobody reads. adopt() covers
+    // cleanup on paths where we are still alive to run it; the ppid watchdog
+    // covers the path where Tdarr kills the worker outright, which orphaned a
+    // feature-length encode in production on 2026-08-13 (job eUZ3g_6xN).
+    pm.startPpidWatcher(xav.pid);
+    pm.startPpidWatcher(ff.pid);
 
     ff.stdout.pipe(xav.stdin);
 
