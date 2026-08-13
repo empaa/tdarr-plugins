@@ -49,6 +49,9 @@ const ARMS = arg('arms', 'auto,none').split(',').map((a) => {
 const BINARY = arg('binary', '/opt/xav/xav-mainline');
 const TARGET = arg('target', '69.8-70.2');
 const PRESET = arg('preset', '6');
+// Tier-defining, so it has to be settable: the top and mid tiers differ ONLY in
+// CRF range, and that difference is the whole point of having both.
+const CRF_RANGE = arg('crf-range', '5-63');
 const PCT = arg('pct', '100');   // <100 arms the size gate; 100 disables it
 const KEEP = process.argv.includes('--keep');  // retain outputs for visual A/B
 // xavPipeEncode is the 4K->1080p path: ffmpeg scales, xav reads Y4M from stdin.
@@ -151,7 +154,7 @@ function buildFlow(flowId, arm) {
           xav_path: BINARY,
           target_quality: TARGET,
           tq_mode: 'mean',
-          crf_range: '5-63',
+          crf_range: CRF_RANGE,
           preset: PRESET,
           workers: '2',
           vship: '1',
@@ -257,8 +260,16 @@ function buildFlow(flowId, arm) {
         report.paramSet || '', report.applied || '']);
 
       if (KEEP) {
-        sh(`mv '${hostDir}' '${hostDir}-${clip}-${arm.label}'`);
-        console.log(`  [keep] ${hostDir}-${clip}-${arm.label}`);
+        // Collect every kept output into ONE directory, named <clip>-<arm>.mkv.
+        // replaceOriginalFile writes the result back under the SOURCE's name, so
+        // without this rename each file is called e.g. closeenc.mkv and which
+        // tier produced it is knowable only from its parent directory -- useless
+        // when the point is to sit and compare them on a projector.
+        const keepRoot = `${HOST_LIB}/_outputs`;
+        const dest = `${keepRoot}/${clip}-${arm.label}.mkv`;
+        sh(`mkdir -p '${keepRoot}' && mv "$(ls '${hostDir}'/*.mkv | head -1)" '${dest}' `
+          + `&& rm -rf '${hostDir}' && chown 99:100 '${dest}'`);
+        console.log(`  [keep] ${dest}`);
       } else {
         sh(`rm -rf '${hostDir}'`);
       }
