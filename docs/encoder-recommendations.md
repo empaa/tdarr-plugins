@@ -131,6 +131,31 @@ What production ships (`src/shared/encoderFlags.js`):
 **Stock defaults are not good enough**: `bare_defaults` (`--preset 4` alone) cost
 **+18 to +22%**. The parameter work is justified overall.
 
+### DECIDED 2026-08-13: the tuned set ships on mainline
+
+Verified as real Tdarr jobs on JOB5 (low tier, `xavEncode` via
+`inputFile → sanitizeFile → xavEncode → replaceOriginalFile`), tuned vs
+`param_set: none`. A win counts only where one arm beats the other on **both**
+size and quality:
+
+| clip | source type | tuned | stock | verdict |
+|---|---|---|---|---|
+| westworld | WEB-DL | 38.40% @ 71.05 | 45.19% @ 69.31 | **tuned dominates** |
+| harrypotter | VC-1 remux | 62.64% @ 71.49 | 65.73% @ 67.00 | **tuned dominates** |
+| closeenc | 35mm grain | 61.87% @ 69.53 | 72.18% @ 68.03 | **tuned dominates** |
+| topgun | IMAX remux | 29.70% @ 70.16 | 30.14% @ 70.41 | tie (−1.5% bytes, −0.25 quality) |
+
+Worst-frame improves with the tuned set on all four (+14.0, +16.7, +12.2, +2.6),
+which matters more than the mean — distribution is why xav was chosen over av1an
+in the first place (§2).
+
+**Emil's call: ship the tuned set on mainline.** The topgun regression is 0.25
+SSIMULACRA2 against three dominant wins and a universal worst-frame gain. This
+is the `param_set: auto` default and needs no further change.
+
+Scope: **mainline only**, i.e. the low tier. §5 covers why the hdr fork at
+mid/top gets no parameter string.
+
 **`--qm-min 0` is confirmed on both sources** and the stake is content-dependent.
 
 **Corrected 2026-08-13.** This section previously read "~6.8% on 35mm film,
