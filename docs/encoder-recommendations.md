@@ -118,7 +118,7 @@ What production ships (`src/shared/encoderFlags.js`):
 
 | flag | basis | evidence |
 |---|---|---|
-| `--qm-min 0` | **measured, both sources** | correctly signed in **6 of 6** tier-source combinations. Worth ~1.2% on clean digital at top, **~6.8% on 35mm film** |
+| `--qm-min 0` | **measured, both sources** | correctly signed in **6 of 6** tier-source combinations. Worth <1.2% at our shipped low/mid targets; the large film figure is measured at ~85, not at our 80 ceiling -- see the correction below |
 | `--enable-qm 1` | **measured** | disabling costs +4.3 / +6.6 / **+15.6%** |
 | `--tf-strength 1` | **measured** | mainline default 3 costs +2.4–3.3% |
 | `--tune 1` | **measured, both sources** | tune 0 costs +3.2–9.95%; tune 4 is the worst arm in **6 of 6** combinations, +36–56% on clean digital and **+41 to +134%** on film |
@@ -131,9 +131,34 @@ What production ships (`src/shared/encoderFlags.js`):
 **Stock defaults are not good enough**: `bare_defaults` (`--preset 4` alone) cost
 **+18 to +22%**. The parameter work is justified overall.
 
-**`--qm-min 0` is confirmed on both sources** and the stake is content-dependent:
-~1.2% on clean digital at the top tier, **~6.8% on 35mm film**, symmetric in both
-directions (qm-min 6 costs +6.78% there). Five times the stake, same sign.
+**`--qm-min 0` is confirmed on both sources** and the stake is content-dependent.
+
+**Corrected 2026-08-13.** This section previously read "~6.8% on 35mm film,
+symmetric in both directions (qm-min 6 costs +6.78%)". That was a
+delta-of-deltas error. In the Jurassic sweep `new_set` was **qm-min 4**, not 0
+(the script documents the switchover), so −6.79% and +6.78% are both measured
+*against qm-min 4* and cannot be added or read as symmetric around 0. Computed
+from the raw bytes at matched quality (`hometower/docs/data/xav-settings-sweep-jurassic.tsv`):
+
+| tier | qm-min 0 | qm-min 6 | 0 vs 6 |
+|---|---|---|---|
+| low (mean 67.99) | 19,262,652 | 19,343,194 | −0.42% |
+| mid (mean 72.54) | 27,854,512 | 28,178,092 | −1.15% |
+| top (mean 84.97) | 134,816,703 | 154,441,603 | **−12.71%** |
+
+So the true gap at the sweep's top tier is nearly **twice** the number this
+document carried. **But read the mean scores**: that sweep's top tier targeted
+~85, and §1 sets our shipped top tier at **80** precisely because 85 inflates
+output past the source. The 12.71% is measured at a quality level we
+deliberately abandoned, and the trend across tiers (0.42 → 1.15 → 12.71) is
+steep enough that extrapolating it down to 80 is not safe. **At our actual tier
+targets the qm-min stake is measured only at low and mid, where it is under
+1.2%.**
+
+Two consequences. It is still correctly signed everywhere, so keep it on
+mainline — it costs nothing. But it is not the headline win the old number
+implied, and it is not yet a justification for overriding the hdr fork's
+defaults at mid/top (see §5).
 
 The caveat that remains: it is optimal *on SSIMULACRA2*. Every maintainer ships
 4–6, which may encode banding and flat-area concerns a full-reference metric does
