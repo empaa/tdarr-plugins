@@ -504,7 +504,46 @@ async function mezzanineInputBeforeOutput() {
   assert(a.includes('-y') && a.includes('-nostdin'), 'non-interactive overwrite');
 }
 
+// Regression: killAll's delayed SIGKILL swept the LIVE activeChildren set, so
+// anything spawned through the same manager after cleanup() -- probeOutput's
+// ffprobe, then mkvmerge -- was killed 3 s in. That failed 100% of xav jobs with
+// "output has non-positive dimensions (0x0)". A child spawned after killAll must
+// outlive the sweep.
+async function killAllDoesNotReachLaterChildren() {
+  // Other tests poison require.cache with a stub manager; this one needs the real one.
+  const pmPath = require.resolve(path.join(SRC, 'shared', 'processManager.js'));
+  delete require.cache[pmPath];
+  const { createProcessManager } = require(pmPath);
+
+  const pm = createProcessManager(() => {}, () => {});
+
+  // spawnAsync unref()s its children, so awaiting one does NOT hold the event
+  // loop open -- without this the process exits mid-test, reporting success by
+  // printing nothing at all.
+  const keepAlive = setInterval(() => {}, 250);
+  try {
+    const doomed = pm.spawnAsync('sleep', ['30']);
+    await new Promise((r) => setTimeout(r, 200));
+
+    pm.killAll();
+
+    // Stands in for ffprobe -count_frames: spawned after killAll, runs past the
+    // 3 s sweep. Must exit cleanly on its own.
+    const later = pm.spawnAsync('sleep', ['4']);
+
+    const laterCode = await later;
+    assert(laterCode === 0, `child spawned after killAll was killed by the sweep (exit ${laterCode})`);
+
+    const doomedCode = await doomed;
+    assert(doomedCode !== 0, `child alive at killAll should have been killed (exit ${doomedCode})`);
+  } finally {
+    clearInterval(keepAlive);
+    delete require.cache[pmPath];
+  }
+}
+
 const TESTS = [
+  ['processManager: killAll spares later children', killAllDoesNotReachLaterChildren],
   ['vsSource: lsmas line', vsSourceLsmasLine],
   ['vsSource: escapes quotes/backslashes in path', vsSourceEscapesPath],
   ['vsSource: downscale lines after source', vsSourceDownscaleAfterSource],
