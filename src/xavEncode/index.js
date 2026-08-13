@@ -29,11 +29,14 @@ const details = () => ({
       label: 'Target Quality (SSIMULACRA2)',
       name: 'target_quality',
       type: 'string',
-      defaultValue: '72.3-72.7',
+      defaultValue: '74.8-75.2',
       inputUI: { type: 'text' },
       tooltip: [
-        'Target SSIMULACRA2 band, e.g. "72.3-72.7". 90+ is visually lossless, 70-90 high,',
-        '50-70 medium. The default matches what the current av1an SVT tier measures (72.46).',
+        'Target SSIMULACRA2 band. Tier targets: low 69.8-70.2 (TV / WEB-DL),',
+        'mid 74.8-75.2 (movies that are not 1080p remux), top 79.8-80.2 (1080p remux).',
+        '90+ is visually lossless, 70-90 high, 50-70 medium. Above ~80 the cost curve',
+        'turns steeply non-linear, because the metric scores against the SOURCE file --',
+        'so a high target pays to reproduce the source\'s own compression artifacts.',
       ].join(' '),
     },
     {
@@ -103,9 +106,14 @@ const details = () => ({
       label: 'Max Encoded Percent',
       name: 'max_encoded_percent',
       type: 'number',
-      defaultValue: '100',
+      defaultValue: '80',
       inputUI: { type: 'text' },
-      tooltip: 'Abort if projected output exceeds this % of source size. 100 disables the gate.',
+      tooltip: [
+        'Abort if projected output exceeds this % of source size; 100 disables the gate.',
+        'Default 80: if an encode cannot save a fifth of the file it is not worth doing,',
+        'and the original passes through untouched. This matters most on already-compressed',
+        'WEB-DL sources, which have the least headroom.',
+      ].join(' '),
     },
   ],
   outputs: [
@@ -132,14 +140,14 @@ const plugin = async (args) => {
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
 
-  const targetQuality = String(inputs.target_quality || '72.3-72.7');
+  const targetQuality = String(inputs.target_quality || '74.8-75.2');
   const tqMode = String(inputs.tq_mode || 'mean');
   const crfRange = String(inputs.crf_range || '10-50');
   const preset = Number(inputs.preset) || 4;
   const workers = Number(inputs.workers) || 2;
   const vship = Number(inputs.vship) || 1;
   const hwdec = inputs.hwdec === true || inputs.hwdec === 'true';
-  const maxEncodedPercent = Number(inputs.max_encoded_percent) || 100;
+  const maxEncodedPercent = Number(inputs.max_encoded_percent) || 80;
 
   const findBin = (...paths) => paths.filter(Boolean).find((p) => fs.existsSync(p));
   const xavBin = findBin(inputs.xav_path, '/usr/local/bin/xav', '/opt/xav/xav');

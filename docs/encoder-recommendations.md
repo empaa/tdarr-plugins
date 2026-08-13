@@ -14,11 +14,19 @@ anything the metric cannot see is marked as such.
 Working definition, SSIMULACRA2. Bands: 90+ visually lossless, 70–90 high,
 50–70 medium.
 
-| tier | target |
-|---|---|
-| low | 70 |
-| mid | 75 |
-| top | 82–85 (see the cost warning below) |
+**Decided 2026-08-13.** Tiers are assigned by SOURCE TYPE, not by preference —
+which matches the target to the headroom actually available.
+
+| tier | source | target | size gate |
+|---|---|---|---|
+| low | TV, almost always WEB-DL/WEBRIP | **70** | 80% |
+| mid | movies that are not 1080p remux | **75** | 80% |
+| top | 1080p remux only | **80** | 80% |
+
+The size gate is 80% everywhere: if an encode cannot save a fifth of the file it
+is not worth doing, and the original passes through. That matters most at the low
+tier, where WEB-DL sources have the least headroom and generation loss compounds
+on an already-lossy source.
 
 **These are a product decision, not a measurement.** Everything else in this
 document is conditional on them.
@@ -35,13 +43,20 @@ Measured, xav hdr on the Avatar sample. Source video is 374,764,422 bytes for
 | **85** | **509,502,004** | **136%** |
 | 90 | 895,337,490 | 239% |
 
-Interpolating the proposed tiers: **70 ≈ 48%, 75 ≈ 66%, 85 ≈ 136%.**
+Interpolating the chosen tiers: **70 ≈ 48%, 75 ≈ 66%, 80 ≈ 89%.**
 
-**At 85 the output exceeds the source.** This is structural, not a quirk of the
-sample: SSIMULACRA2 scores against the *source file*, not a master. Above a
-certain target you are paying to faithfully reproduce the source's own AVC
-compression artifacts, which is expensive. The practical ceiling for a
-space-saving pipeline is around **80–82**.
+**At 85 the output exceeds the source**, which is why 80 was chosen as the
+ceiling. This is structural, not a quirk of the sample: SSIMULACRA2 scores
+against the *source file*, not a master. Above a certain target you are paying to
+faithfully reproduce the source's own AVC compression artifacts.
+
+**IMPORTANT CAVEAT on all percentages above.** The Avatar sample is the busiest
+sustained-motion window in the film (mean motion 16.29, against 3.71 for a
+locked-off shot elsewhere), deliberately selected that way for the bake-off. The
+source is near-constant-bitrate but our encode cost tracks content, so cheap
+scenes shrink while the source does not. **These figures are an upper bound on
+the worst two minutes, not a film average** — across a whole film every tier
+lands materially lower.
 
 **The percentages are source-dependent.** A 60 Mbps 4K remux or a grainy 35 Mbps
 Blu-ray has far more headroom — 85 might land near 60% there. A lean 8 Mbps

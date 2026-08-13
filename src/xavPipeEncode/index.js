@@ -37,7 +37,7 @@ const details = () => ({
       label: 'Target Quality (SSIMULACRA2)',
       name: 'target_quality',
       type: 'string',
-      defaultValue: '72.3-72.7',
+      defaultValue: '74.8-75.2',
       inputUI: { type: 'text' },
       tooltip: [
         'Target SSIMULACRA2 band. NOTE: target-quality search may be unavailable on piped',
@@ -109,9 +109,14 @@ const details = () => ({
       label: 'Max Encoded Percent',
       name: 'max_encoded_percent',
       type: 'number',
-      defaultValue: '100',
+      defaultValue: '80',
       inputUI: { type: 'text' },
-      tooltip: 'Abort if projected output exceeds this % of source size. 100 disables the gate.',
+      tooltip: [
+        'Abort if projected output exceeds this % of source size; 100 disables the gate.',
+        'Default 80: if an encode cannot save a fifth of the file it is not worth doing,',
+        'and the original passes through untouched. This matters most on already-compressed',
+        'WEB-DL sources, which have the least headroom.',
+      ].join(' '),
     },
   ],
   outputs: [
@@ -140,14 +145,14 @@ const plugin = async (args) => {
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
 
   const resolution = String(inputs.resolution || '1080p');
-  const targetQuality = String(inputs.target_quality || '72.3-72.7');
+  const targetQuality = String(inputs.target_quality || '74.8-75.2');
   const tqUnavailableAction = String(inputs.tq_unavailable_action || 'fail');
   const tqMode = String(inputs.tq_mode || 'mean');
   const crfRange = String(inputs.crf_range || '10-50');
   const preset = Number(inputs.preset) || 4;
   const workers = Number(inputs.workers) || 2;
   const vship = Number(inputs.vship) || 1;
-  const maxEncodedPercent = Number(inputs.max_encoded_percent) || 100;
+  const maxEncodedPercent = Number(inputs.max_encoded_percent) || 80;
 
   const sourceStreams = (file.ffProbeData && file.ffProbeData.streams) || [];
   const videoStream = sourceStreams.find((s) => s.codec_type === 'video') || {};

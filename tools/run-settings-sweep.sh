@@ -62,11 +62,22 @@ CRF_LO="${CRF_RANGE%-*}"; CRF_HI="${CRF_RANGE#*-}"
 # arguments are valid. Do not use that combination to preflight a CRF range --
 # confirm against a known-good range first, or you will reject a good one.
 
+# Final tier targets (2026-08-13), set by source type rather than by preference:
+#   low  70  TV, almost always WEB-DL/WEBRIP -- least headroom, already compressed
+#   mid  75  movies that are not 1080p remux
+#   top  80  1080p remux only -- most headroom, where the real savings are
+#
+# 80 is the practical ceiling: above it the cost curve turns steeply non-linear,
+# because SSIMULACRA2 scores against the SOURCE FILE rather than a master, so a
+# high target pays to reproduce the source's own compression artifacts.
+#
+# NOTE for reading older result files: runs before 2026-08-13 used 68/72.5/85.
+# The Jurassic run (job 3) was launched under the OLD bands.
 tier_target() {
   case "$1" in
-    low) echo "67.8-68.2" ;;
-    mid) echo "72.3-72.7" ;;
-    top) echo "84.8-85.2" ;;
+    low) echo "69.8-70.2" ;;
+    mid) echo "74.8-75.2" ;;
+    top) echo "79.8-80.2" ;;
     *)   echo "" ;;
   esac
 }
