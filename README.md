@@ -1,10 +1,18 @@
 # tdarr-plugins
 
-AV1 encoding FlowPlugins for [Tdarr](https://tdarr.io), powered by [xav](#av1-encode-xav), [av1an](https://github.com/master-of-zen/Av1an) and [ab-av1](https://github.com/alexheretic/ab-av1).
+AV1 encoding FlowPlugins for [Tdarr](https://tdarr.io), built on
+**[xav](https://github.com/emrakyz/xav) by [emrakyz](https://github.com/emrakyz)** — a
+scene-chunked AV1 encoder with a built-in SSIMULACRA2 target-quality search. These plugins are
+a Tdarr integration around xav; the encoder, its chunking, its metric search and the hard parts
+are emrakyz's work.
 
 ## Plugins
 
 ### AV1 Encode (xav)
+
+> **Upstream:** [emrakyz/xav](https://github.com/emrakyz/xav). The binaries in production were
+> built from `6896aeb`. This repo contains no encoder code — see
+> [`tools/xav-build/`](tools/xav-build/) for the build container.
 
 Scene-based chunked AV1 encoding driven by a **SSIMULACRA2** target-quality search, rather
 than VMAF. Each scene gets its own CRF search until the chunk hits the requested score, so

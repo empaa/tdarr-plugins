@@ -4,7 +4,8 @@
 const details = () => ({
   name: 'AV1 Encode (xav)',
   description: [
-    'Encodes video to AV1 using xav with per-scene SSIMULACRA2 target-quality search.',
+    'Encodes video to AV1 using xav (github.com/emrakyz/xav) with per-scene SSIMULACRA2',
+    'target-quality search.',
     'Runs at the source resolution -- xav has no resize option, so use "AV1 Encode (xav, scaled)"',
     'when the source must be downscaled.',
     'Live progress, FPS, ETA and estimated size on the dashboard. Cancel kills the encoder.',
