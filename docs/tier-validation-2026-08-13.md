@@ -1,5 +1,14 @@
 # Tier validation — 2026-08-13
 
+> **CORRECTION 2026-08-14 — every "% of source" below is INFLATED.** The mux took
+> the encoded file whole, and xav copies the source's audio/subs into its own
+> output, so every result carried TWO copies of the non-video streams (fixed in
+> `1f6a3f1`). The overstatement is a constant per clip: closeenc +14.44, harrypotter
+> +23.55, topgun +15.41, westworld +6.24, captain +6.83 points. Corrected table at
+> the bottom. Because the offset is constant within a clip, every RELATIVE finding
+> here still holds — tier ordering, top≈mid equivalence, preset 6 over preset 4 —
+> but the absolute sizes are better than stated, and the AOM comparison inverts.
+
 Two tier sets run as **real Tdarr jobs** on JOB5 (visible on the dashboard at
 `http://10.0.0.3:8275`), so the whole integration is exercised, not just the encoder.
 Raw data: `docs/data/job5-2026-08-13-tier-validation.tsv`.
@@ -150,3 +159,40 @@ Worth looking hardest at:
 
 Note the outputs are **autocropped** (closeenc 1080 → 816, topgun → 1012, captain → 804), so a
 side-by-side against the source needs the offset or the panels will not align.
+
+## CORRECTED sizes (2026-08-14) — duplicate non-video streams removed
+
+Measured non-video bytes per source, subtracted once from each result:
+closeenc 59,054,426 · harrypotter 90,847,728 · topgun 83,142,971 ·
+westworld 9,701,555 · captain 92,833,364.
+
+| clip | top | mid | low | top-lean | mid-lean | low-lean |
+|---|---|---|---|---|---|---|
+| closeenc | 63.33% | 63.21% | 47.49% | 55.11% | 47.63% | **42.00%** |
+| harrypotter | 47.36% | 47.34% | 39.11% | 42.58% | 38.41% | **35.84%** |
+| topgun | 16.11% | 16.05% | 14.31% | 14.86% | 14.01% | **13.69%** |
+| westworld | 50.62% | 50.68% | 32.25% | 39.65% | 31.61% | **25.98%** |
+| captain (4K HDR) | 15.71% | 15.56% | — | 13.11% | 11.39% | — |
+
+### What this changes
+
+**The AOM comparison inverts.** closeenc at the low tier is **47.49%** of source,
+not the 61.92% reported. av1an+AOM reached 62.4% on the same film (job
+`Zcn7fGVw4z`) and that figure is clean — av1anEncode feeds av1an a VapourSynth
+`.vpy`, which is video-only, so it never duplicated anything. SVT therefore beats
+AOM on this content by a wide margin rather than matching it, which strengthens
+the decision to drop AOM rather than weakening it.
+
+**Nothing relative changes.** The inflation is a constant per clip, so tier
+ordering, the top≈mid equivalence, and preset 6 over preset 4 all stand exactly as
+measured.
+
+**The grain problem is smaller than it looked.** closeenc at the top tier is 63.3%
+of source, not 77.8%. The clip that read as marginal this morning is comfortable.
+
+### Caveat on the review files
+
+The 28 outputs in `_outputs/` were produced BEFORE this fix, so each carries a
+duplicate audio and subtitle set. Their **picture** is unaffected and they remain
+valid for judging quality on the projector; only their file sizes read high, by
+the per-clip constants above.
