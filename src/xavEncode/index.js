@@ -343,6 +343,10 @@ const plugin = async (args) => {
     logTargetHit(jobLog, tracker.getChunkStats(), targetQuality, crfRange);
   }
 
+  // xav's own MUX phase set the status to "Muxing" before exiting, so without
+  // this the dashboard attributes the whole validation to muxing -- which is how
+  // 42 minutes of ffprobe on Avatar looked like a stalled mux (job yf2quTpnG).
+  updateWorker({ status: 'Validating output' });
   const probe = await probeOutput(videoOnlyPath, pm, dbg);
   const verdict = validateOutput(probe, { frames: sourceFrames, duration: sourceDuration }, {});
   if (!verdict.ok) {
@@ -380,11 +384,16 @@ const probeOutput = async (outputPath, pm, dbg) => {
     .find((p) => fs.existsSync(p)) || 'ffprobe';
   const bytes = fs.statSync(outputPath).size;
   const out = [];
+  // -count_packets, NOT -count_frames. Both yield one count per coded frame for
+  // AV1 in Matroska, but -count_frames DECODES the whole file to get there: on
+  // Avatar (16.8 GB, 283893 frames) it took 42m42s, about 40% of the entire job,
+  // while the dashboard still read "Muxing". Counting packets is a demux and
+  // costs seconds. Measured 2026-08-14, job yf2quTpnG.
   await pm.spawnAsync(ffprobeBin, [
     '-v', 'error',
     '-select_streams', 'v:0',
-    '-count_frames',
-    '-show_entries', 'stream=width,height,codec_name,nb_read_frames:format=duration',
+    '-count_packets',
+    '-show_entries', 'stream=width,height,codec_name,nb_read_packets:format=duration',
     '-of', 'default=noprint_wrappers=1',
     outputPath,
   ], { silent: true, onLine: (l) => out.push(l) });
@@ -400,7 +409,7 @@ const probeOutput = async (outputPath, pm, dbg) => {
     width: parseInt(pick('width'), 10) || 0,
     height: parseInt(pick('height'), 10) || 0,
     codec: pick('codec_name') || '',
-    frames: parseInt(pick('nb_read_frames'), 10) || 0,
+    frames: parseInt(pick('nb_read_packets'), 10) || 0,
     duration: parseFloat(pick('duration')) || 0,
   };
   dbg(`probe: ${JSON.stringify(probe)}`);

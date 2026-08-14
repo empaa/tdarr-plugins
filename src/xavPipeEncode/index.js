@@ -393,6 +393,9 @@ const plugin = async (args) => {
     }
   }
 
+  // See xavEncode: xav's MUX phase leaves the status reading "Muxing", so
+  // validation time gets misattributed to the mux unless we say otherwise.
+  updateWorker({ status: 'Validating output' });
   const probe = await probeOutput(videoOnlyPath, pm, dbg);
   // Frame count must still match; the scale filter changes dimensions, not count.
   const verdict = validateOutput(probe, { frames: sourceFrames, duration: sourceDuration }, {});
@@ -434,11 +437,14 @@ const probeOutput = async (outputPath, pm, dbg) => {
     .find((p) => fs.existsSync(p)) || 'ffprobe';
   const bytes = fs.statSync(outputPath).size;
   const out = [];
+  // -count_packets, NOT -count_frames: same count per coded frame for AV1 in
+  // Matroska, but without decoding the whole file. -count_frames cost 42m42s on
+  // a 16.8 GB feature (job yf2quTpnG) while the dashboard read "Muxing".
   await pm.spawnAsync(ffprobeBin, [
     '-v', 'error',
     '-select_streams', 'v:0',
-    '-count_frames',
-    '-show_entries', 'stream=width,height,codec_name,nb_read_frames:format=duration',
+    '-count_packets',
+    '-show_entries', 'stream=width,height,codec_name,nb_read_packets:format=duration',
     '-of', 'default=noprint_wrappers=1',
     outputPath,
   ], { silent: true, onLine: (l) => out.push(l) });
@@ -454,7 +460,7 @@ const probeOutput = async (outputPath, pm, dbg) => {
     width: parseInt(pick('width'), 10) || 0,
     height: parseInt(pick('height'), 10) || 0,
     codec: pick('codec_name') || '',
-    frames: parseInt(pick('nb_read_frames'), 10) || 0,
+    frames: parseInt(pick('nb_read_packets'), 10) || 0,
     duration: parseFloat(pick('duration')) || 0,
   };
   dbg(`probe: ${JSON.stringify(probe)}`);

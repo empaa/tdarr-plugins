@@ -718,6 +718,7 @@ const TESTS = [
   ['xav: reports actual bytes written, not a permanent zero', trackerReportsActualBytesWritten],
   ['xav: master line parses with a four-digit chunk count', masterLineParsesWithFourDigitChunkCount],
   ['xav: master line tolerates feature-length ETA and size units', masterLineToleratesFeatureLengthFormats],
+  ['xavEncode: validates by counting packets, never decoding frames', probeCountsPacketsNotFrames],
   ['xavEncode: refuses input outside workDir', xavEncodeRefusesInputOutsideWorkDir],
 ];
 
@@ -1212,6 +1213,7 @@ function injectXavPluginStubs(opts) {
             fs.writeFileSync(opts.videoOnlyPath, 'x'.repeat(opts.outputBytes));
             return opts.exitCode != null ? opts.exitCode : 0;
           }
+          if (opts.onSpawnArgs) opts.onSpawnArgs(bin, spawnArgs);
           if (bin.includes('ffprobe')) {
             for (const line of opts.probeLines) if (o.onLine) o.onLine(line);
             return 0;
@@ -1231,6 +1233,63 @@ function injectXavPluginStubs(opts) {
       }),
     },
   };
+}
+
+// Output validation must not DECODE the output to count its frames. On Avatar
+// (16.8 GB, 283893 frames) `ffprobe -count_frames` took 42m42s -- about 40% of
+// the whole job -- while the dashboard still read "Muxing". -count_packets
+// returns the identical number for AV1 in Matroska by demuxing only: verified
+// on a real output, 2896 both ways, 23.5s versus 0.075s.
+async function probeCountsPacketsNotFrames() {
+  const seen = [];
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xav-probe-'));
+  const workDir = path.join(tmp, 'work');
+  fs.mkdirSync(workDir);
+  const inputPath = path.join(workDir, 'staged.mkv');
+  fs.writeFileSync(inputPath, 'y'.repeat(400 * 1024 * 1024 / 1024));
+
+  injectXavPluginStubs({
+    captured: fs.readFileSync(XAV_FIXTURE, 'utf8'),
+    videoOnlyPath: path.join(workDir, 'xav-video.mkv'),
+    outputBytes: 8 * 1024 * 1024,
+    probeLines: [
+      'width=1920', 'height=1040', 'codec_name=av1',
+      'nb_read_packets=2899', 'duration=120.910000',
+    ],
+    onSpawnArgs: (bin, a) => { if (bin.includes('ffprobe')) seen.push(a.join(' ')); },
+  });
+
+  const realExists = fs.existsSync;
+  fs.existsSync = (p) => (p === '/usr/local/bin/xav' ? true : realExists(p));
+  try {
+    delete require.cache[require.resolve(path.join(SRC, 'xavEncode', 'index.js'))];
+    const { plugin } = require(path.join(SRC, 'xavEncode', 'index.js'));
+    await plugin({
+      inputFileObj: {
+        _id: inputPath,
+        file: inputPath,
+        ffProbeData: {
+          streams: [{ codec_type: 'video', width: 1920, height: 1080, nb_frames: '2899' }],
+          format: { duration: '120.910000' },
+        },
+      },
+      workDir,
+      inputs: {},
+      variables: {},
+      jobLog: () => {},
+      updateWorker: () => {},
+    });
+  } finally {
+    fs.existsSync = realExists;
+  }
+
+  const probeArgs = seen.join(' | ');
+  assert(probeArgs.includes('-count_packets'),
+    `validation must use -count_packets, got: ${probeArgs}`);
+  assert(!probeArgs.includes('-count_frames'),
+    `validation must NOT decode with -count_frames, got: ${probeArgs}`);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
 }
 
 // Feature-length encodes produce master lines our 2-minute test clips never
