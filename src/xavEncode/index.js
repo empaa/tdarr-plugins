@@ -401,6 +401,26 @@ const plugin = async (args) => {
       pm.startPpidWatcher(xav.pid);
       pm.startPpidWatcher(ff.pid);
 
+      // xav exits as soon as it has every frame it needs and closes stdin behind
+      // it, while ffmpeg usually still has a buffered write in flight. That
+      // write lands on a closed pipe as EPIPE -- a normal end-of-stream race,
+      // not a failure. Node turns an unhandled 'error' on a stream into an
+      // uncaught exception, so without these handlers the WORKER DIES, and it
+      // dies *after* a complete encode: verified 2026-08-14 on a 4K clip whose
+      // xav-video.mkv held all 1090 frames when the process was killed.
+      // Both ends need a handler; the error surfaces on whichever side Node
+      // notices first.
+      const onPipeError = (which) => (e) => {
+        const code = e && e.code;
+        if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED') {
+          dbg(`[pipe] ${which} closed at end of stream (${code}) -- expected`);
+          return;
+        }
+        jobLog(`[pipe] ${which} error: ${e.message}`);
+      };
+      xav.stdin.on('error', onPipeError('xav stdin'));
+      ff.stdout.on('error', onPipeError('ffmpeg stdout'));
+
       ff.stdout.pipe(xav.stdin);
 
       let ffErr = '';
@@ -422,7 +442,13 @@ const plugin = async (args) => {
       xav.stdout.on('data', onData);
       xav.stderr.on('data', onData);
       xav.on('error', (e) => { jobLog(`[xav] spawn error: ${e.message}`); resolve(1); });
-      xav.on('close', (code, signal) => resolve(code !== null ? code : (signal ? 1 : 0)));
+      xav.on('close', (code, signal) => {
+        // Once the consumer is gone ffmpeg is decoding 4K frames into nothing.
+        // pm.cleanup() would get it eventually, but not before it has burned
+        // however long the rest of the file takes.
+        try { if (ff.exitCode === null && !ff.killed) ff.kill('SIGTERM'); } catch (_) {}
+        resolve(code !== null ? code : (signal ? 1 : 0));
+      });
     });
   };
 

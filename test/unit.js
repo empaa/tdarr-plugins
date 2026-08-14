@@ -369,6 +369,7 @@ const TESTS = [
   ['xavEncode: validates by counting packets, never decoding frames', probeCountsPacketsNotFrames],
   ['xav: mux takes video only from the encode, no duplicate streams', muxTakesVideoOnlyFromEncode],
   ['xavEncode: stages input from outside workDir', xavEncodeStagesInputFromOutsideWorkDir],
+  ['xavEncode: survives EPIPE when xav closes the pipe first', xavEncodeSurvivesEpipeOnTheScaledPipe],
 ];
 
 // The inverse of the old contract. sanitizeFile used to hardlink-or-copy every
@@ -1254,6 +1255,113 @@ async function xavEncodePluginHappyPath() {
 // sanitizeFile first -- which made a flow that skipped the sanitizer, or whose
 // sanitizer had nothing to change, simply fail. The constraint is xav's, so the
 // fix is to satisfy it here rather than export it to the flow author.
+// The scaled path pipes ffmpeg into xav. xav exits the moment it has every
+// frame and closes stdin behind it, while ffmpeg still has a buffered write in
+// flight -- that write gets EPIPE. Node turns an unhandled 'error' event into an
+// uncaught exception, so the worker died *after* a complete encode: caught live
+// on 2026-08-14 against a 4K clip whose xav-video.mkv already held all 1090
+// frames when the process was killed. The old xavPipeEncode had the same hole.
+//
+// emit('error') on an EventEmitter with no listener throws synchronously, which
+// is exactly the failure being pinned: unhandled here means dead worker there.
+async function xavEncodeSurvivesEpipeOnTheScaledPipe() {
+  const { PassThrough } = require('stream');
+  const cp = require('child_process');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xav-epipe-'));
+  const workDir = path.join(tmp, 'work');
+  fs.mkdirSync(workDir);
+  const inputPath = path.join(workDir, 'staged.mkv');
+  fs.writeFileSync(inputPath, 'z'.repeat(4096));
+  const videoOnlyPath = path.join(workDir, 'xav-video.mkv');
+
+  injectXavPluginStubs({
+    captured: '',
+    videoOnlyPath,
+    outputBytes: 8 * 1024 * 1024,
+    probeLines: [
+      'width=1920', 'height=804', 'codec_name=av1',
+      'nb_read_packets=2899', 'duration=120.910000',
+    ],
+  });
+
+  let epipeThrew = null;
+  const fakeProc = () => {
+    const p = new PassThrough();
+    p.stdout = new PassThrough();
+    p.stderr = new PassThrough();
+    p.stdin = new PassThrough();
+    p.pid = 4321;
+    p.kill = () => { p.killed = true; };
+    p.killed = false;
+    p.exitCode = null;
+    return p;
+  };
+
+  const realSpawn = cp.spawn;
+  const realExists = fs.existsSync;
+  cp.spawn = (bin) => {
+    const proc = fakeProc();
+    if (String(bin).includes('xav')) {
+      // Let the plugin finish wiring its handlers, then reproduce the race.
+      setImmediate(() => {
+        try {
+          proc.stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+        } catch (err) {
+          epipeThrew = err;
+        }
+        fs.writeFileSync(videoOnlyPath, 'x'.repeat(8 * 1024 * 1024));
+        proc.emit('close', 0, null);
+      });
+    } else {
+      // Everything else the plugin shells out to before the pipe -- notably
+      // probeNonVideoSize, which uses cp.spawn directly rather than the process
+      // manager -- must still complete, or the plugin never reaches the fork
+      // under test and the await simply hangs.
+      setImmediate(() => proc.emit('close', 0, null));
+    }
+    return proc;
+  };
+  fs.existsSync = (p) => (
+    p === '/usr/local/bin/xav' || p === '/usr/local/bin/ffmpeg' ? true : realExists(p)
+  );
+
+  let result = null;
+  let failed = null;
+  try {
+    delete require.cache[require.resolve(path.join(SRC, 'xavEncode', 'index.js'))];
+    const { plugin } = require(path.join(SRC, 'xavEncode', 'index.js'));
+    result = await plugin({
+      inputFileObj: {
+        _id: inputPath,
+        file: inputPath,
+        ffProbeData: {
+          streams: [{ codec_type: 'video', width: 3840, height: 2160, nb_frames: '2899' }],
+          format: { duration: '120.910000' },
+        },
+      },
+      workDir,
+      inputs: { max_resolution: '1080p', tq_unavailable_action: 'accept' },
+      variables: {},
+      jobLog: () => {},
+      updateWorker: () => {},
+    });
+  } catch (err) {
+    failed = err;
+  } finally {
+    cp.spawn = realSpawn;
+    fs.existsSync = realExists;
+  }
+
+  assert(epipeThrew === null,
+    `EPIPE on xav's stdin must be handled, not thrown: ${epipeThrew && epipeThrew.message}`);
+  assert(failed === null, `the encode must survive the pipe teardown, got: ${failed && failed.message}`);
+  assert(result && result.outputNumber === 1,
+    'a complete encode must not be lost to the shutdown race');
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
 async function xavEncodeStagesInputFromOutsideWorkDir() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xav-func-'));
   const workDir = path.join(tmp, 'work');
