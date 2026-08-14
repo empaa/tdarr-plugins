@@ -102,7 +102,12 @@ came from [empaa/tdarr-av1](https://github.com/empaa/tdarr-av1), which was depre
 archived on 2026-08-14. Upstream Tdarr images ship none of it, so those plugins cannot run on
 the images production now uses.
 
-The last commit containing them is tagged
+**They live on in [empaa/tdarr-av1](https://github.com/empaa/tdarr-av1), under
+`legacy-tdarr-plugins/`** — adopted there on 2026-08-14 so the deprecated encoders sit with the
+deprecated image stack that ran them. That copy is self-contained: the three plugins, the
+modules deleted with them, and the three still shipped here that they imported.
+
+The last commit containing them in this repo is tagged
 [`legacy-encoders-final`](https://github.com/empaa/tdarr-xav/tree/legacy-encoders-final):
 
 ```bash
