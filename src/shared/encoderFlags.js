@@ -87,27 +87,75 @@ const buildAomFlags = (preset, hdrAom) => {
   ].filter(Boolean).join(' ');
 };
 
+// SVT-AV1 parameters. Verified against MAINLINE SVT-AV1 v4.2.0, which is what
+// ../tdarr-av1/Dockerfile pins -- not a psy fork. See
+// docs/svt-av1-settings-research.md for sources.
+//
+// Only flags that genuinely OVERRIDE a v4.2.0 default are listed. Ten flags were
+// removed on 2026-08-13 because they were inert or redundant:
+//
+//   rc 0, irefresh-type 2, variance-boost-strength 2, qm-max 15,
+//   chroma-qm-min 8, chroma-qm-max 15   -- byte-identical to v4.2.0 defaults
+//   input-depth 10                      -- overwritten by the y4m header from vspipe
+//   lookahead 48                        -- inert under --rc 0 (CRF takes lad_mg =
+//                                          tpl_lad_mg); also bounded by chunk length
+//                                          under av1an
+//   variance-octile 6                   -- pinned a default upstream MOVED to 5 in
+//                                          v4.0.0; we were holding a stale value
+//   enable-overlays 1                   -- off by default upstream, and roughly
+//                                          doubles picture buffers (min_parent *= 2),
+//                                          multiplied across parallel av1an workers.
+//                                          Bears directly on our 4K OOM history.
+//
+// The set below was inherited from a psy-FORK recipe (the JET guide's example line,
+// which is anime-targeted) applied to a mainline binary. variance-octile, sharpness,
+// tf-strength and chroma-qm were psyex/hdr defaults, not mainline ones.
 const svtConfig = (preset, hdrSvt) => {
   const entries = [
-    ['rc', '0'],
     ['preset', String(preset)],
+    // Default is already 1, kept explicit because it is a deliberate choice: tune 0
+    // is designed to trade full-reference metric score for perceived detail, which
+    // an SSIMULACRA2/VMAF acceptance gate scores as damage. Do not change this
+    // without also changing how encodes are accepted.
     ['tune', '1'],
-    ['input-depth', '10'],
-    ['lookahead', '48'],
-    ['keyint', '-1'],
-    ['irefresh-type', '2'],
-    ['enable-overlays', '1'],
+    ['keyint', '-1'],          // av1an owns keyframes; chunk starts are keyframes
     ['enable-variance-boost', '1'],
-    ['variance-boost-strength', '2'],
-    ['variance-octile', '6'],
     ['enable-qm', '1'],
+    // MEASURED, and it contradicts the guides. On 2026-08-13 we changed this 0 -> 4
+    // on the strength of maintainer consensus (every fork ships 4-6; mainline's own
+    // SSIMULACRA2-optimised tune hard-selects 4). The settings sweep then measured
+    // qm-min at matched quality on clean 1080p digital, and the response is
+    // monotonic in the other direction:
+    //
+    //   qm-min 0   -1.68% / -2.14% / -1.20% bytes  (low / mid / top)
+    //   qm-min 4    baseline
+    //   qm-min 6   +1.22% / +1.76% / +1.52%
+    //
+    // So it is back to 0. That single flag accounted for essentially the whole
+    // margin by which the old 20-flag string beat the cleaned one -- every other
+    // flag we removed measured as contributing nothing, which confirms the
+    // "nine of twenty did nothing" finding by measurement rather than by reading.
+    //
+    // CONFIRMED on a second, very different source (35mm-era film). qm-min 0 is
+    // correctly signed in 6 of 6 tier-source combinations, and the stake is far
+    // larger there: at the top tier it is worth ~6.8% against ~1.2% on clean
+    // digital, symmetric in both directions (qm-min 6 costs +6.78%).
+    //
+    // CAVEAT that still stands: this is optimal ON SSIMULACRA2. Every maintainer
+    // ships 4-6, which may encode banding and flat-area concerns a full-reference
+    // metric does not reward. Our pipeline gates on SSIMULACRA2, so optimising for
+    // it is self-consistent -- but this is not evidence the maintainers are wrong.
     ['qm-min', '0'],
-    ['qm-max', '15'],
-    ['chroma-qm-min', '8'],
-    ['chroma-qm-max', '15'],
-    ['tf-strength', '1'],
-    ['sharpness', '1'],
+    // Keep QM itself ON regardless: disabling costs +4.3% / +6.6% / +15.6%, worst
+    // at the top tier, and +33.9% on the hdr fork. This knob is load-bearing.
+    ['tf-strength', '1'],      // mainline default 3; 1 avoids the tf blocking issue
+    ['sharpness', '1'],        // mainline default 0
+    // Kept pending measurement. Upstream calls tile threading a known quality
+    // decrease and it buys no encode parallelism, but tiles do help hardware/dav1d
+    // decode at 4K, so this is a playback tradeoff rather than a pure loss.
     ['tile-columns', '1'],
+    // Kept pending measurement. A 2021 hedge against a screen-content detector that
+    // has since been rebuilt in 4.0/4.1/4.2; likely near-neutral on live action.
     ['scm', '0'],
   ];
   return { entries, hdrSvt };
@@ -124,6 +172,9 @@ const buildSvtFlags = (preset, hdrSvt) =>
 
 const buildAbAv1SvtFlags = () => {
   const cfg = svtConfig(0, '');
+  // ab-av1 sets rate control, preset and keyframes itself. (rc/input-depth are no
+  // longer in svtConfig at all, but the skip set is kept explicit so a future
+  // re-addition cannot leak into the ab-av1 path unnoticed.)
   const skip = new Set(['rc', 'preset', 'input-depth', 'keyint']);
   const filtered = { entries: cfg.entries.filter(([k]) => !skip.has(k)), hdrSvt: '' };
   return [formatSvtForAbAv1(filtered), '--keyint 10s', '--scd true'].join(' ');

@@ -40,7 +40,7 @@ These binaries must exist on the Tdarr node at runtime (provided by the sibling 
 
 ## Environment
 
-This repo lives on a Linux VM (`10.0.0.76`) that is itself a guest on the Unraid server which also hosts production Tdarr. **Tdarr is not local here:** its API base is `http://10.0.0.3:8265/api/v2`, and the production containers (`tdarr_node_ryzen_9950x`, `tdarr_server`) run on the Unraid host — no `docker exec` from this VM, so read job logs over the HTTP API or ask the user. `localhost:8265` is valid only while a local `build.sh --interactive` test server is running on the sibling `../tdarr-av1`. For Unraid-host operations the user uses the sibling project `../hometower`.
+This repo lives on a Linux VM (`10.0.0.76`) that is itself a guest on the Unraid server which also hosts production Tdarr. **Tdarr is not local here:** its API base is `http://10.0.0.3:8265/api/v2`, and the production containers (`tdarr_node_hometower`, `tdarr_server`) run on the Unraid host — no `docker exec` from this VM, so read job logs over the HTTP API or ask the user. `localhost:8265` is valid only while a local `build.sh --interactive` test server is running on the sibling `../tdarr-av1`. For Unraid-host operations the user uses the sibling project `../hometower`.
 
 ## Memory
 

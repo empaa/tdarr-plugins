@@ -1,0 +1,17 @@
+clip	arm	status	src_bytes	out_bytes	pct_of_src	achieved_mean	achieved_worst	chunks	wall_s	gate	param_set	applied
+closeenc	hdr_stock	success	409085458	442167490	108.09	79.48	73.97	17	340.6	encoded	none (preset only, by request)	
+closeenc	hdr_qm0	success	409085458	412848413	100.92	79.16	74.94	17	241.3	encoded	none (preset only, by request)	
+closeenc	hdr_qm0max15	success	409085458	415906545	101.67	78.61	74.99	17	256.4	encoded	none (preset only, by request)	
+topgun	hdr_stock	success	539686411	200041578	37.07	79.99	70.30	51	196.2	encoded	none (preset only, by request)	
+topgun	hdr_qm0	success	539686411	193947008	35.94	79.64	68.14	50	181.2	encoded	none (preset only, by request)	
+topgun	hdr_qm0max15	success	539686411	194557540	36.05	79.78	73.73	50	181.2	encoded	none (preset only, by request)	
+closeenc	mainline_tuned	success	409085458	417724801	102.11	80.05	78.05	17	196.3	encoded		mainline researched set	
+topgun	mainline_tuned	success	539686411	196959249	36.50	79.45	70.39	50	154.2	encoded		mainline researched set	
+closeenc	hdr_stock	success	409085458	342915800	83.82	74.88	73.59	17	229.5	encoded		none (preset only, by request)	
+closeenc	hdr_qm0	success	409085458	313249750	76.57	73.62	60.98	17	214.3	encoded		none (preset only, by request)	
+closeenc	hdr_qm0max15	success	409085458	317435503	77.60	68.41	53.77	17	199.4	encoded		none (preset only, by request)	
+topgun	hdr_stock	success	539686411	171416013	31.76	75.93	67.41	51	202.4	encoded		none (preset only, by request)	
+topgun	hdr_qm0	success	539686411	169339552	31.38	75.31	65.34	51	199.4	encoded		none (preset only, by request)	
+topgun	hdr_qm0max15	success	539686411	169994375	31.50	75.75	68.52	51	199.3	encoded		none (preset only, by request)	
+closeenc	mainline_tuned	success	409085458	318474657	77.85	73.45	59.72	17	157.3	encoded		mainline researched set	
+topgun	mainline_tuned	success	539686411	169746564	31.45	74.93	66.20	51	166.3	encoded		mainline researched set	

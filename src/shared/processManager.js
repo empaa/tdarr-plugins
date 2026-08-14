@@ -8,9 +8,16 @@ const createProcessManager = (jobLog, dbg) => {
   const activeChildren = new Set();
   const ppidWatchers = [];
 
+  // Snapshot the set at call time. The SIGKILL sweep fires 3 s later, and the
+  // plugins keep using this manager after cleanup() -- probeOutput's ffprobe and
+  // mkvmerge are spawned afterwards and join activeChildren. Sweeping the live
+  // set killed them mid-flight: `ffprobe -count_frames` outlives 3 s, so it died
+  // before printing and validation failed with "non-positive dimensions (0x0)"
+  // on every xav job. Only children alive when killAll was called are doomed.
   const killAll = () => {
-    dbg(`[KILL] killAll called  activeChildren=${activeChildren.size}`);
-    for (const child of activeChildren) {
+    const doomed = Array.from(activeChildren);
+    dbg(`[KILL] killAll called  activeChildren=${doomed.length}`);
+    for (const child of doomed) {
       try {
         if (!child.killed) {
           dbg(`[KILL] SIGTERM -> pgid=${child.pid}`);
@@ -20,7 +27,7 @@ const createProcessManager = (jobLog, dbg) => {
       } catch (_) {}
     }
     setTimeout(() => {
-      for (const child of activeChildren) {
+      for (const child of doomed) {
         try {
           if (!child.killed) {
             dbg(`[KILL] SIGKILL -> pgid=${child.pid}`);
@@ -116,6 +123,18 @@ const createProcessManager = (jobLog, dbg) => {
     });
   };
 
+  // Register a child spawned outside spawnAsync so cancellation, the ppid
+  // watchdog and cleanup cover it too. The pipe encode path spawns ffmpeg and
+  // xav directly in order to wire stdout to stdin, and an unregistered child
+  // survives a cancelled job as an orphaned encoder.
+  const adopt = (child) => {
+    if (!child || !child.pid) return child;
+    activeChildren.add(child);
+    child.once('close', () => activeChildren.delete(child));
+    dbg(`[ADOPT] tracking pid=${child.pid}`);
+    return child;
+  };
+
   let cancelHandler = null;
 
   const installCancelHandler = (onCancel) => {
@@ -148,6 +167,7 @@ const createProcessManager = (jobLog, dbg) => {
 
   return {
     spawnAsync,
+    adopt,
     startPpidWatcher,
     stopPpidWatchers,
     killAll,
