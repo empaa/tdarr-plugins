@@ -240,13 +240,20 @@ anything else gets the researched mainline set.
    ```
 3. Restart the Tdarr server. Nodes auto-sync plugins from the server.
 
-The av1an and ab-av1 plugins require the full AV1 encoding stack (av1an, ab-av1, FFmpeg,
-VapourSynth, SVT-AV1, aomenc, libvmaf) on the Tdarr node. The
-[empaa/tdarr_node](https://github.com/empaa/tdarr-av1) Docker image provides this stack.
+### Which plugins run where
 
 The **xav** plugins need only the xav binary plus GPU access — see
-[Providing the xav binary](#providing-the-xav-binary). They work on a stock upstream Tdarr
-image with a single bind mount.
+[Providing the xav binary](#providing-the-xav-binary). They call `ffmpeg`, `ffprobe`,
+`mkvmerge` and `script`, all of which upstream ships, and fall back from `/usr/local/bin` to
+`/usr/bin`. **They run on a stock `ghcr.io/haveagitgat/tdarr_node` image with a single bind
+mount.**
+
+The **av1an, ab-av1 and crf-search** plugins need the full encoding stack (av1an, ab-av1,
+VapourSynth/`vspipe`, the libvmaf model). **Upstream images do not ship any of it.** That
+stack came from [empaa/tdarr-av1](https://github.com/empaa/tdarr-av1), which was **deprecated
+2026-08-14** — encoding moved to xav on official images, so the custom image no longer earns
+its keep. Its published images stay on GHCR indefinitely and are frozen as they are, so these
+plugins keep working there, but they will not run on an upstream image.
 
 ## Development
 
