@@ -1,5 +1,11 @@
 # Auto Grain Synthesis Design (v2 — VapourSynth)
 
+> **HISTORICAL (2026-08-14).** Describes plugins removed in v3.0.0 — av1anEncode,
+> abAv1Encode, crfSearchEncode — and/or the `vsSource` VapourSynth path that went with them.
+> The measurements are still valid; the code they describe is no longer shipped. Kept because
+> the reasoning is reusable.
+
+
 ## Goal
 
 Automatically detect source noise, let the AV1 encoder denoise it, and synthesize matching grain at decode time. Encoder-side denoising produces cleaner frames (smaller files), while decoder-side grain synthesis restores the original noise character at zero file size cost.

@@ -1,5 +1,11 @@
 # crfSearchEncode Implementation Plan
 
+> **HISTORICAL (2026-08-14).** Describes plugins removed in v3.0.0 — av1anEncode,
+> abAv1Encode, crfSearchEncode — and/or the `vsSource` VapourSynth path that went with them.
+> The measurements are still valid; the code they describe is no longer shipped. Kept because
+> the reasoning is reusable.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a hybrid two-phase encoding plugin that uses ab-av1 CRF search + av1an chunked encoding at the found CRF.

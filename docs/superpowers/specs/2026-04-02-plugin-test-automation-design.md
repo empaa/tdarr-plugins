@@ -1,5 +1,11 @@
 # Plugin Test Automation
 
+> **HISTORICAL (2026-08-14).** Describes plugins removed in v3.0.0 — av1anEncode,
+> abAv1Encode, crfSearchEncode — and/or the `vsSource` VapourSynth path that went with them.
+> The measurements are still valid; the code they describe is no longer shipped. Kept because
+> the reasoning is reusable.
+
+
 Test infrastructure for validating Tdarr FlowPlugins against a live test instance via the Tdarr REST API. Local-only — no CI integration.
 
 ## Overview

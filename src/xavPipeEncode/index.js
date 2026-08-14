@@ -4,7 +4,7 @@
 const details = () => ({
   name: 'AV1 Encode (xav, scaled)',
   description: [
-    'Downscales with ffmpeg and pipes Y4M into xav for AV1 encoding.',
+    'Downscales with ffmpeg and pipes Y4M into xav (github.com/emrakyz/xav) for AV1 encoding.',
     'xav has no resize option, so scaling must happen before it sees the frames.',
     'Use this only when the source is above the target resolution -- otherwise use "AV1 Encode (xav)",',
     'which decodes natively and is faster.',

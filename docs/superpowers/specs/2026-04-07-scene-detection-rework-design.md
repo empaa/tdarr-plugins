@@ -1,5 +1,11 @@
 # Scene Detection Rework: `--sc-only` + `--scenes`
 
+> **HISTORICAL (2026-08-14).** Describes plugins removed in v3.0.0 — av1anEncode,
+> abAv1Encode, crfSearchEncode — and/or the `vsSource` VapourSynth path that went with them.
+> The measurements are still valid; the code they describe is no longer shipped. Kept because
+> the reasoning is reusable.
+
+
 ## Summary
 
 Replace the fragile benchmark warmup mechanism (kill-polling, backup/restore, `--resume`) with av1an's `--sc-only` and `--scenes` flags. Additionally, run scene detection in parallel with CRF search in crfSearchEncode to eliminate dead time between phases.

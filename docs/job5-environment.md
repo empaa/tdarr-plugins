@@ -1,5 +1,16 @@
 # JOB5 test environment — inventory and teardown
 
+> **TORN DOWN 2026-08-14, on Emil's instruction.** Containers, network, `xav-work/job5/` and
+> `/mnt/user/tdarr-job5-cache` are all gone. Nothing below exists any more.
+>
+> Kept from it: the eight sample sources are now in `test/samples/` (gitignored), the host
+> build toolchain is in `tools/xav-build/`, and the research harnesses — including
+> `cut-prod-clips.sh`, which is how the four clips were cut — are in `tools/host/`.
+>
+> This file stays as the record of how the environment was built and, more usefully, the
+> traps it taught. Rebuild from the "What exists" section if a throwaway is ever needed
+> again; the trap list below still applies to any Tdarr instance.
+
 Handed over from hometower 2026-08-13 when plugin testing moved to this repo. **This repo
 owns it now, including destroying it.** Nothing here is load-bearing for production.
 

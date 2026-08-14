@@ -1,5 +1,11 @@
 # Follow-up: is the v2.5.0 grey-frame fix costing us time and filesize?
 
+> **HISTORICAL (2026-08-14).** Describes plugins removed in v3.0.0 — av1anEncode,
+> abAv1Encode, crfSearchEncode — and/or the `vsSource` VapourSynth path that went with them.
+> The measurements are still valid; the code they describe is no longer shipped. Kept because
+> the reasoning is reusable.
+
+
 **For a fresh session. Written 2026-08-10 by the session that shipped v2.5.0.**
 You do not need any prior context — this file has it all.
 
