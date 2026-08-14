@@ -719,6 +719,7 @@ const TESTS = [
   ['xav: master line parses with a four-digit chunk count', masterLineParsesWithFourDigitChunkCount],
   ['xav: master line tolerates feature-length ETA and size units', masterLineToleratesFeatureLengthFormats],
   ['xavEncode: validates by counting packets, never decoding frames', probeCountsPacketsNotFrames],
+  ['xav: mux takes video only from the encode, no duplicate streams', muxTakesVideoOnlyFromEncode],
   ['xavEncode: refuses input outside workDir', xavEncodeRefusesInputOutsideWorkDir],
 ];
 
@@ -1233,6 +1234,46 @@ function injectXavPluginStubs(opts) {
       }),
     },
   };
+}
+
+// The mux must take ONLY the video from the encoded file. xav copies the
+// source's audio/subs/chapters into its own output, so muxing that file whole
+// and then adding `--no-video <source>` produced TWO complete sets of every
+// non-video stream. Found in production on the first real encodes (Avatar:
+// 2 TrueHD + 8 subtitle tracks; Harry Potter the same), and it silently
+// inflated every measured output size by a full copy of the audio.
+//
+// Note the pre-existing test named "xav: argv is video-only" does NOT cover
+// this -- it asserts the xav COMMAND LINE has no -a flag, which says nothing
+// about what xav writes into its container.
+async function muxTakesVideoOnlyFromEncode() {
+  const { mergeAudioVideo } = require(path.join(SRC, 'shared', 'audioMerge.js'));
+  let seen = null;
+  const pm = {
+    spawnAsync: async (_bin, a) => { seen = a; return 0; },
+  };
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xav-mux-'));
+  const out = path.join(tmp, 'out.mkv');
+  fs.writeFileSync(out, 'muxed');
+  await mergeAudioVideo(path.join(tmp, 'video.mkv'), path.join(tmp, 'source.mkv'),
+    out, pm, () => {}, () => {});
+
+  assert(seen, 'mkvmerge was never invoked');
+  const vi = seen.indexOf(path.join(tmp, 'video.mkv'));
+  const si = seen.indexOf(path.join(tmp, 'source.mkv'));
+  assert(vi > 0 && si > vi, `unexpected argv order: ${seen.join(' ')}`);
+
+  // Every non-video exclusion must apply to the ENCODED file, i.e. appear
+  // before it on the command line -- mkvmerge options are positional.
+  for (const flag of ['--no-audio', '--no-subtitles', '--no-chapters', '--no-attachments']) {
+    const fi = seen.indexOf(flag);
+    assert(fi >= 0, `mux must pass ${flag} for the encoded file: ${seen.join(' ')}`);
+    assert(fi < vi, `${flag} must precede the encoded file to apply to it: ${seen.join(' ')}`);
+  }
+  assert(seen.indexOf('--no-video') > vi && seen.indexOf('--no-video') < si,
+    `--no-video must apply to the source: ${seen.join(' ')}`);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
 }
 
 // Output validation must not DECODE the output to count its frames. On Avatar

@@ -48,8 +48,20 @@ const mergeAudioVideo = async (videoPath, inputPath, outputPath, processManager,
   const mkvmergeBin = findMkvmerge();
   jobLog('[mux] muxing audio + subtitles from original via mkvmerge...');
 
+  // Take ONLY the video track from the encode. xav copies the source's audio,
+  // subtitles, chapters and attachments into its own output, so passing that
+  // file whole and then adding `--no-video inputPath` muxed TWO complete sets of
+  // every non-video stream into the result. Emil found it on the first
+  // production encodes (Avatar, Harry Potter): 2 TrueHD tracks and 8 subtitle
+  // tracks where the source had 1 and 4. It also inflated every measured output
+  // size by a full copy of the audio -- Avatar's 24.1 GB result is ~10 GB of
+  // video plus 6.74 GB of audio counted twice.
+  //
+  // The original is authoritative for everything except the video, so strip all
+  // of it from the encoded file and let inputPath supply it once.
   const muxExit = await processManager.spawnAsync(mkvmergeBin, [
     '-o', outputPath,
+    '--no-audio', '--no-subtitles', '--no-chapters', '--no-attachments', '--no-buttons',
     videoPath,
     '--no-video', inputPath,
   ], { silent: true });
