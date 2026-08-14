@@ -17,7 +17,7 @@ Four plugins ship:
 
 Shared modules in `src/shared/` are inlined by esbuild at build time. Each plugin in `dist/` is a single `index.js` with no external dependencies beyond Node builtins.
 
-**Retired in v3.0.0 (2026-08-14):** `av1anEncode`, `abAv1Encode`, `crfSearchEncode` and the five shared modules only they used (`downscale`, `encoderFlags`, `mezzanine`, `progressTracker`, `vsSource`). They needed a stack upstream images do not ship. Last commit containing them: tag **`legacy-encoders-final`**. Do not re-add them without a reason that survives that fact.
+**Retired in v3.0.0 (2026-08-14):** `av1anEncode`, `abAv1Encode`, `crfSearchEncode` and the five shared modules only they used (`downscale`, `encoderFlags`, `mezzanine`, `progressTracker`, `vsSource`). They needed a stack upstream images do not ship. Last commit containing them: tag **`legacy-encoders-final`**; a self-contained copy was adopted into `../tdarr-av1` under `legacy-tdarr-plugins/`. Do not re-add them without a reason that survives that fact.
 
 ## Build
 
