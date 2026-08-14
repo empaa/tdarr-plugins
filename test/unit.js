@@ -334,7 +334,11 @@ const TESTS = [
   ['xav: source duration comes from the video stream', sourceDurationComesFromVideoStream],
   ['xav: argv carries the researched param set', xavArgvCarriesResearchedParams],
   ['sanitizeFile: returns sanitized file as working file', sanitizeReturnsSanitizedFileAsWorkingFile],
-  ['sanitizeFile: stages already-clean file into workDir', sanitizeStagesAlreadyCleanFileIntoWorkDir],
+  ['sanitizeFile: leaves an already-clean file in place', sanitizeLeavesAlreadyCleanFileInPlace],
+  ['staging: hardlinks into workDir and keeps the extension', stagingHardlinksAndPreservesExtension],
+  ['staging: no-op when the file is already in workDir', stagingIsANoOpWhenAlreadyInWorkDir],
+  ['staging: refuses when workDir has no room', stagingRefusesWhenWorkDirIsTooSmall],
+  ['xav: scaled path chosen only above the cap', selectEncodePathPicksScaledOnlyAboveTheCap],
   ['audio: drops commentaries when keep off', audioDropsCommentariesWhenOff],
   ['audio: keeps additional-lang commentaries when keep on', audioKeepsAdditionalLangCommentariesWhenOn],
   ['subtitles: drop commentary, keep SDH/forced when off', subtitlesDropCommentaryKeepSdhForcedWhenOff],
@@ -364,14 +368,21 @@ const TESTS = [
   ['xav: master line tolerates feature-length ETA and size units', masterLineToleratesFeatureLengthFormats],
   ['xavEncode: validates by counting packets, never decoding frames', probeCountsPacketsNotFrames],
   ['xav: mux takes video only from the encode, no duplicate streams', muxTakesVideoOnlyFromEncode],
-  ['xavEncode: refuses input outside workDir', xavEncodeRefusesInputOutsideWorkDir],
+  ['xavEncode: stages input from outside workDir', xavEncodeStagesInputFromOutsideWorkDir],
+  ['xavEncode: survives EPIPE when xav closes the pipe first', xavEncodeSurvivesEpipeOnTheScaledPipe],
 ];
 
-async function sanitizeStagesAlreadyCleanFileIntoWorkDir() {
+// The inverse of the old contract. sanitizeFile used to hardlink-or-copy every
+// already-clean file into workDir purely so xav would not write its temp dir
+// into the library. That constraint belongs to xav, so xavEncode stages for
+// itself now (see xavEncodeStagesInputFromOutsideWorkDir) and a plugin that
+// changed nothing must hand the file on unchanged -- otherwise every clean file
+// pays for a copy whether or not an encode follows.
+async function sanitizeLeavesAlreadyCleanFileInPlace() {
   injectProcessManagerStub();
   const { plugin } = require(path.join(SRC, 'sanitizeFile', 'index.js'));
 
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sanitize-staged-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sanitize-clean-'));
   const libDir = path.join(tmp, 'library');
   const workDir = path.join(tmp, 'work');
   fs.mkdirSync(libDir); fs.mkdirSync(workDir);
@@ -380,7 +391,7 @@ async function sanitizeStagesAlreadyCleanFileIntoWorkDir() {
   fs.writeFileSync(srcFile, 'x'.repeat(2048));
 
   // An MKV with one video + one English audio, in order, no images or subs:
-  // exactly the "already clean" shape that used to return the library path.
+  // exactly the "already clean" shape.
   const args = {
     inputFileObj: {
       _id: srcFile,
@@ -399,19 +410,126 @@ async function sanitizeStagesAlreadyCleanFileIntoWorkDir() {
   };
 
   const res = await plugin(args);
-  assert(res.outputNumber === 2, `already-clean must still use port 2, got ${res.outputNumber}`);
-
-  const outPath = res.outputFileObj._id;
-  assert(outPath !== srcFile,
-    'already-clean file must NOT be handed on at its library path -- xav would write its '
-    + 'temp dir there');
-  assert(path.dirname(fs.realpathSync(outPath)) === fs.realpathSync(workDir),
-    `staged file must live in workDir, got ${outPath}`);
-  assert(res.outputFileObj.file === outPath, '_id and file must both point at the staged copy');
-  assert(fs.statSync(outPath).size === 2048, 'staged copy must have the original content');
+  assert(res.outputNumber === 2, `already-clean must use port 2, got ${res.outputNumber}`);
+  assert(res.outputFileObj._id === srcFile,
+    `already-clean file must be handed on at its own path, got ${res.outputFileObj._id}`);
+  assert(res.outputFileObj.file === srcFile, '_id and file must both stay on the original');
   assert(fs.existsSync(srcFile), 'the original library file must be left untouched');
+  assert(fs.readdirSync(workDir).length === 0,
+    `nothing may be written into workDir, found: ${fs.readdirSync(workDir).join(', ')}`);
 
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// --- staging --------------------------------------------------------------
+
+function stagingHardlinksAndPreservesExtension() {
+  const { stageIntoWorkDir } = require(path.join(SRC, 'shared', 'staging.js'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-link-'));
+  const libDir = path.join(tmp, 'library');
+  const workDir = path.join(tmp, 'work');
+  fs.mkdirSync(libDir); fs.mkdirSync(workDir);
+
+  // .mp4, not .mkv: the block this replaced hardcoded ".staged.mkv", which was
+  // true only for sanitizeFile's already-clean branch. xavEncode can be pointed
+  // at any container and must not rename an mp4 into an mkv.
+  const srcFile = path.join(libDir, 'Movie (2020).mp4');
+  fs.writeFileSync(srcFile, 'x'.repeat(2048));
+
+  const res = stageIntoWorkDir(srcFile, workDir, () => {});
+  assert(res.staged === true, 'a library-path input must report staged:true');
+  assert(path.dirname(fs.realpathSync(res.path)) === fs.realpathSync(workDir),
+    `staged file must live in workDir, got ${res.path}`);
+  assert(res.path.endsWith('.mp4'), `staging must keep the source extension, got ${res.path}`);
+  assert(fs.statSync(res.path).size === 2048, 'staged file must have the original content');
+  assert(fs.existsSync(srcFile), 'the original must be left untouched');
+  // Same tmpfs, so this must have been the free path, not a copy.
+  assert(fs.statSync(res.path).nlink === 2, 'same-filesystem staging must hardlink, not copy');
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+function stagingIsANoOpWhenAlreadyInWorkDir() {
+  const { stageIntoWorkDir } = require(path.join(SRC, 'shared', 'staging.js'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-noop-'));
+  const workDir = path.join(tmp, 'work');
+  fs.mkdirSync(workDir);
+  const srcFile = path.join(workDir, 'sanitized.mkv');
+  fs.writeFileSync(srcFile, 'x');
+
+  const res = stageIntoWorkDir(srcFile, workDir, () => {});
+  assert(res.staged === false, 'a file already in workDir must report staged:false');
+  assert(res.path === srcFile, 'a file already in workDir must be returned unchanged');
+  // staged:false is what stops the caller deleting a file it did not create --
+  // here that would be sanitizeFile's remux, i.e. the encode's actual input.
+  assert(fs.readdirSync(workDir).length === 1,
+    `no second copy may appear, found: ${fs.readdirSync(workDir).join(', ')}`);
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// A copy can be tens of GB. Filling the transcode cache mid-flow fails much
+// later in confusing ways, so the refusal has to name the size and the space.
+function stagingRefusesWhenWorkDirIsTooSmall() {
+  const { stageIntoWorkDir } = require(path.join(SRC, 'shared', 'staging.js'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-full-'));
+  const libDir = path.join(tmp, 'library');
+  const workDir = path.join(tmp, 'work');
+  fs.mkdirSync(libDir); fs.mkdirSync(workDir);
+  const srcFile = path.join(libDir, 'huge.mkv');
+  fs.writeFileSync(srcFile, 'x'.repeat(4096));
+
+  // Force the copy branch (pretend a different device) and starve the target.
+  const realStat = fs.statSync.bind(fs);
+  const realStatfs = fs.statfsSync;
+  fs.statSync = (p, o) => {
+    const st = realStat(p, o);
+    if (String(p) === workDir) return Object.assign({}, st, { dev: st.dev + 1 });
+    return st;
+  };
+  fs.statfsSync = () => ({ bavail: 1, bsize: 512 });
+
+  let threw = null;
+  try {
+    stageIntoWorkDir(srcFile, workDir, () => {});
+  } catch (err) {
+    threw = err;
+  } finally {
+    fs.statSync = realStat;
+    fs.statfsSync = realStatfs;
+  }
+
+  assert(threw !== null, 'must refuse to stage into a working directory with no room');
+  assert(/free/i.test(threw.message) && /GiB/.test(threw.message),
+    `refusal must report the shortfall, got: ${threw.message}`);
+  assert(!fs.existsSync(path.join(workDir, 'huge.staged.mkv')),
+    'a refused staging must not leave a partial file behind');
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// --- encode path selection ------------------------------------------------
+
+// The single decision that replaced a whole second plugin. Worth pinning at the
+// boundary, because "wider than" and "at least as wide as" differ by exactly the
+// most common case in the library: a 1920px source with a 1080p cap.
+function selectEncodePathPicksScaledOnlyAboveTheCap() {
+  const { selectEncodePath } = require(path.join(SRC, 'shared', 'xav.js'));
+
+  assert(selectEncodePath(3840, '1080p') === 'scaled', '4K over a 1080p cap must scale');
+  assert(selectEncodePath(1920, '1080p') === 'native',
+    'a 1920px source at a 1080p cap must encode natively, not scale to its own width');
+  assert(selectEncodePath(1280, '1080p') === 'native', 'below the cap must encode natively');
+  assert(selectEncodePath(3840, '720p') === 'scaled', 'the cap, not the source, sets the target');
+  assert(selectEncodePath(1920, '1440p') === 'native', '1080p under a 1440p cap must not upscale');
+
+  // "off" is the default and must never scale.
+  assert(selectEncodePath(3840, 'off') === 'native', '"off" must never scale');
+  // An unrecognised value must fall back to never scaling rather than silently
+  // picking some default resolution and shrinking the whole library.
+  assert(selectEncodePath(3840, '') === 'native', 'empty must not scale');
+  assert(selectEncodePath(3840, '4320p') === 'native', 'an unknown cap must not scale');
+  assert(selectEncodePath(0, '1080p') === 'native', 'an unknown width must not scale');
 }
 
 // --- encoder flags --------------------------------------------------------
@@ -1132,46 +1250,183 @@ async function xavEncodePluginHappyPath() {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-async function xavEncodeRefusesInputOutsideWorkDir() {
+// This used to assert a THROW. xav writes its temp dir next to its input, and
+// the plugin's answer to a library-path input was to refuse and tell you to run
+// sanitizeFile first -- which made a flow that skipped the sanitizer, or whose
+// sanitizer had nothing to change, simply fail. The constraint is xav's, so the
+// fix is to satisfy it here rather than export it to the flow author.
+// The scaled path pipes ffmpeg into xav. xav exits the moment it has every
+// frame and closes stdin behind it, while ffmpeg still has a buffered write in
+// flight -- that write gets EPIPE. Node turns an unhandled 'error' event into an
+// uncaught exception, so the worker died *after* a complete encode: caught live
+// on 2026-08-14 against a 4K clip whose xav-video.mkv already held all 1090
+// frames when the process was killed. The old xavPipeEncode had the same hole.
+//
+// emit('error') on an EventEmitter with no listener throws synchronously, which
+// is exactly the failure being pinned: unhandled here means dead worker there.
+async function xavEncodeSurvivesEpipeOnTheScaledPipe() {
+  const { PassThrough } = require('stream');
+  const cp = require('child_process');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xav-epipe-'));
+  const workDir = path.join(tmp, 'work');
+  fs.mkdirSync(workDir);
+  const inputPath = path.join(workDir, 'staged.mkv');
+  fs.writeFileSync(inputPath, 'z'.repeat(4096));
+  const videoOnlyPath = path.join(workDir, 'xav-video.mkv');
+
+  injectXavPluginStubs({
+    captured: '',
+    videoOnlyPath,
+    outputBytes: 8 * 1024 * 1024,
+    probeLines: [
+      'width=1920', 'height=804', 'codec_name=av1',
+      'nb_read_packets=2899', 'duration=120.910000',
+    ],
+  });
+
+  let epipeThrew = null;
+  const fakeProc = () => {
+    const p = new PassThrough();
+    p.stdout = new PassThrough();
+    p.stderr = new PassThrough();
+    p.stdin = new PassThrough();
+    p.pid = 4321;
+    p.kill = () => { p.killed = true; };
+    p.killed = false;
+    p.exitCode = null;
+    return p;
+  };
+
+  const realSpawn = cp.spawn;
+  const realExists = fs.existsSync;
+  cp.spawn = (bin) => {
+    const proc = fakeProc();
+    if (String(bin).includes('xav')) {
+      // Let the plugin finish wiring its handlers, then reproduce the race.
+      setImmediate(() => {
+        try {
+          proc.stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+        } catch (err) {
+          epipeThrew = err;
+        }
+        fs.writeFileSync(videoOnlyPath, 'x'.repeat(8 * 1024 * 1024));
+        proc.emit('close', 0, null);
+      });
+    } else {
+      // Everything else the plugin shells out to before the pipe -- notably
+      // probeNonVideoSize, which uses cp.spawn directly rather than the process
+      // manager -- must still complete, or the plugin never reaches the fork
+      // under test and the await simply hangs.
+      setImmediate(() => proc.emit('close', 0, null));
+    }
+    return proc;
+  };
+  fs.existsSync = (p) => (
+    p === '/usr/local/bin/xav' || p === '/usr/local/bin/ffmpeg' ? true : realExists(p)
+  );
+
+  let result = null;
+  let failed = null;
+  try {
+    delete require.cache[require.resolve(path.join(SRC, 'xavEncode', 'index.js'))];
+    const { plugin } = require(path.join(SRC, 'xavEncode', 'index.js'));
+    result = await plugin({
+      inputFileObj: {
+        _id: inputPath,
+        file: inputPath,
+        ffProbeData: {
+          streams: [{ codec_type: 'video', width: 3840, height: 2160, nb_frames: '2899' }],
+          format: { duration: '120.910000' },
+        },
+      },
+      workDir,
+      inputs: { max_resolution: '1080p', tq_unavailable_action: 'accept' },
+      variables: {},
+      jobLog: () => {},
+      updateWorker: () => {},
+    });
+  } catch (err) {
+    failed = err;
+  } finally {
+    cp.spawn = realSpawn;
+    fs.existsSync = realExists;
+  }
+
+  assert(epipeThrew === null,
+    `EPIPE on xav's stdin must be handled, not thrown: ${epipeThrew && epipeThrew.message}`);
+  assert(failed === null, `the encode must survive the pipe teardown, got: ${failed && failed.message}`);
+  assert(result && result.outputNumber === 1,
+    'a complete encode must not be lost to the shutdown race');
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+async function xavEncodeStagesInputFromOutsideWorkDir() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'xav-func-'));
   const workDir = path.join(tmp, 'work');
   const libDir = path.join(tmp, 'library');
   fs.mkdirSync(workDir); fs.mkdirSync(libDir);
 
   const inputPath = path.join(libDir, 'movie.mkv');
-  fs.writeFileSync(inputPath, 'z');
+  fs.writeFileSync(inputPath, 'z'.repeat(2048));
 
+  const xavInputs = [];
   injectXavPluginStubs({
-    captured: '', videoOnlyPath: path.join(workDir, 'xav-video.mkv'),
-    outputBytes: 1024, probeLines: [],
+    captured: fs.readFileSync(XAV_FIXTURE, 'utf8'),
+    videoOnlyPath: path.join(workDir, 'xav-video.mkv'),
+    outputBytes: 8 * 1024 * 1024,
+    probeLines: [
+      'width=1920', 'height=1040', 'codec_name=av1',
+      'nb_read_packets=2899', 'duration=120.910000',
+    ],
   });
 
+  // The launcher script is where xav's real argv ends up on the native path, so
+  // that is where we can see which file it was actually pointed at.
+  const realWrite = fs.writeFileSync;
+  fs.writeFileSync = (p, data, o) => {
+    if (String(p).endsWith('xav-run.sh')) xavInputs.push(String(data));
+    return realWrite(p, data, o);
+  };
   const realExists = fs.existsSync;
   fs.existsSync = (p) => (p === '/usr/local/bin/xav' ? true : realExists(p));
 
-  let threw = null;
+  let result = null;
   try {
     delete require.cache[require.resolve(path.join(SRC, 'xavEncode', 'index.js'))];
     const { plugin } = require(path.join(SRC, 'xavEncode', 'index.js'));
-    await plugin({
-      inputFileObj: { _id: inputPath, file: inputPath, ffProbeData: { streams: [], format: {} } },
+    result = await plugin({
+      inputFileObj: {
+        _id: inputPath,
+        file: inputPath,
+        ffProbeData: {
+          streams: [{ codec_type: 'video', width: 1920, height: 1080, nb_frames: '2899' }],
+          format: { duration: '120.910000' },
+        },
+      },
       workDir,
       inputs: {},
       variables: {},
       jobLog: () => {},
       updateWorker: () => {},
     });
-  } catch (err) {
-    threw = err;
   } finally {
     fs.existsSync = realExists;
+    fs.writeFileSync = realWrite;
   }
 
-  // xav writes its temp dir next to the input; a library-path input must be
-  // refused rather than scattering hashed temp dirs across the library.
-  assert(threw !== null, 'must refuse an input outside workDir');
-  assert(/working directory/i.test(threw.message),
-    `error must explain the workDir requirement, got: ${threw.message}`);
+  assert(result && result.outputNumber === 1,
+    'a library-path input must now encode, not fail');
+  const argv = xavInputs.join(' ');
+  assert(argv.includes(workDir),
+    `xav must be pointed at the staged copy inside workDir, got: ${argv}`);
+  assert(!argv.includes(libDir),
+    `xav must NOT be pointed at the library path -- it would write its temp dir there: ${argv}`);
+  assert(fs.existsSync(inputPath), 'the original library file must be left untouched');
+  // The staged copy is ours, so it is cleaned up once the mux has consumed it.
+  assert(!fs.existsSync(path.join(workDir, 'movie.staged.mkv')),
+    'the staged working copy must be removed after a successful merge');
 
   fs.rmSync(tmp, { recursive: true, force: true });
 }

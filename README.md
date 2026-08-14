@@ -19,17 +19,26 @@ than VMAF. Each scene gets its own CRF search until the chunk hits the requested
 bitrate follows what the content actually needs. Live progress, FPS, ETA, current and
 projected output size on the Tdarr dashboard; cancelling the job kills the encoder.
 
-Two plugins share the engine:
+**Downscaling is automatic.** xav has no resize option of its own, so anything above the cap
+you set in **Max Resolution** is decoded and scaled by ffmpeg and piped in, while everything
+at or below it takes the faster native path. The two really are different pipelines — the
+scaled one gives up GPU decode and resume — but which one a file needs is one comparison
+against its width, so the plugin decides per file and the flow needs no resolution branch.
 
-- **AV1 Encode (xav)** — encodes at the source resolution.
-- **AV1 Encode (xav, scaled)** — ffmpeg downscales and pipes Y4M into xav, for 4K → 1080p.
-  xav has no resize option of its own, which is why this is a separate plugin.
+Setting Max Resolution to `1080p` on a mixed library is the intended shape: 4K sources come
+out at 1080p, 1080p sources are encoded natively at 1080p, and nothing is upscaled.
+
+> Before v4.0.0 this was two plugins and the flow had to route between them. If you are
+> upgrading, replace **AV1 Encode (xav, scaled)** with **AV1 Encode (xav)**, set Max
+> Resolution, and delete the branch that used to pick between them.
 
 **Inputs:**
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | xav Binary Path | | Empty = search `/usr/local/bin/xav`, then `/opt/xav/xav`. See [Providing the xav binary](#providing-the-xav-binary) |
+| Max Resolution | off | Sources **wider** than this are downscaled to it; sources at or below it are encoded at their own resolution. `off` never scales |
+| If Target Quality Did Not Run | fail | Consulted only on downscaled files. If no chunk reported a measured score the encode landed at an unverified CRF: `fail` keeps the original, `accept` keeps the output with a warning |
 | Target Quality | 74.8-75.2 | SSIMULACRA2 band. Tier targets: top 74.8-75.2, mid 70.8-71.2, low 66.8-67.2 |
 | TQ Aggregation Mode | mean | Aggregate chunk scores by mean, or by percentile to protect worst-case frames |
 | CRF Range | 5-63 | Bounds for the per-scene search. Keep it wide — chunks pinned at a bound are a fixed-CRF encode in disguise, and the plugin warns when that happens |
@@ -38,7 +47,12 @@ Two plugins share the engine:
 | Metric Workers | 1 | Vship (SSIMULACRA2) workers. **Needs GPU access in the container** |
 | Encoder Parameter Set | auto | `auto` picks by binary name: a mainline build gets the researched SVT set, an `hdr` build gets preset only because its own defaults are the recipe |
 | Extra Encoder Params | | Appended after the set above and win over it. Params xav rejects are stripped and logged |
+| GPU Decode | off | Passes `--hwdec`. Ignored, with a log line, on any file that gets downscaled — xav rejects `--hwdec` when its frames arrive over a pipe |
 | Max Encoded Percent | 80 | Abort if the projected output exceeds this % of source; 100 disables the gate |
+
+The plugin copies (or hardlinks) the working file into Tdarr's working directory before
+running, because xav creates its temp directory next to its input and cannot be told
+otherwise. You do not need to arrange that in the flow.
 
 **Measured at the top tier** (target 75, preset 6, 2-minute samples): 63% of source on
 grain-heavy 1080p film, 47% on clean 1080p, 16% on high-motion digital, and 16% on a 4K HDR

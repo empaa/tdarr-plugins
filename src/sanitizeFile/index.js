@@ -355,57 +355,17 @@ const plugin = async (args) => {
   const orderCorrect = lastVideoIdx < firstAudioIdx && lastAudioIdx < firstSubIdx;
 
   if (isMkv && noImages && audioMatch && subMatch && orderCorrect) {
-    log('File already clean — no changes needed');
+    log('File already clean — no changes needed, passing through untouched');
 
-    // Still stage into workDir. Downstream encoders rely on the working file
-    // living there: xav creates its temp directory NEXT TO ITS INPUT with no
-    // way to relocate it, so returning the library path would scatter hashed
-    // temp dirs across the library and fail outright (os error 30) on a
-    // read-only share. Hardlink when we can, copy when we must.
-    const stagedPath = path.join(args.workDir, `${path.parse(filePath).name}.staged.mkv`);
-
-    // A hardlink is free but only works within one filesystem, and can still
-    // fail on one device across a bind mount -- so it is attempted, never
-    // assumed.
-    let linked = false;
-    try {
-      if (fs.statSync(filePath).dev === fs.statSync(args.workDir).dev) {
-        try { fs.unlinkSync(stagedPath); } catch (_) {}
-        fs.linkSync(filePath, stagedPath);
-        linked = true;
-        log(`Staged to workDir by hardlink: ${stagedPath}`);
-      }
-    } catch (err) {
-      log(`Hardlink staging failed (${err.message}) — copying instead`);
-    }
-
-    if (!linked) {
-      // A copy can be tens of GB. Filling the transcode cache mid-flow fails in
-      // confusing ways much later, so refuse up front with a clear reason.
-      // statfsSync is Node 18.15+; skip the check if unavailable rather than
-      // failing on it.
-      const needBytes = fs.statSync(filePath).size * 1.1;
-      let freeBytes = null;
-      try {
-        if (typeof fs.statfsSync === 'function') {
-          const st = fs.statfsSync(args.workDir);
-          freeBytes = st.bavail * st.bsize;
-        }
-      } catch (_) { freeBytes = null; }
-
-      if (freeBytes !== null && freeBytes < needBytes) {
-        throw new Error(
-          `Cannot stage ${path.basename(filePath)} into the working directory: needs `
-          + `~${(needBytes / 1024 ** 3).toFixed(1)} GiB but only `
-          + `${(freeBytes / 1024 ** 3).toFixed(1)} GiB is free in ${args.workDir}.`,
-        );
-      }
-      fs.copyFileSync(filePath, stagedPath);
-      log(`Staged to workDir by copy: ${stagedPath}`);
-    }
-
+    // Deliberately NOT staged into workDir. This used to hardlink-or-copy the
+    // file into the working directory to satisfy xav, which creates its temp
+    // directory next to its input -- but that is xav's constraint, so xavEncode
+    // now stages for itself (src/shared/staging.js). Staging here meant every
+    // already-clean file paid for a copy whether or not an encode followed it,
+    // and put a five-line comment about another plugin's internals in the
+    // middle of an audio-track filter.
     return {
-      outputFileObj: Object.assign({}, args.inputFileObj, { _id: stagedPath, file: stagedPath }),
+      outputFileObj: args.inputFileObj,
       outputNumber: 2,
       variables: args.variables,
     };

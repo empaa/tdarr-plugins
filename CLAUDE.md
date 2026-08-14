@@ -8,14 +8,17 @@ Tdarr FlowPlugins built around **[xav](https://github.com/emrakyz/xav) by emraky
 
 The GitHub repo and npm package are named **`tdarr-xav`**; the local directory is still `tdarr-plugins` and must stay that way — Claude's memory, inbox and agent-runs are keyed to that path, as is the MemPalace wing.
 
-Four plugins ship:
+Three plugins ship:
 
-- **xavEncode** — scene-chunked AV1 via xav, per-scene SSIMULACRA2 target-quality search
-- **xavPipeEncode** — ffmpeg downscales and pipes Y4M into xav (4K → 1080p); xav has no resize of its own
+- **xavEncode** — scene-chunked AV1 via xav, per-scene SSIMULACRA2 target-quality search. Picks its own pipeline per file: above `Max Resolution` ffmpeg scales and pipes Y4M in (xav has no resize of its own), at or below it xav decodes natively under a PTY
 - **sanitizeFile** — pre-encode track filter/reorder/remux to MKV, original language via Radarr/Sonarr
 - **arrRename** — triggers Radarr/Sonarr to rename after Replace Original
 
 Shared modules in `src/shared/` are inlined by esbuild at build time. Each plugin in `dist/` is a single `index.js` with no external dependencies beyond Node builtins.
+
+**Staging belongs to xavEncode, not sanitizeFile.** xav creates a `.<hash>` temp dir next to its input with no way to relocate it, so the working file must be inside `workDir` before it runs. `src/shared/staging.js` hardlinks-or-copies it there on both encode paths; sanitizeFile hands an already-clean file on untouched. Note the hardlink is *attempted, never assumed*: on Unraid `shfs` two paths report the same `st_dev` and `link()` still fails `EXDEV` (observed 2026-08-14), so the copy fallback is load-bearing, not defensive.
+
+**Retired in v4.0.0 (2026-08-14):** `xavPipeEncode`, merged into `xavEncode` behind the `Max Resolution` input. Choosing between them was one comparison against a width `ffProbeData` already carries, so it never needed to be a flow-authoring decision. Both spawn strategies survive unchanged inside `runNative()` / `runPiped()`.
 
 **Retired in v3.0.0 (2026-08-14):** `av1anEncode`, `abAv1Encode`, `crfSearchEncode` and the five shared modules only they used (`downscale`, `encoderFlags`, `mezzanine`, `progressTracker`, `vsSource`). They needed a stack upstream images do not ship. Last commit containing them: tag **`legacy-encoders-final`**; a self-contained copy was adopted into `../tdarr-av1` under `legacy-tdarr-plugins/`. Do not re-add them without a reason that survives that fact.
 
@@ -37,7 +40,7 @@ npm run deploy       # build + copy to local test instance
 
 ## Runtime binary dependencies
 
-All four plugins run on **stock upstream `ghcr.io/haveagitgat` images**. They call only:
+All three plugins run on **stock upstream `ghcr.io/haveagitgat` images**. They call only:
 
 - `/usr/local/bin/ffmpeg`, `/usr/local/bin/ffprobe`
 - `/usr/bin/mkvmerge` (mkvtoolnix apt package; `/usr/local/bin/mkvmerge` does not exist — plugins' `findBin` checks both)

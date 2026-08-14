@@ -369,6 +369,23 @@ const shouldDownscale = (sourceWidth, resolution) => {
   return sourceWidth > preset.width;
 };
 
+// Which of the two ways of feeding xav this source needs.
+//
+// 'native' decodes the file directly under a PTY and is the faster, resumable,
+// hwdec-capable path. 'scaled' puts ffmpeg in front to downscale, because xav
+// has no resize of its own, and pays for it: no hwdec, no resume.
+//
+// This is the whole reason the two used to be separate plugins. It is one
+// comparison against a width that ffProbeData already carries, so it never
+// needed to be a flow-authoring decision.
+const selectEncodePath = (sourceWidth, maxResolution) => {
+  const preset = RESOLUTION_PRESETS[maxResolution];
+  // 'off', '', undefined, or anything unrecognised means "never scale". An
+  // unknown value must not silently scale to some default resolution.
+  if (!preset) return 'native';
+  return shouldDownscale(sourceWidth, maxResolution) ? 'scaled' : 'native';
+};
+
 const buildScaleFilter = (resolution) => {
   const preset = RESOLUTION_PRESETS[resolution];
   if (!preset) return null;
@@ -724,6 +741,47 @@ const createXavTracker = (opts) => {
   };
 };
 
+// ffprobe the encoded video so validation has real numbers rather than trust.
+//
+// -count_packets, NOT -count_frames. Both yield one count per coded frame for
+// AV1 in Matroska, but -count_frames DECODES the whole file to get there: on
+// Avatar (16.8 GB, 283893 frames) it took 42m42s, about 40% of the entire job,
+// while the dashboard still read "Muxing". Counting packets is a demux and costs
+// seconds. Measured 2026-08-14, job yf2quTpnG.
+const probeOutput = async (outputPath, pm, dbg) => {
+  if (!fs.existsSync(outputPath)) return { exists: false };
+
+  const ffprobeBin = ['/usr/local/bin/ffprobe', '/usr/bin/ffprobe']
+    .find((p) => fs.existsSync(p)) || 'ffprobe';
+  const bytes = fs.statSync(outputPath).size;
+  const out = [];
+  await pm.spawnAsync(ffprobeBin, [
+    '-v', 'error',
+    '-select_streams', 'v:0',
+    '-count_packets',
+    '-show_entries', 'stream=width,height,codec_name,nb_read_packets:format=duration',
+    '-of', 'default=noprint_wrappers=1',
+    outputPath,
+  ], { silent: true, onLine: (l) => out.push(l) });
+
+  const pick = (key) => {
+    const line = out.find((l) => l.startsWith(`${key}=`));
+    return line ? line.slice(key.length + 1) : '';
+  };
+
+  const probe = {
+    exists: true,
+    bytes,
+    width: parseInt(pick('width'), 10) || 0,
+    height: parseInt(pick('height'), 10) || 0,
+    codec: pick('codec_name') || '',
+    frames: parseInt(pick('nb_read_packets'), 10) || 0,
+    duration: parseFloat(pick('duration')) || 0,
+  };
+  if (typeof dbg === 'function') dbg(`probe: ${JSON.stringify(probe)}`);
+  return probe;
+};
+
 module.exports = {
   RESOLUTION_PRESETS,
   EMPTY_OUTPUT_FLOOR_BYTES,
@@ -743,8 +801,10 @@ module.exports = {
   buildEncoderParams,
   buildXavArgs,
   shouldDownscale,
+  selectEncodePath,
   buildScaleFilter,
   buildPipeFfmpegArgs,
+  probeOutput,
   validateOutput,
   sourceVideoDuration,
   detectCrfPinning,
