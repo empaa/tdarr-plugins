@@ -1,9 +1,0 @@
-[
-  {
-    "name": "default",
-    "inputs": {
-      "target_vmaf": "93",
-      "preset": "6"
-    }
-  }
-]
