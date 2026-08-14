@@ -1,0 +1,93 @@
+# STEP 2 (optional) — CUDA build container, to run on the UNRAID HOST.
+#
+# Only needed if we want the CUDA backend: CVVDP (the 8-10 target band),
+# nvdec/cuvid hardware decode (incl. VC-1, which is CUDA-only), and Vship's
+# CUDA path, which is likely faster than Vulkan for metric evaluation.
+#
+# It must be built/run WITH THE GPU VISIBLE, because vship.mk does:
+#     nvcc -x cu src/VshipLib.cpp ... -arch=native ...
+# and `-arch=native` queries an installed GPU for its compute capability.
+# That is the whole reason a build container on the host is needed rather than
+# building on the GPU-less VM.
+#
+# Base is Ubuntu 24.04 (glibc 2.39) to match the official Tdarr image, so the
+# resulting binary satisfies its GLIBC_2.38 floor.
+#
+# Build the image:
+#   docker build -f Dockerfile.xav-build -t xav-build .
+#
+# Run the build (GPU REQUIRED at build-run time, -march/-arch=native target
+# this host's CPU and GPU — which is what we want as a consumer):
+#   docker run --rm --gpus all \
+#     -e NVIDIA_DRIVER_CAPABILITIES=all \
+#     -v /path/to/xav:/xav -w /xav \
+#     xav-build ./build.sh static_tq hdr
+#
+# Result: /xav/target/release/xav
+#
+FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# build.sh hard-requires all of: cargo ffmpeg clang pkgconf ninja meson cmake
+# and detect_deps() additionally needs nasm, ld.lld, llvm-ar and a
+# libclang_rt.builtins archive, or every build mode is marked ineligible.
+# Note: build.sh's own install_deps only knows pacman/dnf/emerge/brew, so on
+# Ubuntu it silently does nothing — everything must be installed here.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang lld llvm nasm meson ninja-build cmake pkgconf ffmpeg \
+        libc++-dev libc++abi-dev libstdc++-13-dev libclang-rt-18-dev \
+        git curl ca-certificates xz-utils util-linux python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# libclang-rt-18-dev is NOT optional and NOT pulled in by clang/llvm on Ubuntu.
+# detect_deps() hunts for libclang_rt.builtins{,-x86_64}.a and sets
+# HAS_HARD_REQS=false without it. That is silent on the preset path: build.sh
+# line ~740 runs detect_deps but only consults ELIGIBLE on the *interactive*
+# path, so `./build.sh static_tq hdr` sails past a false result and dies much
+# later with an unrelated-looking link error.
+# Gate it here, mirroring the directories detect_deps actually searches.
+RUN set -eux; \
+    rt="$(clang --print-runtime-dir 2>/dev/null || true)"; \
+    res="$(clang -print-resource-dir 2>/dev/null || true)"; \
+    found=""; \
+    for d in "${rt}" "${res}/lib/linux" "${res}/lib"; do \
+        for n in libclang_rt.builtins.a libclang_rt.builtins-x86_64.a; do \
+            if [ -f "${d}/${n}" ]; then found="${d}/${n}"; break 2; fi; \
+        done; \
+    done; \
+    test -n "${found}"; \
+    echo "compiler-rt builtins found at: ${found}"
+
+# Rust nightly is a hard requirement (detect_deps checks for *nightly* in
+# `rustc --version`).
+#
+# NOT `curl ... | sh`: docker RUN is /bin/sh -c with no pipefail, so a failed
+# curl feeds sh an empty script, sh exits 0, and the step reports DONE while
+# leaving the image with no Rust at all. That happened here on a transient
+# CloudFront connect failure and was only caught by checking the image after.
+# Download and execute as separate, individually-checked steps instead.
+RUN set -eux; \
+    for i in 1 2 3 4 5; do \
+        curl --proto '=https' --tlsv1.2 -sSf \
+             --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 \
+             -o /tmp/rustup-init.sh https://sh.rustup.rs && break; \
+        echo "rustup fetch attempt $i failed; retrying"; sleep 5; \
+    done; \
+    test -s /tmp/rustup-init.sh; \
+    sh /tmp/rustup-init.sh -y --default-toolchain nightly --profile minimal; \
+    rm -f /tmp/rustup-init.sh
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Hard gate: fail the image build here rather than 8 minutes into an xav build
+# with a confusing "no eligible build modes" from detect_deps.
+RUN rustc --version && cargo --version && rustc --version | grep -q nightly
+
+# LOCAL PATCH, applied at build time so we don't have to carry a forked build.sh:
+# upstream rewrites dav1d's pkg-config libdir with a sed that only strips a bare
+# `lib`/`lib64`. On Debian/Ubuntu meson emits `libdir=${prefix}/lib/x86_64-linux-gnu`,
+# so the multiarch suffix survives and points at a nonexistent directory; FFmpeg's
+# configure then fails with the misleading "dav1d >= 1.0.0 not found using pkg-config".
+COPY fix-dav1d-multiarch.sh /usr/local/bin/fix-dav1d-multiarch.sh
+RUN chmod +x /usr/local/bin/fix-dav1d-multiarch.sh
+ENTRYPOINT ["/usr/local/bin/fix-dav1d-multiarch.sh"]
