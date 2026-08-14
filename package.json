@@ -9,8 +9,7 @@
     "test": "node test/run.js",
     "test:unit": "node test/run.js --unit",
     "test:smoke": "node test/run.js --smoke",
-    "test:e2e": "node test/run.js --e2e",
-    "benchmark": "node test/benchmark.js"
+    "test:e2e": "node test/run.js --e2e"
   },
   "devDependencies": {
     "esbuild": "^0.25"
