@@ -1,5 +1,11 @@
 # VC-1 lsmas Fallback (BestSource → lossless FFV1 mezzanine)
 
+> **HISTORICAL (2026-08-14).** Describes plugins removed in v3.0.0 — av1anEncode,
+> abAv1Encode, crfSearchEncode — and/or the `vsSource` VapourSynth path that went with them.
+> The measurements are still valid; the code they describe is no longer shipped. Kept because
+> the reasoning is reusable.
+
+
 > **REVISION 2026-07-07 — BestSource was shipped (v2.2.0) then abandoned; replaced
 > by a lossless FFV1 mezzanine pre-pass (v2.3.0).**
 >

@@ -1,5 +1,11 @@
 # Threading Simplification
 
+> **HISTORICAL (2026-08-14).** Describes plugins removed in v3.0.0 — av1anEncode,
+> abAv1Encode, crfSearchEncode — and/or the `vsSource` VapourSynth path that went with them.
+> The measurements are still valid; the code they describe is no longer shipped. Kept because
+> the reasoning is reusable.
+
+
 Remove the manual thread strategy system and let av1an/ab-av1 handle all threading decisions with their built-in defaults.
 
 ## Background
