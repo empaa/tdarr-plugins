@@ -6,12 +6,14 @@ const details = () => ({
   description: [
     'Encodes video to AV1 using xav (github.com/emrakyz/xav) with per-scene SSIMULACRA2',
     'target-quality search.',
-    'Runs at the source resolution -- xav has no resize option, so use "AV1 Encode (xav, scaled)"',
-    'when the source must be downscaled.',
+    'Set "Max Resolution" to downscale anything above it: xav has no resize of its own, so',
+    'those sources are decoded and scaled by ffmpeg and piped in, while everything at or',
+    'below the cap takes the faster native path. The choice is made per file from the source',
+    'width -- no branching needed in the flow.',
     'Live progress, FPS, ETA and estimated size on the dashboard. Cancel kills the encoder.',
   ].join(' '),
   style: { borderColor: 'purple' },
-  tags: 'av1,xav,svt-av1,ssimulacra2,target-quality',
+  tags: 'av1,xav,svt-av1,ssimulacra2,target-quality,downscale',
   isStartPlugin: false,
   pType: '',
   requiresVersion: '2.00.01',
@@ -25,6 +27,20 @@ const details = () => ({
       defaultValue: '',
       inputUI: { type: 'text' },
       tooltip: 'Leave empty to search /usr/local/bin/xav then /opt/xav/xav.',
+    },
+    {
+      label: 'Max Resolution',
+      name: 'max_resolution',
+      type: 'string',
+      defaultValue: 'off',
+      inputUI: { type: 'dropdown', options: ['off', '720p', '1080p', '1440p'] },
+      tooltip: [
+        'Sources WIDER than this are downscaled to it; sources at or below it are encoded',
+        'at their own resolution. "off" never scales.',
+        'The two are genuinely different pipelines -- scaling puts ffmpeg in front of xav',
+        'over a pipe, which costs GPU decode and resume support (see those tooltips) -- but',
+        'which one a file needs is decided here from its width, not in the flow.',
+      ].join(' '),
     },
     {
       label: 'Target Quality (SSIMULACRA2)',
@@ -45,6 +61,19 @@ const details = () => ({
         'SSIMU2 80 to buy 1.44 VMAF points over 74.',
         'Note the search lands within about +/-2 of the request, so the narrow',
         'band is a target, not a guarantee.',
+      ].join(' '),
+    },
+    {
+      label: 'If Target Quality Did Not Run (scaled only)',
+      name: 'tq_unavailable_action',
+      type: 'string',
+      defaultValue: 'fail',
+      inputUI: { type: 'dropdown', options: ['fail', 'accept'] },
+      tooltip: [
+        'Only consulted when a file is downscaled, because only the piped path could',
+        'plausibly lose the target-quality search. If no chunk reports a measured score the',
+        'encode landed at some unverified CRF: "fail" throws so Tdarr keeps the original,',
+        '"accept" keeps the output with a warning.',
       ].join(' '),
     },
     {
@@ -132,7 +161,10 @@ const details = () => ({
       type: 'boolean',
       defaultValue: 'false',
       inputUI: { type: 'switch' },
-      tooltip: 'Pass --hwdec for GPU decoding.',
+      tooltip: [
+        'Pass --hwdec for GPU decoding. Ignored (with a log line) on any file that gets',
+        'downscaled: xav rejects --hwdec outright when its frames arrive over a pipe.',
+      ].join(' '),
     },
     {
       label: 'Max Encoded Percent',
@@ -157,29 +189,46 @@ const details = () => ({
 const plugin = async (args) => {
   const fs = require('fs');
   const path = require('path');
+  const cp = require('child_process');
 
   const { createProcessManager } = require('../shared/processManager');
   const { createLogger, humanSize } = require('../shared/logger');
   const { probeNonVideoSize, mergeAudioVideo } = require('../shared/audioMerge');
+  const { stageIntoWorkDir, unstage } = require('../shared/staging');
   const {
-    buildXavArgs, filterEncoderParams, resolveParamSet, createXavTracker, sourceVideoDuration,
-    validateOutput, detectCrfPinning, logTargetHit,
+    buildXavArgs, buildPipeFfmpegArgs, filterEncoderParams, resolveParamSet, createXavTracker,
+    sourceVideoDuration, validateOutput, detectCrfPinning, logTargetHit, probeOutput,
+    selectEncodePath, RESOLUTION_PRESETS,
   } = require('../shared/xav');
 
   const inputs = args.inputs || {};
   const file = args.inputFileObj;
-  const inputPath = file._id;
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
 
+  const maxResolution = String(inputs.max_resolution || 'off');
   const targetQuality = String(inputs.target_quality || '74.8-75.2');
+  const tqUnavailableAction = String(inputs.tq_unavailable_action || 'fail');
   const tqMode = String(inputs.tq_mode || 'mean');
   const crfRange = String(inputs.crf_range || '5-63');
   const preset = Number(inputs.preset) || 6;
   const workers = Number(inputs.workers) || 2;
   const vship = Number(inputs.vship) || 1;
-  const hwdec = inputs.hwdec === true || inputs.hwdec === 'true';
+  const hwdecRequested = inputs.hwdec === true || inputs.hwdec === 'true';
   const maxEncodedPercent = Number(inputs.max_encoded_percent) || 80;
+
+  const sourceStreams = (file.ffProbeData && file.ffProbeData.streams) || [];
+  const videoStream = sourceStreams.find((s) => s.codec_type === 'video') || {};
+  const sourceWidth = Number(videoStream.width) || 0;
+  const sourceFrames = Number(videoStream.nb_frames) || 0;
+  const sourceDuration = sourceVideoDuration(
+    videoStream, (file.ffProbeData && file.ffProbeData.format) || {},
+  );
+
+  // The whole reason these used to be two plugins, decided here in one line.
+  const mode = selectEncodePath(sourceWidth, maxResolution);
+  const scaled = mode === 'scaled';
+  const targetWidth = scaled ? RESOLUTION_PRESETS[maxResolution].width : sourceWidth;
 
   const findBin = (...paths) => paths.filter(Boolean).find((p) => fs.existsSync(p));
   const xavBin = findBin(inputs.xav_path, '/usr/local/bin/xav', '/opt/xav/xav');
@@ -189,21 +238,16 @@ const plugin = async (args) => {
       + 'The stock Tdarr image does not ship xav.',
     );
   }
+  const ffmpegBin = findBin('/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg');
+  if (scaled && !ffmpegBin) throw new Error('ffmpeg not found, required to downscale');
 
-  // xav hashes its input and creates a `.<hash>` temp dir NEXT TO THE INPUT
-  // FILE, with no option to relocate it. If the working file is still on the
-  // library share this scatters temp dirs across the library, and fails
-  // outright (os error 30) on a read-only mount. sanitizeFile is responsible
-  // for staging into workDir; refuse rather than make a mess.
-  const workDirReal = fs.realpathSync(args.workDir);
-  const inputDirReal = fs.realpathSync(path.dirname(inputPath));
-  if (inputDirReal !== workDirReal) {
-    throw new Error(
-      `xav writes its temp directory next to the input file, but the working file is at `
-      + `${inputDirReal} rather than the Tdarr working directory ${workDirReal}. `
-      + 'Run sanitizeFile (which always stages into workDir) before this plugin.',
-    );
-  }
+  // xav creates its `.<hash>` temp directory next to its input with no way to
+  // relocate it, so the working file has to be local before it runs. This
+  // applies on BOTH paths: even when frames arrive over a pipe, the source file
+  // is still passed as <INPUT> for scene detection, crop detection and the frame
+  // count. Staging is this plugin's job -- it is the one with the constraint.
+  const staging = stageIntoWorkDir(file._id, args.workDir, jobLog);
+  const inputPath = staging.path;
 
   const outputPath = path.join(args.workDir, 'xav-output.mkv');
   const videoOnlyPath = path.join(args.workDir, 'xav-video.mkv');
@@ -212,18 +256,22 @@ const plugin = async (args) => {
     try { return fs.statSync(inputPath).size; } catch (_) { return 0; }
   })();
 
-  const sourceStreams = (file.ffProbeData && file.ffProbeData.streams) || [];
-  const videoStream = sourceStreams.find((s) => s.codec_type === 'video') || {};
-  const sourceFrames = Number(videoStream.nb_frames) || 0;
-  const sourceDuration = sourceVideoDuration(
-    videoStream, (file.ffProbeData && file.ffProbeData.format) || {},
-  );
+  // hwdec is a hard error inside xav when combined with a pipe, so a file that
+  // happens to need scaling must not inherit it from a global setting.
+  const hwdec = hwdecRequested && !scaled;
+  if (hwdecRequested && scaled) {
+    jobLog('[xav] GPU Decode is on but this file is being downscaled -- xav rejects --hwdec on piped input, so it is ignored for this file.');
+  }
 
-  jobLog('XAV ENCODE');
+  jobLog(`XAV ENCODE (${scaled ? 'scaled' : 'native'})`);
   jobLog(`  binary     : ${xavBin}`);
+  jobLog(
+    `  path       : ${mode} -- source ${sourceWidth}px, max resolution ${maxResolution}`
+    + (scaled ? ` -> scaling to ${targetWidth}px` : ' -> encoding at source resolution'),
+  );
   jobLog(`  target     : SSIMULACRA2 ${targetQuality} (${tqMode})  CRF ${crfRange}`);
   jobLog(`  preset     : ${preset}   workers ${workers}   metric workers ${vship}`);
-  jobLog(`  source     : ${humanSize(sourceBytes)}  ${videoStream.width}x${videoStream.height}`);
+  jobLog(`  source     : ${humanSize(sourceBytes)}  ${sourceWidth}x${videoStream.height}`);
 
   const paramSet = resolveParamSet(inputs.param_set, xavBin);
   jobLog(`  params     : ${paramSet.why}`);
@@ -276,7 +324,9 @@ const plugin = async (args) => {
     hwdec,
   });
 
-  // xav REQUIRES a TTY on stdin. src/y4m.rs defines is_pipe() as
+  // ---- the one genuine fork: how xav gets its frames --------------------
+
+  // Native. xav REQUIRES a TTY on stdin. src/y4m.rs defines is_pipe() as
   // !stdin().is_terminal(), with no flag or env override -- given no terminal it
   // assumes piped Y4M, reads nothing, writes an ~870-byte file, prints
   // DONE 100.00% and exits 0. Tdarr spawns via Node child_process with no TTY,
@@ -284,58 +334,170 @@ const plugin = async (args) => {
   //
   // The argv is written to a launcher script rather than interpolated into
   // `script -qec "..."`, so filenames never traverse a shell-quoting layer.
-  const launcherPath = path.join(args.workDir, 'xav-run.sh');
-  const shellQuote = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
-  fs.writeFileSync(
-    launcherPath,
-    `#!/usr/bin/env bash\nexec ${shellQuote(xavBin)} ${xavArgs.map(shellQuote).join(' ')}\n`,
-    { mode: 0o755 },
-  );
-  dbg(`launcher: ${fs.readFileSync(launcherPath, 'utf8').trim()}`);
+  const runNative = async () => {
+    const launcherPath = path.join(args.workDir, 'xav-run.sh');
+    const shellQuote = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+    fs.writeFileSync(
+      launcherPath,
+      `#!/usr/bin/env bash\nexec ${shellQuote(xavBin)} ${xavArgs.map(shellQuote).join(' ')}\n`,
+      { mode: 0o755 },
+    );
+    dbg(`launcher: ${fs.readFileSync(launcherPath, 'utf8').trim()}`);
 
-  updateWorker({ status: 'Starting xav' });
+    return pm.spawnAsync('/usr/bin/script', ['-qec', launcherPath, '/dev/null'], {
+      cwd: args.workDir,
+      env: Object.assign({}, process.env, { TERM: 'xterm-256color' }),
+      silent: true,
+      onLine: tracker.onLine,
+      // installCancelHandler only fires if OUR process lives long enough to run a
+      // handler. Tdarr cancelling a job kills the worker outright, and on
+      // 2026-08-13 that left xav running at 1267% CPU holding a deleted 39.6 GB
+      // file (job eUZ3g_6xN) -- the tree had been reparented to PPID 1. The
+      // watchdog is a detached bash that outlives us and group-kills the encoder
+      // when the worker disappears, which is the only thing that covers a kill we
+      // never get to observe.
+      onSpawn: (pid) => pm.startPpidWatcher(pid),
+    });
+  };
+
+  // Scaled. No `script` on this path: `script` would give the child a PTY on
+  // stdin, which is exactly what xav's is_pipe() tests -- it would then ignore
+  // the pipe and try to decode a file that was never passed.
+  //
+  // Target quality does work on piped input, confirmed in xav's source rather
+  // than assumed: enc_all() hands pipe_reader straight to enc_tq() with no
+  // pipe-specific branch, and probes re-encode the fully-decoded in-memory chunk
+  // buffer, so no random access into the source is needed. The no-score check
+  // after the run remains as a guard in case that changes.
+  //
+  // Pipe resume is vspipe-only upstream (it appends `-s N` to the producer argv,
+  // meaningless for ffmpeg), so a scaled job is not resumable and restarts from
+  // zero.
+  const runPiped = async () => {
+    const ffmpegArgs = buildPipeFfmpegArgs({ inputPath, resolution: maxResolution });
+    dbg(`ffmpeg: ${ffmpegBin} ${ffmpegArgs.join(' ')}`);
+    dbg(`xav:    ${xavBin} ${xavArgs.join(' ')}`);
+
+    return new Promise((resolve) => {
+      const ff = cp.spawn(ffmpegBin, ffmpegArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+      });
+      const xav = cp.spawn(xavBin, xavArgs, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: args.workDir,
+        detached: true,
+        env: Object.assign({}, process.env, { TERM: 'xterm-256color' }),
+      });
+
+      pm.adopt(ff);
+      pm.adopt(xav);
+
+      // Both halves of the pipe need guarding, not just xav: killing only the
+      // encoder leaves ffmpeg decoding into a pipe nobody reads. adopt() covers
+      // cleanup on paths where we are still alive to run it; the ppid watchdog
+      // covers the path where Tdarr kills the worker outright, which orphaned a
+      // feature-length encode in production on 2026-08-13 (job eUZ3g_6xN).
+      pm.startPpidWatcher(xav.pid);
+      pm.startPpidWatcher(ff.pid);
+
+      // xav exits as soon as it has every frame it needs and closes stdin behind
+      // it, while ffmpeg usually still has a buffered write in flight. That
+      // write lands on a closed pipe as EPIPE -- a normal end-of-stream race,
+      // not a failure. Node turns an unhandled 'error' on a stream into an
+      // uncaught exception, so without these handlers the WORKER DIES, and it
+      // dies *after* a complete encode: verified 2026-08-14 on a 4K clip whose
+      // xav-video.mkv held all 1090 frames when the process was killed.
+      // Both ends need a handler; the error surfaces on whichever side Node
+      // notices first.
+      const onPipeError = (which) => (e) => {
+        const code = e && e.code;
+        if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED') {
+          dbg(`[pipe] ${which} closed at end of stream (${code}) -- expected`);
+          return;
+        }
+        jobLog(`[pipe] ${which} error: ${e.message}`);
+      };
+      xav.stdin.on('error', onPipeError('xav stdin'));
+      ff.stdout.on('error', onPipeError('ffmpeg stdout'));
+
+      ff.stdout.pipe(xav.stdin);
+
+      let ffErr = '';
+      ff.stderr.on('data', (d) => { ffErr += d.toString(); });
+      // ffmpeg dying leaves xav waiting on a pipe that will never deliver.
+      ff.on('close', (code) => {
+        if (code !== 0) {
+          jobLog(`[ffmpeg] exited ${code}: ${ffErr.trim().split('\n').slice(-3).join(' | ')}`);
+          try { xav.stdin.end(); } catch (_) {}
+        }
+      });
+      ff.on('error', (e) => jobLog(`[ffmpeg] spawn error: ${e.message}`));
+
+      const onData = (d) => {
+        for (const line of d.toString().split(/[\r\n]/)) {
+          if (line.trim()) tracker.onLine(line);
+        }
+      };
+      xav.stdout.on('data', onData);
+      xav.stderr.on('data', onData);
+      xav.on('error', (e) => { jobLog(`[xav] spawn error: ${e.message}`); resolve(1); });
+      xav.on('close', (code, signal) => {
+        // Once the consumer is gone ffmpeg is decoding 4K frames into nothing.
+        // pm.cleanup() would get it eventually, but not before it has burned
+        // however long the rest of the file takes.
+        try { if (ff.exitCode === null && !ff.killed) ff.kill('SIGTERM'); } catch (_) {}
+        resolve(code !== null ? code : (signal ? 1 : 0));
+      });
+    });
+  };
+
+  // -----------------------------------------------------------------------
+
+  updateWorker({ status: scaled ? 'Starting xav (scaled)' : 'Starting xav' });
   tracker.startInterval();
 
-  const exitCode = await pm.spawnAsync('/usr/bin/script', ['-qec', launcherPath, '/dev/null'], {
-    cwd: args.workDir,
-    env: Object.assign({}, process.env, { TERM: 'xterm-256color' }),
-    silent: true,
-    onLine: tracker.onLine,
-    // installCancelHandler only fires if OUR process lives long enough to run a
-    // handler. Tdarr cancelling a job kills the worker outright, and on
-    // 2026-08-13 that left xav running at 1267% CPU holding a deleted 39.6 GB
-    // file (job eUZ3g_6xN) -- the tree had been reparented to PPID 1. The
-    // watchdog is a detached bash that outlives us and group-kills the encoder
-    // when the worker disappears, which is the only thing that covers a kill we
-    // never get to observe.
-    onSpawn: (pid) => pm.startPpidWatcher(pid),
-  });
+  const exitCode = await (scaled ? runPiped() : runNative());
 
   tracker.stop();
   pm.cleanup();
 
+  // Only ever removes a file this plugin created; a hardlink drops a link and
+  // leaves the library alone, a copy frees the transcode cache.
+  const dropStaged = () => { if (staging.staged) unstage(inputPath, dbg); };
+
   if (sizeExceeded) {
     jobLog('[xav] projected output exceeded the size limit -- passing the original through');
     try { fs.unlinkSync(videoOnlyPath); } catch (_) {}
+    dropStaged();
     return { outputFileObj: args.inputFileObj, outputNumber: 2, variables: args.variables };
   }
 
   if (exitCode !== 0) {
-    throw new Error(`xav exited ${exitCode} -- see the job log for its output`);
-  }
-
-  // A target-quality run whose chunks all landed on a CRF bound measured
-  // nothing: it is a fixed-CRF encode wearing a target-quality costume. Warn
-  // loudly, but the encode itself is valid so do not fail it.
-  const pinning = detectCrfPinning(tracker.getChunkCrfs(), crfRange);
-  if (pinning.pinned) {
-    jobLog(
-      `[xav] WARNING: all ${pinning.total} chunks pinned at the CRF ${pinning.bound} `
-      + `(${pinning.value}). The target-quality search had nowhere to go, so this is `
-      + `effectively a fixed-CRF encode. Widen the CRF range or change the target.`,
+    throw new Error(
+      `xav exited ${exitCode}${scaled ? ' on the scaled path' : ''} -- see the job log for its output`,
     );
   }
+
   const scores = tracker.getChunkScores();
+  const crfs = tracker.getChunkCrfs();
+
+  // Did target quality actually run? Only the piped path could plausibly lose
+  // it, so only the piped path is allowed to fail the job over it.
+  if (scaled && scores.length === 0) {
+    const message = 'no chunk reported a measured SSIMULACRA2 score, so the target-quality '
+      + `search did not run on piped input (requested ${targetQuality}). The encode landed `
+      + 'at an unverified CRF and its quality is unknown.';
+    if (tqUnavailableAction === 'fail') {
+      throw new Error(
+        `${message} Failing so Tdarr keeps the original. Set "If Target Quality Did Not Run" `
+        + 'to "accept" to keep this output anyway, or raise Max Resolution so this file is '
+        + 'encoded natively.',
+      );
+    }
+    jobLog(`[xav] WARNING: ${message} Keeping it because the plugin is set to accept.`);
+  }
+
   if (scores.length) {
     const mean = scores.reduce((s, v) => s + v, 0) / scores.length;
     jobLog(
@@ -343,6 +505,18 @@ const plugin = async (args) => {
       + `worst ${Math.min(...scores).toFixed(2)} across ${scores.length} chunks`,
     );
     logTargetHit(jobLog, tracker.getChunkStats(), targetQuality, crfRange);
+
+    // A target-quality run whose chunks all landed on a CRF bound measured
+    // nothing: it is a fixed-CRF encode wearing a target-quality costume. Warn
+    // loudly, but the encode itself is valid so do not fail it.
+    const pinning = detectCrfPinning(crfs, crfRange);
+    if (pinning.pinned) {
+      jobLog(
+        `[xav] WARNING: all ${pinning.total} chunks pinned at the CRF ${pinning.bound} `
+        + `(${pinning.value}). The target-quality search had nowhere to go, so this is `
+        + `effectively a fixed-CRF encode. Widen the CRF range or change the target.`,
+      );
+    }
   }
 
   // xav's own MUX phase set the status to "Muxing" before exiting, so without
@@ -350,9 +524,17 @@ const plugin = async (args) => {
   // 42 minutes of ffprobe on Avatar looked like a stalled mux (job yf2quTpnG).
   updateWorker({ status: 'Validating output' });
   const probe = await probeOutput(videoOnlyPath, pm, dbg);
+  // Frame count must match on both paths; the scale filter changes dimensions,
+  // not count.
   const verdict = validateOutput(probe, { frames: sourceFrames, duration: sourceDuration }, {});
   if (!verdict.ok) {
     throw new Error(`xav output failed validation: ${verdict.problems.join('; ')}`);
+  }
+  if (scaled && probe.width > targetWidth) {
+    throw new Error(
+      `output is ${probe.width}px wide, wider than the ${maxResolution} target `
+      + `(${targetWidth}px) -- the scale filter did not apply`,
+    );
   }
 
   updateWorker({ status: 'Merging audio' });
@@ -360,6 +542,7 @@ const plugin = async (args) => {
   if (!merged) {
     throw new Error('failed to merge audio/subtitles back into the xav output');
   }
+  dropStaged();
 
   const outBytes = (() => {
     try { return fs.statSync(outputPath).size; } catch (_) { return 0; }
@@ -375,47 +558,6 @@ const plugin = async (args) => {
     outputNumber: 1,
     variables: args.variables,
   };
-};
-
-// ffprobe the encoded video so validation has real numbers rather than trust.
-const probeOutput = async (outputPath, pm, dbg) => {
-  const fs = require('fs');
-  if (!fs.existsSync(outputPath)) return { exists: false };
-
-  const ffprobeBin = ['/usr/local/bin/ffprobe', '/usr/bin/ffprobe']
-    .find((p) => fs.existsSync(p)) || 'ffprobe';
-  const bytes = fs.statSync(outputPath).size;
-  const out = [];
-  // -count_packets, NOT -count_frames. Both yield one count per coded frame for
-  // AV1 in Matroska, but -count_frames DECODES the whole file to get there: on
-  // Avatar (16.8 GB, 283893 frames) it took 42m42s, about 40% of the entire job,
-  // while the dashboard still read "Muxing". Counting packets is a demux and
-  // costs seconds. Measured 2026-08-14, job yf2quTpnG.
-  await pm.spawnAsync(ffprobeBin, [
-    '-v', 'error',
-    '-select_streams', 'v:0',
-    '-count_packets',
-    '-show_entries', 'stream=width,height,codec_name,nb_read_packets:format=duration',
-    '-of', 'default=noprint_wrappers=1',
-    outputPath,
-  ], { silent: true, onLine: (l) => out.push(l) });
-
-  const pick = (key) => {
-    const line = out.find((l) => l.startsWith(`${key}=`));
-    return line ? line.slice(key.length + 1) : '';
-  };
-
-  const probe = {
-    exists: true,
-    bytes,
-    width: parseInt(pick('width'), 10) || 0,
-    height: parseInt(pick('height'), 10) || 0,
-    codec: pick('codec_name') || '',
-    frames: parseInt(pick('nb_read_packets'), 10) || 0,
-    duration: parseFloat(pick('duration')) || 0,
-  };
-  dbg(`probe: ${JSON.stringify(probe)}`);
-  return probe;
 };
 
 module.exports = { details, plugin };
