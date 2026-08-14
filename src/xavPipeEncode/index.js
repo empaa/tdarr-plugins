@@ -37,14 +37,14 @@ const details = () => ({
       label: 'Target Quality (SSIMULACRA2)',
       name: 'target_quality',
       type: 'string',
-      defaultValue: '69.8-70.2',
+      defaultValue: '74.8-75.2',
       inputUI: { type: 'text' },
       tooltip: [
-        'Target SSIMULACRA2 band. Tier targets: low 67.3-67.7, mid 69.8-70.2,',
-        'top 72.3-72.7 (measured 2026-08-13). The previous 80 was unreachable on',
-        'demanding content: this plugin\'s own 4K HDR case starved 13 of 29 chunks',
-        'at the CRF floor at 80, and at 75 it produced a SMALLER file at HIGHER',
-        'achieved quality with nothing pinned.',
+        'Target SSIMULACRA2 band. Tier targets: top 74.8-75.2, mid 70.8-71.2,',
+        'low 66.8-67.2 (measured 2026-08-13/14). Do not raise it much further:',
+        'the 4K HDR case starved 13 of 29 chunks at the CRF floor at target 80,',
+        'and at 75 it produced a SMALLER file at HIGHER achieved quality with',
+        'nothing pinned -- 16% of source.',
         'NOTE: target-quality search may be unavailable on piped',
         'input, since its probes need random access. The plugin verifies this at runtime',
         'and logs clearly if it falls back to fixed CRF.',
@@ -174,7 +174,7 @@ const plugin = async (args) => {
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
 
   const resolution = String(inputs.resolution || '1080p');
-  const targetQuality = String(inputs.target_quality || '69.8-70.2');
+  const targetQuality = String(inputs.target_quality || '74.8-75.2');
   const tqUnavailableAction = String(inputs.tq_unavailable_action || 'fail');
   const tqMode = String(inputs.tq_mode || 'mean');
   const crfRange = String(inputs.crf_range || '5-63');

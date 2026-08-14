@@ -1,8 +1,45 @@
 # tdarr-plugins
 
-AV1 encoding FlowPlugins for [Tdarr](https://tdarr.io), powered by [av1an](https://github.com/master-of-zen/Av1an) and [ab-av1](https://github.com/alexheretic/ab-av1).
+AV1 encoding FlowPlugins for [Tdarr](https://tdarr.io), powered by [xav](#av1-encode-xav), [av1an](https://github.com/master-of-zen/Av1an) and [ab-av1](https://github.com/alexheretic/ab-av1).
 
 ## Plugins
+
+### AV1 Encode (xav)
+
+Scene-based chunked AV1 encoding driven by a **SSIMULACRA2** target-quality search, rather
+than VMAF. Each scene gets its own CRF search until the chunk hits the requested score, so
+bitrate follows what the content actually needs. Live progress, FPS, ETA, current and
+projected output size on the Tdarr dashboard; cancelling the job kills the encoder.
+
+Two plugins share the engine:
+
+- **AV1 Encode (xav)** — encodes at the source resolution.
+- **AV1 Encode (xav, scaled)** — ffmpeg downscales and pipes Y4M into xav, for 4K → 1080p.
+  xav has no resize option of its own, which is why this is a separate plugin.
+
+**Inputs:**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| xav Binary Path | | Empty = search `/usr/local/bin/xav`, then `/opt/xav/xav`. See [Providing the xav binary](#providing-the-xav-binary) |
+| Target Quality | 74.8-75.2 | SSIMULACRA2 band. Tier targets: top 74.8-75.2, mid 70.8-71.2, low 66.8-67.2 |
+| TQ Aggregation Mode | mean | Aggregate chunk scores by mean, or by percentile to protect worst-case frames |
+| CRF Range | 5-63 | Bounds for the per-scene search. Keep it wide — chunks pinned at a bound are a fixed-CRF encode in disguise, and the plugin warns when that happens |
+| Preset | 6 | SVT-AV1 preset, 0-7 only in target-quality mode. 6 on every tier: preset 4 measured 0.9% smaller for ~25% more time |
+| Workers | 2 | Parallel encoder instances. The primary memory driver — 4 workers on 1080p peaked ~20 GB |
+| Metric Workers | 1 | Vship (SSIMULACRA2) workers. **Needs GPU access in the container** |
+| Encoder Parameter Set | auto | `auto` picks by binary name: a mainline build gets the researched SVT set, an `hdr` build gets preset only because its own defaults are the recipe |
+| Extra Encoder Params | | Appended after the set above and win over it. Params xav rejects are stripped and logged |
+| Max Encoded Percent | 80 | Abort if the projected output exceeds this % of source; 100 disables the gate |
+
+**Measured at the top tier** (target 75, preset 6, 2-minute samples): 63% of source on
+grain-heavy 1080p film, 47% on clean 1080p, 16% on high-motion digital, and 16% on a 4K HDR
+remux downscaled to 1080p.
+
+Do not raise the target much above ~76. SSIMULACRA2 scores against the *source*, so a high
+target pays to reproduce the source's own grain and compression artifacts, and the cost curve
+turns steeply non-linear: one grain-heavy film needed 100.5% of its source at SSIMU2 80 to buy
+1.44 VMAF points over SSIMU2 74.
 
 ### AV1 Encode (av1an)
 
@@ -142,6 +179,58 @@ Set Thread Strategy to "aggressive" in the plugin settings.
 
 If a named preset wins, just select it from the **Thread Strategy** dropdown. The `custom` + JSON override route is only needed for grid mode results that don't map to a preset.
 
+## Providing the xav binary
+
+Unlike the av1an and ab-av1 plugins, the xav plugins do **not** require a purpose-built image.
+xav is a single self-contained binary, so it can be mounted into the
+[empaa/tdarr-av1](https://github.com/empaa/tdarr-av1) image **or into an upstream
+`ghcr.io/haveagitgat/tdarr` image** — the plugin only needs the executable to exist.
+
+Point the plugin at it in one of two ways:
+
+- **Mount it where the plugin looks.** With no `xav Binary Path` set, the plugin searches
+  `/usr/local/bin/xav` and then `/opt/xav/xav`.
+- **Mount it anywhere and set `xav Binary Path`** to the in-container path. This is how you
+  run several builds side by side.
+
+```yaml
+# docker-compose, upstream Tdarr node image
+services:
+  tdarr-node:
+    image: ghcr.io/haveagitgat/tdarr_node:latest
+    runtime: nvidia                     # required: Vship scores on the GPU
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    security_opt:
+      - seccomp=unconfined              # xav muxes via io_uring
+    mem_limit: 30g                      # xav is memory-hungry; see Workers
+    volumes:
+      - /host/xav/xav-mainline:/usr/local/bin/xav:ro
+```
+
+Running more than one build is just more mounts — keep them in a directory and select per
+flow node with `xav Binary Path`:
+
+```yaml
+      - /host/xav:/opt/xav:ro           # xav-mainline, xav-hdr, ...
+```
+
+Then set `xav Binary Path` to `/opt/xav/xav-mainline` or `/opt/xav/xav-hdr` on each node.
+With `Encoder Parameter Set` on `auto` the plugin picks the parameters to match: a build whose
+filename contains `hdr` gets preset only, because that fork's own defaults are the recipe;
+anything else gets the researched mainline set.
+
+### Requirements and gotchas
+
+- **GPU access is required** for the SSIMULACRA2 metric (Vship). Without it the
+  target-quality search cannot score chunks.
+- **`seccomp=unconfined`** — without it the encode succeeds and the *mux* fails with
+  `io_uring_setup failed`.
+- **Cap container memory.** xav at 4 workers on 1080p peaked around 20 GB; uncapped it can
+  drive the host into OOM. Start at 2 workers.
+- **The plugin fails fast with a clear error** if no binary is found, rather than silently
+  falling back — the stock Tdarr images do not ship xav.
+
 ## Install
 
 1. Download the latest release zip from the [Releases](https://github.com/empaa/tdarr-plugins/releases) page.
@@ -151,7 +240,13 @@ If a named preset wins, just select it from the **Thread Strategy** dropdown. Th
    ```
 3. Restart the Tdarr server. Nodes auto-sync plugins from the server.
 
-Both plugins require the AV1 encoding stack (av1an, ab-av1, FFmpeg, VapourSynth, SVT-AV1, aomenc, libvmaf) on the Tdarr node. The [empaa/tdarr_node](https://github.com/empaa/tdarr-av1) Docker image provides this stack.
+The av1an and ab-av1 plugins require the full AV1 encoding stack (av1an, ab-av1, FFmpeg,
+VapourSynth, SVT-AV1, aomenc, libvmaf) on the Tdarr node. The
+[empaa/tdarr_node](https://github.com/empaa/tdarr-av1) Docker image provides this stack.
+
+The **xav** plugins need only the xav binary plus GPU access — see
+[Providing the xav binary](#providing-the-xav-binary). They work on a stock upstream Tdarr
+image with a single bind mount.
 
 ## Development
 

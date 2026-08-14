@@ -29,18 +29,19 @@ const details = () => ({
       label: 'Target Quality (SSIMULACRA2)',
       name: 'target_quality',
       type: 'string',
-      defaultValue: '69.8-70.2',
+      defaultValue: '74.8-75.2',
       inputUI: { type: 'text' },
       tooltip: [
-        'Target SSIMULACRA2 band. Tier targets: low 67.3-67.7, mid 69.8-70.2,',
-        'top 72.3-72.7. Measured 2026-08-13 across 28 encodes.',
-        'The previous set (70/75/80) targeted far higher than it appeared to:',
-        'SSIMU2 79.67 measures as VMAF 98.5, well past the VMAF 95 that reads as',
-        'visually lossless. On grain-heavy film that cost everything -- Close',
-        'Encounters needed 100.5% of its source at SSIMU2 80 and 61.9% at 70,',
-        'for 1.44 VMAF points. Above ~76 the cost curve turns steeply non-linear,',
-        'because the metric scores against the SOURCE, so a high target pays to',
-        'reproduce the source\'s own grain and compression artifacts.',
+        'Target SSIMULACRA2 band. Tier targets: top 74.8-75.2, mid 70.8-71.2,',
+        'low 66.8-67.2. Measured across 28 encodes, 2026-08-13/14.',
+        'At the top tier that is 63% of source on grain-heavy film, 47% on',
+        'clean 1080p and 16% on high-motion digital.',
+        'Do not raise it much further: SSIMU2 79.67 measures as VMAF 98.5, past',
+        'the VMAF 95 that reads as visually lossless, and above ~76 the cost',
+        'curve turns steeply non-linear because the metric scores against the',
+        'SOURCE -- a high target pays to reproduce the source\'s own grain and',
+        'compression artifacts. Close Encounters needed 100.5% of its source at',
+        'SSIMU2 80 to buy 1.44 VMAF points over 74.',
         'Note the search lands within about +/-2 of the request, so the narrow',
         'band is a target, not a guarantee.',
       ].join(' '),
@@ -170,7 +171,7 @@ const plugin = async (args) => {
 
   const { jobLog, dbg } = createLogger(args.jobLog, args.workDir);
 
-  const targetQuality = String(inputs.target_quality || '69.8-70.2');
+  const targetQuality = String(inputs.target_quality || '74.8-75.2');
   const tqMode = String(inputs.tq_mode || 'mean');
   const crfRange = String(inputs.crf_range || '5-63');
   const preset = Number(inputs.preset) || 6;
