@@ -1,8 +1,8 @@
 {
-  "name": "tdarr-plugins",
+  "name": "tdarr-xav",
   "version": "2.7.0",
   "private": true,
-  "description": "AV1 encoding FlowPlugins for Tdarr (av1an + ab-av1)",
+  "description": "AV1 encoding FlowPlugins for Tdarr, built on xav (github.com/emrakyz/xav)",
   "scripts": {
     "build": "./build.sh",
     "deploy": "./build.sh --deploy",

@@ -1,4 +1,4 @@
-# tdarr-plugins
+# tdarr-xav
 
 AV1 encoding FlowPlugins for [Tdarr](https://tdarr.io), built on
 **[xav](https://github.com/emrakyz/xav) by [emrakyz](https://github.com/emrakyz)** — a
@@ -49,150 +49,74 @@ target pays to reproduce the source's own grain and compression artifacts, and t
 turns steeply non-linear: one grain-heavy film needed 100.5% of its source at SSIMU2 80 to buy
 1.44 VMAF points over SSIMU2 74.
 
-### AV1 Encode (av1an)
+### Sanitize File
 
-Scene-based chunked AV1 encoding with VMAF-targeted quality. Supports aomenc and SVT-AV1 encoders. Live progress, FPS, and ETA on the Tdarr dashboard.
+All-in-one pre-encode sanitizer, in a single ffmpeg call. It determines the original language
+via Radarr/Sonarr (falling back to the first audio track), keeps the best audio track per
+wanted language, filters subtitles, strips image streams (cover art and thumbnails), reorders
+streams and remuxes to MKV. "Best" is decided by channel count, with codec quality
+(TrueHD → DTS-HD MA → FLAC → DTS → E-AC3 → AC3 → AAC) breaking ties.
 
-**Inputs:**
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Encoder | svt-av1 | `aom` (quality, slower) or `svt-av1` (speed, faster) |
-| Target VMAF | 93 | VMAF score to target (0-100). Typically 90-96 |
-| QP Range | 10-50 | Quality bounds for the CRF/QP search |
-| Preset | 4 | aomenc: cpu-used 0-8 (lower=slower). SVT-AV1: preset 0-13 |
-| Max Encoded Percent | 80 | Abort if output exceeds this % of source size. 100 to disable |
-| Enable Downscale | false | Downscale input via VapourSynth Lanczos3 pre-filter |
-| Downscale Resolution | 1080p | Target: 720p, 1080p, or 1440p |
-| Thread Strategy | safe | Controls thread/worker budget (see [Performance Tuning](#performance-tuning)) |
-| Thread Overrides | | JSON overrides for custom strategy (see [Custom Overrides](#custom-overrides)) |
-
-### AV1 Encode (ab-av1)
-
-Automatic VMAF-targeted CRF search using SVT-AV1. Simpler single-pass approach with ab-av1's built-in quality optimization.
+Run it before an encode node so the encoder only ever sees the tracks you intend to keep.
 
 **Inputs:**
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Target VMAF | 93 | VMAF score to target (0-100) |
-| Min CRF | 10 | CRF floor for quality search |
-| Max CRF | 50 | CRF ceiling for quality search |
-| Preset | 4 | SVT-AV1 preset (0-13, lower=slower/better) |
-| Max Encoded Percent | 80 | Abort if output exceeds this % of source size |
-| Enable Downscale | false | Downscale via ab-av1 native vfilter |
-| Downscale Resolution | 1080p | Target: 720p, 1080p, or 1440p |
-| Thread Strategy | safe | Controls SVT-AV1 thread parallelism (see [Performance Tuning](#performance-tuning)) |
-| Thread Overrides | | JSON overrides for custom strategy |
+| Radarr URL | | e.g. `http://radarr:7878`. Empty skips Radarr |
+| Radarr API Key | | Required if Radarr URL is set |
+| Sonarr URL | | e.g. `http://sonarr:8989`. Empty skips Sonarr |
+| Sonarr API Key | | Required if Sonarr URL is set |
+| Path Mappings | | JSON array of `"tdarrPath:arrPath"` pairs, e.g. `["/media:/mnt/media"]`. Empty if the paths already match |
+| Additional Audio Languages | | Comma-separated ISO 639-2 codes to keep beyond the original, e.g. `eng,swe`. The original language is always kept |
+| Subtitle Languages | | Comma-separated ISO 639-2 codes. Original-language subtitles are always kept |
+| Keep Commentary Tracks | false | Commentary is detected by the comment disposition or a "commentary" title; SDH and forced tracks are not commentary. When off, commentaries are dropped even if they are the only track in a wanted language |
 
-## Performance Tuning
+**Outputs:** `1` sanitized (streams filtered, reordered, remuxed to MKV) · `2` already clean.
 
-The default `safe` strategy is conservative — on high-core-count systems you may see CPU utilization as low as 40%. The thread strategy system lets you push utilization higher for faster encodes.
+### Arr Rename
 
-### Thread Strategy Presets
+Triggers Radarr/Sonarr to rename a file according to their naming scheme. Place it after the
+Replace Original node — it detects which service owns the file by querying both APIs.
 
-| Strategy | Target CPU | Best for |
-|----------|-----------|----------|
-| `safe` | ~40% | Default. Safe on any hardware, minimal memory pressure |
-| `balanced` | ~70% | Good middle ground for most systems |
-| `aggressive` | ~90% | High-core-count systems with plenty of RAM |
-| `max` | ~100% | Saturate all cores. Watch memory usage |
+**Inputs:**
 
-**What each preset controls (example for a 32-thread system):**
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Radarr URL | | e.g. `http://radarr:7878`. Empty skips Radarr |
+| Radarr API Key | | Required if Radarr URL is set |
+| Sonarr URL | | e.g. `http://sonarr:8989`. Empty skips Sonarr |
+| Sonarr API Key | | Required if Sonarr URL is set |
+| Path Mappings | | JSON array of `"tdarrPath:arrPath"` pairs, e.g. `["/media:/mnt/media"]` |
+| Poll Timeout (s) | 120 | Max seconds to wait for the Arr rescan/rename commands to finish |
 
-| Preset | av1an aomenc | av1an SVT-AV1 | ab-av1 lp | VMAF threads |
-|--------|-------------|---------------|-----------|-------------|
-| safe | 8 workers × 4 threads | 5 workers × 5 threads | 6 | 4 |
-| balanced | 12 workers × 2 threads | 6 workers × 5 threads | 12 | 8 |
-| aggressive | 16 workers × 2 threads | 6 workers × 5 threads | 20 | 10 |
-| max | 20 workers × 1 thread | 8 workers × 4 threads | 28 | 16 |
+**Outputs:** `1` renamed by Radarr or Sonarr · `2` no match found, or no rename needed.
 
-### SVT-AV1 Thread Limits
+## Removed in v3.0.0
 
-SVT-AV1 has preset-dependent parallelization limits. Lower presets use algorithms with dependencies that prevent effective threading beyond a certain point:
+`av1anEncode`, `abAv1Encode` and `crfSearchEncode` were removed in v3.0.0, along with the
+thread-strategy tuning chapter and benchmark harness that existed to serve them.
 
-| SVT-AV1 Preset | Effective max lp |
-|-----------------|-----------------|
-| 0-1 | ~4 threads |
-| 2-3 | ~6 threads |
-| 4 | ~8 threads |
-| 5 | ~12 threads |
-| 6 | ~16 threads |
-| 7+ | 32+ threads |
+They needed av1an, ab-av1, VapourSynth/`vspipe` and the libvmaf model — a stack that only ever
+came from [empaa/tdarr-av1](https://github.com/empaa/tdarr-av1), which was deprecated and
+archived on 2026-08-14. Upstream Tdarr images ship none of it, so those plugins cannot run on
+the images production now uses.
 
-The plugins automatically cap `lp` based on the encoder preset. This means **ab-av1 at preset 3 won't benefit from thread strategies beyond `safe`** — the encoder simply can't use the extra threads.
-
-For maximum multicore utilization at low presets, use **av1an** instead — it runs multiple independent encoder instances in parallel via scene-based chunking, bypassing SVT-AV1's per-instance thread limits.
-
-### Custom Overrides
-
-Set **Thread Strategy** to `custom` and paste a JSON object into **Thread Overrides**:
-
-```json
-{"workers": 16, "threadsPerWorker": 2, "vmafThreads": 12}
-```
-
-Omitted keys fall back to the `aggressive` preset. For ab-av1, `workers` is ignored (single-process encoder) and `threadsPerWorker` sets the SVT-AV1 `lp` value.
-
-### Finding Your Optimal Config
-
-Use the benchmark tool to test different configurations against your actual hardware and content:
+The last commit containing them is tagged
+[`legacy-encoders-final`](https://github.com/empaa/tdarr-xav/tree/legacy-encoders-final):
 
 ```bash
-# Place sample files in test/samples/ (.mkv, .mp4, .ts)
-# Then run:
-
-npm run benchmark -- --help                          # see all options
-
-# Test all 4 presets with aomenc at preset 3
-npm run benchmark -- --encoder aom --cpu-used 3
-
-# Test all presets with SVT-AV1 at preset 4
-npm run benchmark -- --encoder svt-av1 --cpu-used 4
-
-# Test ab-av1
-npm run benchmark -- --encoder ab-av1 --cpu-used 3
-
-# Test with downscaling
-npm run benchmark -- --encoder aom --cpu-used 3 --downscale 720p
-
-# Test only one preset
-npm run benchmark -- --encoder aom --preset aggressive
-
-# Custom worker × thread grid (power users)
-npm run benchmark -- --encoder aom --grid
+git checkout legacy-encoders-final -- src/av1anEncode src/abAv1Encode src/crfSearchEncode
 ```
 
-The benchmark runs encodes inside the Tdarr node Docker container via `docker exec`. Each config runs for a fixed duration (default 2 minutes, configurable with `--duration`), then measures total encoded bytes. More MiB/min = better multicore utilization. Scene detection runs once upfront and is cached for all configs so it doesn't skew the results.
-
-**Environment variables:**
-
-- `TDARR_CONTAINER` — container name (default: `tdarr-node`)
-
-**Output example:**
-
-```
-+------------+---------+---------+--------+---------+-----------+--------+-------+----------+--------+
-| Config     | Workers | Threads | VMAF-T | MiB/min | Total MiB | Chunks | CPU % | Peak RAM | Status |
-+------------+---------+---------+--------+---------+-----------+--------+-------+----------+--------+
-| safe       | 8       | 4       | 4      | 12.3    | 24.6      | 8      | 42%   | 6.1 GiB  | OK     |
-| balanced   | 12      | 2       | 8      | 22.1    | 44.2      | 14     | 71%   | 8.4 GiB  | OK     |
-| aggressive | 16      | 2       | 12     | 28.5    | 57.0      | 19     | 88%   | 11.2 GiB | OK     |
-| max        | 20      | 1       | 16     | 30.2    | 60.4      | 21     | 96%   | 14.2 GiB | OK     |
-+------------+---------+---------+--------+---------+-----------+--------+-------+----------+--------+
-
-Recommended: aggressive
-Set Thread Strategy to "aggressive" in the plugin settings.
-```
-
-If a named preset wins, just select it from the **Thread Strategy** dropdown. The `custom` + JSON override route is only needed for grid mode results that don't map to a preset.
+They still run against the frozen `ghcr.io/empaa/tdarr_node` images, which stay published on
+GHCR indefinitely.
 
 ## Providing the xav binary
 
-Unlike the av1an and ab-av1 plugins, the xav plugins do **not** require a purpose-built image.
-xav is a single self-contained binary, so it can be mounted into the
-[empaa/tdarr-av1](https://github.com/empaa/tdarr-av1) image **or into an upstream
-`ghcr.io/haveagitgat/tdarr` image** — the plugin only needs the executable to exist.
+The xav plugins do **not** require a purpose-built image. xav is a single self-contained
+binary, so it can be mounted into a stock upstream `ghcr.io/haveagitgat/tdarr` image — the
+plugin only needs the executable to exist.
 
 Point the plugin at it in one of two ways:
 
@@ -241,37 +165,32 @@ anything else gets the researched mainline set.
 
 ## Install
 
-1. Download the latest release zip from the [Releases](https://github.com/empaa/tdarr-plugins/releases) page.
+1. Download the latest release zip from the [Releases](https://github.com/empaa/tdarr-xav/releases) page.
 2. Extract into your Tdarr server config directory under `Plugins/FlowPlugins/`:
    ```
    <tdarr-config>/Tdarr/Plugins/FlowPlugins/LocalFlowPlugins/
    ```
 3. Restart the Tdarr server. Nodes auto-sync plugins from the server.
 
-### Which plugins run where
+### Requirements
 
-The **xav** plugins need only the xav binary plus GPU access — see
-[Providing the xav binary](#providing-the-xav-binary). They call `ffmpeg`, `ffprobe`,
-`mkvmerge` and `script`, all of which upstream ships, and fall back from `/usr/local/bin` to
-`/usr/bin`. **They run on a stock `ghcr.io/haveagitgat/tdarr_node` image with a single bind
-mount.**
+**All four plugins run on stock upstream `ghcr.io/haveagitgat/tdarr` images.** They call only
+`ffmpeg`, `ffprobe`, `mkvmerge` and `script`, all of which upstream ships, and fall back from
+`/usr/local/bin` to `/usr/bin` to cover either layout.
 
-The **av1an, ab-av1 and crf-search** plugins need the full encoding stack (av1an, ab-av1,
-VapourSynth/`vspipe`, the libvmaf model). **Upstream images do not ship any of it.** That
-stack came from [empaa/tdarr-av1](https://github.com/empaa/tdarr-av1), which was **deprecated
-2026-08-14** — encoding moved to xav on official images, so the custom image no longer earns
-its keep. Its published images stay on GHCR indefinitely and are frozen as they are, so these
-plugins keep working there, but they will not run on an upstream image.
+The two xav plugins additionally need the xav binary mounted and GPU access for the
+SSIMULACRA2 metric — see [Providing the xav binary](#providing-the-xav-binary). No custom
+image is required for any of them.
 
 ## Development
 
 ```bash
 npm install
 npm run build          # Bundle plugins to dist/
-npm run deploy         # Build + copy to local tdarr-av1 test instance
-npm run test:smoke     # Validate plugin metadata
+npm run deploy         # Build + copy to local test instance
+npm run test:unit      # Pure-logic tests, no Tdarr needed
+npm run test:smoke     # Validate plugin metadata (needs running Tdarr)
 npm run test:e2e       # Full integration tests (needs running Tdarr)
-npm run benchmark      # Thread/worker performance benchmark
 ```
 
 Requires [Node.js](https://nodejs.org/) 18+.
