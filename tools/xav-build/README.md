@@ -15,6 +15,17 @@ the knowledge encoded in these comments took real time to recover.
 | `build-ffvship.sh` | builds the self-contained FFVship bundle (SSIMULACRA2 scoring) |
 | `README-unraid.md` | the original host-side notes |
 
+## Getting the source
+
+The xav source is **not** kept here — clone it fresh for an upgrade. The binaries currently
+deployed were built from upstream **`6896aeb`** ("fix small EVEX slip into AVX2"), Rust
+nightly 1.99.0, which is the baseline to diff against when deciding whether an upgrade is
+worth it.
+
+The one local change we needed to `build.sh` is **not** carried as a fork: it is applied at
+container start by `fix-dav1d-multiarch.sh` (see trap 3 below), which also detects an
+already-patched script and does nothing. So a clean upstream checkout is all you need.
+
 ## Why it must build on the host, not the VM
 
 `vship.mk` compiles with `nvcc -arch=native`, which queries an **installed GPU** for its
