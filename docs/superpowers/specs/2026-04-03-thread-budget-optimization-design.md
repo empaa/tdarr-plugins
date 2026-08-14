@@ -1,5 +1,11 @@
 # Thread & Worker Budget Optimization
 
+> **HISTORICAL (2026-08-14).** Describes plugins removed in v3.0.0 — av1anEncode,
+> abAv1Encode, crfSearchEncode — and/or the `vsSource` VapourSynth path that went with them.
+> The measurements are still valid; the code they describe is no longer shipped. Kept because
+> the reasoning is reusable.
+
+
 ## Problem
 
 The current `calculateThreadBudget` in `encoderFlags.js` is very conservative. On a Ryzen 9 9950X (16c/32t, 64GB RAM), encoding hovers at ~40% CPU/RAM utilization. Files that could process in 3-4 hours take 10 hours.

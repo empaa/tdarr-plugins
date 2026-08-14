@@ -26,12 +26,12 @@ jobs:
         run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
 
       - name: Zip plugins
-        run: cd dist && zip -r "../tdarr-plugins-v${{ steps.version.outputs.version }}.zip" LocalFlowPlugins/
+        run: cd dist && zip -r "../tdarr-xav-v${{ steps.version.outputs.version }}.zip" LocalFlowPlugins/
 
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
-          files: tdarr-plugins-v${{ steps.version.outputs.version }}.zip
+          files: tdarr-xav-v${{ steps.version.outputs.version }}.zip
           generate_release_notes: true

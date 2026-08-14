@@ -1,5 +1,11 @@
 # Scene Detection Rework Implementation Plan
 
+> **HISTORICAL (2026-08-14).** Describes plugins removed in v3.0.0 — av1anEncode,
+> abAv1Encode, crfSearchEncode — and/or the `vsSource` VapourSynth path that went with them.
+> The measurements are still valid; the code they describe is no longer shipped. Kept because
+> the reasoning is reusable.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the fragile benchmark warmup (kill-polling, backup/restore, `--resume`) with av1an's `--sc-only` + `--scenes` flags, and run scene detection in parallel with CRF search in crfSearchEncode.

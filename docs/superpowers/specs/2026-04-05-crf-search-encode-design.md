@@ -1,5 +1,11 @@
 # crfSearchEncode Plugin Design
 
+> **HISTORICAL (2026-08-14).** Describes plugins removed in v3.0.0 — av1anEncode,
+> abAv1Encode, crfSearchEncode — and/or the `vsSource` VapourSynth path that went with them.
+> The measurements are still valid; the code they describe is no longer shipped. Kept because
+> the reasoning is reusable.
+
+
 ## Overview
 
 A hybrid two-phase encoding plugin that combines ab-av1's CRF search with av1an's multi-worker chunked encoding. Phase 1 uses `ab-av1 crf-search` to find a single CRF that meets a VMAF target. Phase 2 feeds that CRF into `av1an` for fast parallel encoding without per-chunk quality search.
