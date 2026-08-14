@@ -4,39 +4,50 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is this?
 
-AV1 encoding FlowPlugins for Tdarr, bundled with esbuild into self-contained single-file plugins.
+Tdarr FlowPlugins built around **[xav](https://github.com/emrakyz/xav) by emrakyz**, bundled with esbuild into self-contained single-file plugins. This repo contains no encoder code.
 
-- **av1anEncode** — scene-based chunked AV1 encoding via av1an (aomenc or SVT-AV1)
-- **abAv1Encode** — automatic VMAF-targeted CRF search via ab-av1 (SVT-AV1)
+The GitHub repo and npm package are named **`tdarr-xav`**; the local directory is still `tdarr-plugins` and must stay that way — Claude's memory, inbox and agent-runs are keyed to that path, as is the MemPalace wing.
+
+Four plugins ship:
+
+- **xavEncode** — scene-chunked AV1 via xav, per-scene SSIMULACRA2 target-quality search
+- **xavPipeEncode** — ffmpeg downscales and pipes Y4M into xav (4K → 1080p); xav has no resize of its own
+- **sanitizeFile** — pre-encode track filter/reorder/remux to MKV, original language via Radarr/Sonarr
+- **arrRename** — triggers Radarr/Sonarr to rename after Replace Original
 
 Shared modules in `src/shared/` are inlined by esbuild at build time. Each plugin in `dist/` is a single `index.js` with no external dependencies beyond Node builtins.
+
+**Retired in v3.0.0 (2026-08-14):** `av1anEncode`, `abAv1Encode`, `crfSearchEncode` and the five shared modules only they used (`downscale`, `encoderFlags`, `mezzanine`, `progressTracker`, `vsSource`). They needed a stack upstream images do not ship. Last commit containing them: tag **`legacy-encoders-final`**. Do not re-add them without a reason that survives that fact.
 
 ## Build
 
 ```bash
 npm install          # once
 npm run build        # bundle plugins to dist/
-npm run deploy       # build + copy to tdarr-av1 test instance
+npm run deploy       # build + copy to local test instance
 ```
 
 ## Project structure
 
-- `src/shared/` — shared modules (logger, processManager, encoderFlags, downscale, audioMerge, progressTracker)
+- `src/shared/` — shared modules (xav, logger, processManager, audioMerge, arrApi, pathMapper)
 - `src/<pluginName>/index.js` — plugin source, imports from `../shared/`
 - `dist/LocalFlowPlugins/<pluginName>/1.0.0/index.js` — bundled output (gitignored)
-- `build.sh` — esbuild bundler, `--deploy` copies to test instance
+- `build.sh` — esbuild bundler; discovers plugins by iterating `src/*/`, so adding or deleting a plugin directory needs no build change. `--deploy` copies to the test instance
 - `.github/workflows/release.yml` — builds + creates GitHub Release on push to main
 
 ## Runtime binary dependencies
 
-These binaries must exist on the Tdarr node at runtime (provided by the sibling `tdarr-av1` Docker images):
+All four plugins run on **stock upstream `ghcr.io/haveagitgat` images**. They call only:
 
-- `/usr/local/bin/av1an`
-- `/usr/local/bin/ab-av1`
-- `/usr/local/bin/ffmpeg`
+- `/usr/local/bin/ffmpeg`, `/usr/local/bin/ffprobe`
 - `/usr/bin/mkvmerge` (mkvtoolnix apt package; `/usr/local/bin/mkvmerge` does not exist — plugins' `findBin` checks both)
-- `/usr/local/bin/vspipe`
-- `/usr/local/share/vmaf/vmaf_v0.6.1.json`
+- `/usr/bin/script`
+
+The xav plugins additionally need the **xav binary mounted** (searched at `/usr/local/bin/xav`, then `/opt/xav/xav`, or set `xav Binary Path`), **GPU access** for the Vship SSIMULACRA2 metric, and `seccomp=unconfined` — without it the encode succeeds and the mux fails with `io_uring_setup failed`.
+
+## Testing
+
+`npm run test:unit` is the only stage that runs without a live Tdarr (36 tests, pure logic). Smoke and e2e need a server; see the Sibling Protocol note below for why the local one may not exist. **There is no automated coverage of a real xav encode** — xav is verified by live production runs, because a real harness needs the GPU host. Known gap, deliberately deferred.
 
 ## Environment
 
@@ -70,7 +81,9 @@ newer than your last session and fold anything relevant into your picture of cur
 
 ## Sibling Protocol
 
-This repo is part of a two-repo project. The sibling repo is at `../tdarr-av1` (Docker images with the AV1 encoding stack).
+The sibling repo at `../tdarr-av1` (Docker images with the AV1 encoding stack) was **deprecated and archived on 2026-08-14** — production moved to upstream Tdarr images, so the custom image no longer earns its keep. Its GHCR images stay published indefinitely, frozen.
+
+**What that means in practice:** the sibling is dormant, not deleted. Its agent may still be reachable via the inbox, but expect no component bumps, no image rebuilds, and no binary-contract changes to react to. Archived GitHub repos are read-only — landing anything there needs a manual unarchive/re-archive by Emil. Everything below still applies if the sibling is ever revived; the local checkout remains for its test instance and history.
 
 ### Inbox
 
