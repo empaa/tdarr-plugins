@@ -79,6 +79,40 @@ function categorizeStreams(streams) {
 }
 
 /**
+ * Pick the feature video track and name the bonus ones.
+ *
+ * Blu-ray remuxes ship extra video: "Harry Potter and the Chamber of Secrets"
+ * carries a 720x480 915 kbps "Commentary (PIP function)" track beside the
+ * 1920x1080 feature. Left in place, the choice falls to xav, and nothing
+ * downstream can catch a wrong one -- validateOutput skips dimensions because
+ * xav autocrops, the PIP runs the film's full length so the duration matches,
+ * and a 480p output sails through the size gate. Deciding it here makes the
+ * choice explicit, logged and testable, and leaves the encoder one stream.
+ *
+ * Ranked by picture size first: the feature is the big one, and stream ORDER is
+ * not a guarantee (which is what "first video stream" quietly assumed). The
+ * default flag breaks a size tie, then the lowest index, so the result is
+ * deterministic for any input.
+ *
+ * @param {Array} video - video entries from categorizeStreams
+ * @returns {{ keep: object|null, drop: Array }}
+ */
+function selectPrimaryVideo(video) {
+  if (!video || video.length === 0) return { keep: null, drop: [] };
+
+  const pixels = (v) => (Number(v.stream.width) || 0) * (Number(v.stream.height) || 0);
+  const isDefault = (v) => ((v.stream.disposition && v.stream.disposition.default) === 1 ? 1 : 0);
+
+  const ranked = video.slice().sort((a, b) => (
+    pixels(b) - pixels(a)
+    || isDefault(b) - isDefault(a)
+    || a.idx - b.idx
+  ));
+
+  return { keep: ranked[0], drop: ranked.slice(1).sort((a, b) => a.idx - b.idx) };
+}
+
+/**
  * Select the best audio track per wanted language.
  * @param {Array} audioTracks - from categorizeStreams
  * @param {string} originalLang - ISO 639-2 code (lowercase)
@@ -171,8 +205,9 @@ const details = () => ({
     'All-in-one pre-encode sanitizer. Determines the original language via',
     'Radarr/Sonarr (falls back to first audio track), keeps the best audio',
     'track per wanted language, filters subtitles, removes image streams',
-    '(cover art/thumbnails), reorders streams, and remuxes to MKV.',
-    'All in a single ffmpeg call.',
+    '(cover art/thumbnails), keeps only the feature video track (dropping',
+    'bonus video such as PIP commentary), reorders streams, and remuxes to',
+    'MKV. All in a single ffmpeg call.',
   ].join(' '),
   style: { borderColor: 'green' },
   tags: 'sanitize,audio,subtitle,remux,mkv,radarr,sonarr',
@@ -320,6 +355,18 @@ const plugin = async (args) => {
   const { video, audio, subtitle, image } = categorizeStreams(streams);
   log(`Streams: ${video.length} video, ${audio.length} audio, ${subtitle.length} sub, ${image.length} image`);
 
+  // Keep exactly one video track, so the encoder never has to choose.
+  const { keep: primaryVideo, drop: droppedVideo } = selectPrimaryVideo(video);
+  const selectedVideo = primaryVideo ? [primaryVideo] : [];
+  for (const v of droppedVideo) {
+    const t = (v.stream.tags && v.stream.tags.title) || '';
+    log(
+      `  dropping extra video: stream ${v.idx} ${v.stream.width}x${v.stream.height}`
+      + `${t ? ` "${t}"` : ''} -- keeping stream ${primaryVideo.idx} `
+      + `${primaryVideo.stream.width}x${primaryVideo.stream.height} as the feature`,
+    );
+  }
+
   // --- Step 3: Build keep-set ---
   const selectedAudio = originalLang
     ? selectAudio(audio, originalLang, additionalAudioLangs, keepCommentary)
@@ -341,6 +388,9 @@ const plugin = async (args) => {
   const ext = path.extname(filePath).toLowerCase();
   const isMkv = ext === '.mkv';
   const noImages = image.length === 0;
+  // A bonus video track makes the file dirty however tidy its audio is --
+  // passing it through untouched would hand the encoder both streams.
+  const videoMatch = selectedVideo.length === video.length;
   const audioMatch = selectedAudio.length === audio.length
     && selectedAudio.every((a, i) => audio[i] && a.idx === audio[i].idx);
   const subMatch = selectedSubs.length === subtitle.length
@@ -348,13 +398,13 @@ const plugin = async (args) => {
 
   // Verify stream order: all video indices must come before all audio,
   // and all audio before all subtitle.
-  const lastVideoIdx = video.length > 0 ? Math.max(...video.map((v) => v.idx)) : -1;
+  const lastVideoIdx = selectedVideo.length > 0 ? Math.max(...selectedVideo.map((v) => v.idx)) : -1;
   const firstAudioIdx = selectedAudio.length > 0 ? Math.min(...selectedAudio.map((a) => a.idx)) : Infinity;
   const lastAudioIdx = selectedAudio.length > 0 ? Math.max(...selectedAudio.map((a) => a.idx)) : -1;
   const firstSubIdx = selectedSubs.length > 0 ? Math.min(...selectedSubs.map((s) => s.idx)) : Infinity;
   const orderCorrect = lastVideoIdx < firstAudioIdx && lastAudioIdx < firstSubIdx;
 
-  if (isMkv && noImages && audioMatch && subMatch && orderCorrect) {
+  if (isMkv && noImages && videoMatch && audioMatch && subMatch && orderCorrect) {
     log('File already clean — no changes needed, passing through untouched');
 
     // Deliberately NOT staged into workDir. This used to hardlink-or-copy the
@@ -372,13 +422,13 @@ const plugin = async (args) => {
   }
 
   // --- Step 5: Build mkvmerge args and run ---
-  const videoIds = video.map((v) => v.idx).join(',');
+  const videoIds = selectedVideo.map((v) => v.idx).join(',');
   const audioIds = selectedAudio.map((a) => a.idx).join(',');
   const subIds = selectedSubs.map((s) => s.idx).join(',');
 
   // Track order: video → audio (original lang first) → subtitles (original lang first)
   const trackOrder = [
-    ...video.map((v) => `0:${v.idx}`),
+    ...selectedVideo.map((v) => `0:${v.idx}`),
     ...selectedAudio.map((a) => `0:${a.idx}`),
     ...selectedSubs.map((s) => `0:${s.idx}`),
   ].join(',');
@@ -397,7 +447,7 @@ const plugin = async (args) => {
     filePath,
   ];
 
-  const totalStreams = video.length + selectedAudio.length + selectedSubs.length;
+  const totalStreams = selectedVideo.length + selectedAudio.length + selectedSubs.length;
   log(`Running mkvmerge with ${totalStreams} tracks...`);
 
   const updateWorker = (fields) => {
@@ -451,6 +501,7 @@ module.exports = {
   plugin,
   // exported for unit tests
   categorizeStreams,
+  selectPrimaryVideo,
   selectAudio,
   selectSubtitles,
   isCommentary,

@@ -67,9 +67,17 @@ turns steeply non-linear: one grain-heavy film needed 100.5% of its source at SS
 
 All-in-one pre-encode sanitizer, in a single ffmpeg call. It determines the original language
 via Radarr/Sonarr (falling back to the first audio track), keeps the best audio track per
-wanted language, filters subtitles, strips image streams (cover art and thumbnails), reorders
-streams and remuxes to MKV. "Best" is decided by channel count, with codec quality
-(TrueHD → DTS-HD MA → FLAC → DTS → E-AC3 → AC3 → AAC) breaking ties.
+wanted language, filters subtitles, strips image streams (cover art and thumbnails), keeps
+only the feature video track, reorders streams and remuxes to MKV. "Best" is decided by
+channel count, with codec quality (TrueHD → DTS-HD MA → FLAC → DTS → E-AC3 → AC3 → AAC)
+breaking ties.
+
+Blu-ray remuxes sometimes ship a second video track — a Harry Potter remux carries a 720x480
+"Commentary (PIP function)" beside the 1920x1080 feature. Only one video track is kept, chosen
+by picture size, then the default flag, then stream order. Deciding it here leaves the encoder
+a single stream instead of a choice nothing downstream could check: `xavEncode` skips the
+dimension comparison on purpose because xav autocrops, and a PIP track runs the film's full
+length, so a wrong pick would pass every guard and silently ship a 480p movie.
 
 Run it before an encode node so the encoder only ever sees the tracks you intend to keep.
 

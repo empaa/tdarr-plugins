@@ -436,7 +436,204 @@ function crfSpreadNamesTheHighestCrfChunks() {
   assert(summariseCrfSpread([]) === null, 'no chunks -> no summary');
 }
 
+// Regression, "Harry Potter and the Chamber of Secrets" (job YlW6hqiBU,
+// 2026-08-15): a complete, in-band 1834-chunk encode was thrown away by
+//   duration 9655.15s differs from source 9658.69s by 3.54s
+// because the source's DTS-X track runs 3.543 s past its last video frame.
+// sourceVideoDuration could not save it. That earlier fix assumed matroska
+// carries the video length in tags.DURATION, but this remux has no statistics
+// tags at all, and for matroska ffprobe reports the SEGMENT duration as EVERY
+// stream's `duration` -- so videoStream.duration read 9658.688, exactly the
+// container value the fix was written to avoid, and won on the first branch.
+//
+// Container metadata does not contain the video track's length. Measure it:
+// read the tail of the video stream and take the last packet's end time.
+async function videoTailEndTimeReadsTheRealStreamEnd() {
+  const { videoTailEndTime } = require(path.join(SRC, 'shared', 'xav.js'));
+
+  // Verbatim ffprobe output from that file (pts_time,dts_time,duration_time).
+  // VC-1 packets carry no pts at all -- dts is the only usable timestamp, so a
+  // parser that reads pts and gives up returns nothing on this whole class.
+  const vc1Tail = [
+    'N/A,9655.020000,0.041000',
+    'N/A,9655.062000,0.041000',
+    'N/A,9655.104000,0.041000',
+  ];
+  assert(Math.abs(videoTailEndTime(vc1Tail) - 9655.145) < 0.001,
+    `VC-1 tail must end at 9655.145, got ${videoTailEndTime(vc1Tail)}`);
+
+  // With B-frames the last packet in decode order is not the last displayed
+  // frame, so take the maximum end time rather than the final line.
+  const reordered = [
+    '9655.020000,9654.980000,0.041000',
+    '9655.104000,9655.020000,0.041000',
+    '9655.062000,9655.062000,0.041000',
+  ];
+  assert(Math.abs(videoTailEndTime(reordered) - 9655.145) < 0.001,
+    `reordered tail must use the max pts, got ${videoTailEndTime(reordered)}`);
+
+  // pts wins over dts when both are present.
+  assert(Math.abs(videoTailEndTime(['120.100000,119.000000,0.041000']) - 120.141) < 0.001,
+    'pts preferred over dts');
+
+  // Nothing usable must be 0 -- the caller falls back to metadata, it must not
+  // invent a duration and fail a good encode on it.
+  assert(videoTailEndTime([]) === 0, 'no packets -> 0');
+  assert(videoTailEndTime(['N/A,N/A,N/A', '', 'garbage']) === 0, 'unusable lines -> 0');
+  assert(videoTailEndTime(['N/A,9655.104000,N/A']) === 9655.104,
+    'missing duration_time still yields the timestamp');
+}
+
+// The measurement wraps ffprobe, so it must degrade to the metadata answer
+// rather than failing the encode when the probe tells us nothing.
+async function measureVideoDurationFallsBackToMetadata() {
+  const { measureVideoDuration } = require(path.join(SRC, 'shared', 'xav.js'));
+
+  const calls = [];
+  const pm = {
+    spawnAsync: async (bin, args, opts) => {
+      calls.push({ bin, args });
+      ['N/A,9655.020000,0.041000', 'N/A,9655.104000,0.041000'].forEach(opts.onLine);
+      return 0;
+    },
+  };
+  const measured = await measureVideoDuration('/in.mkv', pm, 9658.688);
+  assert(Math.abs(measured - 9655.145) < 0.001, `measured tail, got ${measured}`);
+
+  // The seek window must be anchored behind the container duration, or the
+  // interval starts past the last video packet and reads nothing.
+  const interval = calls[0].args[calls[0].args.indexOf('-read_intervals') + 1];
+  assert(/^9[0-9.]+%\+/.test(interval), `interval must seek near the end, got ${interval}`);
+  assert(parseFloat(interval) < 9655.104,
+    `interval must start before the last video packet, got ${interval}`);
+
+  // A probe that returns nothing (subtitle running minutes past the video, or a
+  // broken ffprobe) yields 0 so the caller keeps the metadata value.
+  const silent = { spawnAsync: async () => 0 };
+  assert(await measureVideoDuration('/in.mkv', silent, 9658.688) === 0,
+    'a silent probe must yield 0, not a wrong number');
+
+  const thrower = { spawnAsync: async () => { throw new Error('ffprobe missing'); } };
+  assert(await measureVideoDuration('/in.mkv', thrower, 9658.688) === 0,
+    'a throwing probe must not propagate -- validation is not worth failing an encode over');
+}
+
+// End to end on the numbers from the real job: with the measured video length
+// the encode validates, with the container length it does not.
+async function harryPotterEncodeValidatesAgainstMeasuredDuration() {
+  const { validateOutput } = require(path.join(SRC, 'shared', 'xav.js'));
+  const output = {
+    exists: true, bytes: 7.7 * 1024 * 1024 * 1024, width: 1920, height: 1080,
+    codec: 'av1', frames: 0, duration: 9655.15,
+  };
+
+  const measured = validateOutput(output, { frames: 0, duration: 9655.145 }, {});
+  assert(measured.ok === true,
+    `the real encode must validate against the measured video duration, got: ${
+      measured.problems.join(' | ')}`);
+
+  const container = validateOutput(output, { frames: 0, duration: 9658.688 }, {});
+  assert(container.ok === false, 'the container duration is what failed the job');
+}
+
+// Blu-ray remuxes ship bonus video tracks. "Harry Potter and the Chamber of
+// Secrets" carries two: 1920x1080 VC-1 at 17316 kbps (default), and a 720x480
+// 915 kbps "Commentary (PIP function)" track. Everything downstream assumed the
+// primary was simply the FIRST video stream -- xavEncode reads sourceWidth off
+// `streams.find(codec_type === 'video')`, both probes use `-select_streams v:0`,
+// and which one xav itself encoded was never checked at all. A wrong pick would
+// ship a 480p movie silently: validateOutput skips dimensions on purpose (xav
+// autocrops), the width guard only fires on the scaled path and only for TOO
+// WIDE, the PIP runs the film's full length so duration matches, and an 80%
+// size gate passes trivially on a tiny output.
+async function primaryVideoIsPickedByPictureNotByOrder() {
+  const { selectPrimaryVideo } = require(path.join(SRC, 'sanitizeFile', 'index.js'));
+
+  const main = { idx: 0, stream: { width: 1920, height: 1080, disposition: { default: 1 } } };
+  const pip = {
+    idx: 1,
+    stream: {
+      width: 720,
+      height: 480,
+      disposition: { default: 0 },
+      tags: { title: 'Commentary (PIP function) / VC-1 Video / 915 kbps / 480p' },
+    },
+  };
+
+  const real = selectPrimaryVideo([main, pip]);
+  assert(real.keep.idx === 0, `must keep the 1080p feature, got stream ${real.keep.idx}`);
+  assert(real.drop.length === 1 && real.drop[0].idx === 1, 'must drop the PIP track');
+
+  // The whole point: order must not decide it. Nothing guarantees the feature
+  // is muxed first, and "first video stream" is what was relied on before.
+  const reversed = selectPrimaryVideo([{ ...pip, idx: 0 }, { ...main, idx: 1 }]);
+  assert(reversed.keep.idx === 1,
+    `picture size must beat stream order, got stream ${reversed.keep.idx}`);
+
+  // Same resolution: the default flag is the tie-break.
+  const sameSize = selectPrimaryVideo([
+    { idx: 0, stream: { width: 1920, height: 1080, disposition: { default: 0 } } },
+    { idx: 1, stream: { width: 1920, height: 1080, disposition: { default: 1 } } },
+  ]);
+  assert(sameSize.keep.idx === 1, `default flag must break a size tie, got ${sameSize.keep.idx}`);
+
+  // Nothing to distinguish them: lowest index, deterministically.
+  const identical = selectPrimaryVideo([
+    { idx: 3, stream: { width: 1920, height: 1080 } },
+    { idx: 1, stream: { width: 1920, height: 1080 } },
+  ]);
+  assert(identical.keep.idx === 1, `ties resolve to the lowest index, got ${identical.keep.idx}`);
+
+  // The ordinary case must stay a no-op.
+  const single = selectPrimaryVideo([main]);
+  assert(single.keep.idx === 0 && single.drop.length === 0, 'one video stream drops nothing');
+  assert(selectPrimaryVideo([]).keep === null, 'no video streams must not throw');
+}
+
+// A second video track means the file is NOT clean, however tidy its audio is.
+// Passing it through untouched hands xav both streams and puts the choice back
+// inside the encoder, which is exactly what this moves out of it.
+async function extraVideoTrackMeansNotClean() {
+  injectProcessManagerStub();
+  const { plugin } = require(path.join(SRC, 'sanitizeFile', 'index.js'));
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sanitize-pip-'));
+  const libDir = path.join(tmp, 'library');
+  const workDir = path.join(tmp, 'work');
+  fs.mkdirSync(libDir); fs.mkdirSync(workDir);
+  const srcFile = path.join(libDir, 'Chamber of Secrets (2002).mkv');
+  fs.writeFileSync(srcFile, 'x'.repeat(2048));
+
+  const res = await plugin({
+    inputFileObj: {
+      _id: srcFile,
+      file: srcFile,
+      ffProbeData: {
+        streams: [
+          { index: 0, codec_type: 'video', codec_name: 'vc1', width: 1920, height: 1080, disposition: { default: 1 } },
+          { index: 1, codec_type: 'video', codec_name: 'vc1', width: 720, height: 480, disposition: { default: 0 }, tags: { title: 'Commentary (PIP function)' } },
+          { index: 2, codec_type: 'audio', codec_name: 'dts', channels: 8, tags: { language: 'eng' } },
+        ],
+      },
+    },
+    workDir,
+    inputs: { audio_language: 'eng' },
+    jobLog: () => {},
+    variables: {},
+  });
+
+  assert(res.outputNumber === 1,
+    `a file with a bonus video track must be remuxed, not passed through (got port ${res.outputNumber})`);
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
 const TESTS = [
+  ['sanitizeFile: primary video picked by picture, not order', primaryVideoIsPickedByPictureNotByOrder],
+  ['sanitizeFile: an extra video track means not clean', extraVideoTrackMeansNotClean],
+  ['xav: video tail end time reads the real stream end', videoTailEndTimeReadsTheRealStreamEnd],
+  ['xav: measured duration falls back to metadata', measureVideoDurationFallsBackToMetadata],
+  ['xav: Harry Potter encode validates on measured duration',
+    harryPotterEncodeValidatesAgainstMeasuredDuration],
   ['processManager: killAll spares later children', killAllDoesNotReachLaterChildren],
   ['xav: target-hit summary separates failure modes', targetHitSummarySeparatesFailureModes],
   ['xav: source duration comes from the video stream', sourceDurationComesFromVideoStream],
