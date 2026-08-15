@@ -219,6 +219,7 @@ const plugin = async (args) => {
   const {
     buildXavArgs, buildPipeFfmpegArgs, filterEncoderParams, resolveParamSet, createXavTracker,
     sourceVideoDuration, validateOutput, detectCrfPinning, logTargetHit, probeOutput,
+    measureVideoDuration,
     selectEncodePath, RESOLUTION_PRESETS,
     readChunkReport, logCrfSpread, createStderrCollector,
   } = require('../shared/xav');
@@ -614,9 +615,22 @@ const plugin = async (args) => {
   // 42 minutes of ffprobe on Avatar looked like a stalled mux (job yf2quTpnG).
   updateWorker({ status: 'Validating output' });
   const probe = await probeOutput(videoOnlyPath, pm, dbg);
+  // What we are about to validate is VIDEO-ONLY, so it has to be compared with
+  // the source's VIDEO length. Container metadata does not carry that on
+  // matroska -- measure it, and keep the metadata answer only as a fallback.
+  const measuredDuration = await measureVideoDuration(inputPath, pm, sourceDuration, dbg);
+  const compareDuration = measuredDuration || sourceDuration;
+  if (measuredDuration && Math.abs(measuredDuration - sourceDuration) > 0.5) {
+    jobLog(
+      `[xav] source video ends at ${measuredDuration.toFixed(2)}s, `
+      + `${(sourceDuration - measuredDuration).toFixed(2)}s before the container's `
+      + `${sourceDuration.toFixed(2)}s -- another track outruns the picture. `
+      + 'Validating against the measured video length.',
+    );
+  }
   // Frame count must match on both paths; the scale filter changes dimensions,
   // not count.
-  const verdict = validateOutput(probe, { frames: sourceFrames, duration: sourceDuration }, {});
+  const verdict = validateOutput(probe, { frames: sourceFrames, duration: compareDuration }, {});
   if (!verdict.ok) {
     throw new Error(`xav output failed validation: ${verdict.problems.join('; ')}`);
   }
