@@ -49,8 +49,8 @@ const details = () => ({
       defaultValue: '74.8-75.2',
       inputUI: { type: 'text' },
       tooltip: [
-        'Target SSIMULACRA2 band. Tier ladder in use: top 74.8-75.2, mid 69.8-70.2,',
-        'low 64.8-65.2 -- pair each with the matching CRF Range ceiling (30/40/50).',
+        'Target SSIMULACRA2 band. Tier ladder in use: top 74.8-75.2, mid 70.8-71.2,',
+        'low 66.8-67.2 -- pair each with the matching CRF Range ceiling (30/40/50).',
         'At the top tier that is 63% of source on grain-heavy film, 47% on',
         'clean 1080p and 16% on high-motion digital.',
         'IMPORTANT: the score is not a quality guarantee on flat, low-detail content',
