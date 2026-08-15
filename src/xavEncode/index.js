@@ -49,10 +49,17 @@ const details = () => ({
       defaultValue: '74.8-75.2',
       inputUI: { type: 'text' },
       tooltip: [
-        'Target SSIMULACRA2 band. Tier targets: top 74.8-75.2, mid 70.8-71.2,',
-        'low 66.8-67.2. Measured across 28 encodes, 2026-08-13/14.',
+        'Target SSIMULACRA2 band. Tier ladder in use: top 74.8-75.2, mid 69.8-70.2,',
+        'low 64.8-65.2 -- pair each with the matching CRF Range ceiling (30/40/50).',
         'At the top tier that is 63% of source on grain-heavy film, 47% on',
         'clean 1080p and 16% on high-motion digital.',
+        'IMPORTANT: the score is not a quality guarantee on flat, low-detail content',
+        '(skies, fades, gradients, logos over black). There the metric saturates --',
+        'measured 0.6 points per CRF step against a normal 1.0-1.4 -- so the search',
+        'runs to the CRF ceiling and still reports an in-band score for a picture with',
+        'visible grid-aligned blocking. On "Anyone but You" a blocked frame scored 76.93',
+        'at PSNR 65.8 dB. The ceiling, not this target, is what sets quality on that',
+        'content, which is why it is tiered too.',
         'Do not raise it much further: SSIMU2 79.67 measures as VMAF 98.5, past',
         'the VMAF 95 that reads as visually lossless, and above ~76 the cost',
         'curve turns steeply non-linear because the metric scores against the',
@@ -88,14 +95,28 @@ const details = () => ({
       label: 'CRF Range',
       name: 'crf_range',
       type: 'string',
-      defaultValue: '5-63',
+      defaultValue: '5-30',
       inputUI: { type: 'text' },
       tooltip: [
-        'CRF floor-ceiling the target-quality search may use. Keep it WIDE:',
-        'a run whose chunks all pin at a bound is a fixed-CRF encode wearing a',
-        'target-quality costume, and the plugin will warn when that happens.',
-        'Measured mean CRF ranges from ~8 on demanding content at the top tier to',
-        '~41 on easy content at the low tier, so 10-50 is too narrow at both ends.',
+        'CRF floor-ceiling the target-quality search may use. Tier ladder in use:',
+        'top 5-30, mid 10-40, low 10-50, matching the target ladder above.',
+        'The CEILING is the important half, and it is deliberately tight -- an earlier',
+        'default of 5-63 was wrong. On flat content SSIMULACRA2 saturates, so the search',
+        'climbs to whatever ceiling it is given and reports a healthy score; at CRF 45-50',
+        'that content comes back with visible grid-aligned blocking, measured 3.7x the',
+        'unencoded reference at 50 against 1.4x at 33.',
+        'Capping it is close to free because the chunks it catches are long, flat and',
+        'byte-cheap: measured on two unrelated films (4K HDR downscaled via the hdr fork,',
+        'and a grain-heavy 1080p remux on mainline), 50 -> 30 cost +0.6% total size while',
+        'putting +17.5% into the affected regions. 11-15% of chunks pin at the ceiling and',
+        'they are ~5% of the bytes.',
+        'The ceiling is tiered rather than fixed because the metric cannot distinguish',
+        'those chunks at all -- with one ceiling for every tier they would be encoded',
+        'identically regardless of target, so the ceiling is the only lever the tier',
+        'system has on them.',
+        'The floor matters less but keep it at 5 on the top tier: demanding content',
+        'reached CRF 5.25 there (job M6el8sA4t). A floor that is too high shows up as',
+        'chunks pinned at the floor still missing the target, which the log warns about.',
       ].join(' '),
     },
     {
@@ -211,7 +232,7 @@ const plugin = async (args) => {
   const targetQuality = String(inputs.target_quality || '74.8-75.2');
   const tqUnavailableAction = String(inputs.tq_unavailable_action || 'fail');
   const tqMode = String(inputs.tq_mode || 'mean');
-  const crfRange = String(inputs.crf_range || '5-63');
+  const crfRange = String(inputs.crf_range || '5-30');
   const preset = Number(inputs.preset) || 6;
   const workers = Number(inputs.workers) || 2;
   const vship = Number(inputs.vship) || 1;
@@ -575,7 +596,15 @@ const plugin = async (args) => {
       jobLog(
         `[xav] WARNING: all ${pinning.total} chunks pinned at the CRF ${pinning.bound} `
         + `(${pinning.value}). The target-quality search had nowhere to go, so this is `
-        + `effectively a fixed-CRF encode. Widen the CRF range or change the target.`,
+        + 'effectively a fixed-CRF encode.'
+        + (pinning.bound === 'ceiling'
+          // Ceilings are deliberately tight now (see the CRF Range tooltip), so a
+          // ceiling pin is only a problem if EVERY chunk hit it -- that means the
+          // whole file was easier than the tier assumes, not that the cap is wrong.
+          ? ' Every chunk hitting the CEILING means this file is easier than its tier '
+            + 'assumes -- move it to a lower tier rather than raising the ceiling, which '
+            + 'is what protects flat content from blocking.'
+          : ' Lower the CRF floor or raise the target.'),
       );
     }
   }

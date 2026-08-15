@@ -462,7 +462,7 @@ const TESTS = [
   ['xav: validation allows autocropped dimensions', xavValidationAllowsAutocroppedDimensions],
   ['xav: validation catches frame drift', xavValidationCatchesFrameDrift],
   ['xav: detects CRF pinning at both bounds', xavDetectsCrfPinning],
-  ['xav: CRF range spans both measured extremes', xavCrfRangeIsWideEnoughForBothEnds],
+  ['xav: default CRF ceiling stays out of the blocking regime', xavDefaultCrfCeilingStaysOutOfTheBlockingRegime],
   ['xav: argv is video-only and carries TQ', xavArgsAreVideoOnlyAndCarryTq],
   ['xav: pipe argv keeps input, ffmpeg scales', xavPipeArgsKeepInputAndScale],
   ['xav: strips params xav rejects outright', xavFiltersParamsXavRejects],
@@ -828,18 +828,26 @@ async function xavDetectsCrfPinning() {
   assert(healthy.pinned === false, 'a converged spread must not be flagged as pinned');
 }
 
-async function xavCrfRangeIsWideEnoughForBothEnds() {
+async function xavDefaultCrfCeilingStaysOutOfTheBlockingRegime() {
   const { details } = require(path.join(SRC, 'xavEncode', 'index.js'));
   const input = details().inputs.find((i) => i.name === 'crf_range');
   assert(input, 'crf_range input must exist');
   const [lo, hi] = String(input.defaultValue).split('-').map(Number);
 
-  // Measured mean CRF spans ~8 (demanding content, top tier) to ~41 (easy
-  // content, low tier). A range that excludes either end silently converts
-  // target-quality into fixed-CRF: chunks pin at the bound and the search
-  // measures nothing. 10-50 was the old default and fails at both ends.
-  assert(lo <= 5, `CRF floor ${lo} is too high -- demanding content reaches ~8`);
-  assert(hi >= 60, `CRF ceiling ${hi} is too low -- easy content reaches ~41 and beyond`);
+  // This assertion is the inverse of the one it replaces, which demanded hi >= 60.
+  // That was wrong, and the measurement that overturned it (2026-08-15, "Anyone but
+  // You" 4K HDR, job Zn5dE_yQq) is worth restating: on flat content SSIMULACRA2
+  // saturates at ~0.6 points per CRF step, so the search climbs to whatever ceiling
+  // it is handed and still reports an in-band score. Absolute block-edge excess at
+  // the flat frame, against 0.029-0.041 for the unencoded reference:
+  //     crf 20 -> 0.037   crf 33 -> 0.039   crf 36 -> 0.047
+  //     crf 42 -> 0.080   crf 45 -> 0.062   crf 50 -> 0.105
+  // A ceiling of 50 therefore ships visible grid-aligned blocking on any flat scene,
+  // and it buys almost nothing: capping 50 -> 30 cost +0.6% total size on two
+  // unrelated films. The top-tier default must stay out of that regime.
+  assert(lo <= 5, `CRF floor ${lo} is too high -- demanding content reached 5.25 at the top tier`);
+  assert(hi <= 33,
+    `CRF ceiling ${hi} is in the blocking regime -- flat content blocks visibly above ~33`);
 }
 
 async function xavArgsAreVideoOnlyAndCarryTq() {
