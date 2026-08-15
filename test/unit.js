@@ -328,6 +328,114 @@ async function targetHitSummarySeparatesFailureModes() {
   assert(summariseTargetHit([], '79.8-80.2', '5-63') === null, 'no chunks -> no summary');
 }
 
+// Verbatim from a real xav run (22 s 4K HDR clip, 2026-08-15). The point of the
+// fixture is the gap between the final probe and the one before it: the TUI shows
+// chunk 0 as "crf 32.75 / 75.47", but 75.468 belongs to crf 32.00 -- the truth is
+// 32.75 -> 74.974. Anything reading the display is a probe behind.
+const REAL_TQ_JSON = JSON.stringify({
+  chunks_ssimulacra2: [
+    {
+      id: 0,
+      probes: [
+        { crf: 27.50, score: 77.638, kbs: 1148 },
+        { crf: 32.00, score: 75.468, kbs: 906 },
+        { crf: 32.75, score: 74.974, kbs: 871 },
+        { crf: 39.00, score: 70.773, kbs: 612 },
+      ],
+      final: { crf: 32.75, score: 74.974, kbs: 871 },
+    },
+    {
+      id: 1,
+      probes: [
+        { crf: 27.50, score: 80.350, kbs: 693 },
+        { crf: 36.75, score: 74.857, kbs: 419 },
+        { crf: 39.00, score: 73.662, kbs: 373 },
+      ],
+      final: { crf: 36.75, score: 74.857, kbs: 419 },
+    },
+  ],
+  average_probes: 3.5,
+  in_range: 2,
+  out_range: 0,
+});
+
+function chunkReportCarriesFinalProbeNotTheDisplayedOne() {
+  const { parseChunkReport, chunkReportPath, readChunkReport } = require(
+    path.join(SRC, 'shared', 'xav.js'));
+
+  const r = parseChunkReport(REAL_TQ_JSON);
+  assert(r && r.chunks.length === 2, 'both chunks parsed');
+  assert(r.inRange === 2 && r.outRange === 0, 'range counts carried through');
+
+  const c0 = r.chunks.find((c) => c.chunk === 0);
+  assert(Math.abs(c0.crf - 32.75) < 1e-6, `chunk 0 final crf 32.75, got ${c0.crf}`);
+  // The whole reason this function exists.
+  assert(Math.abs(c0.score - 74.974) < 1e-6,
+    `chunk 0 must report its FINAL score 74.974, not the displayed 75.468 -- got ${c0.score}`);
+  assert(c0.probes === 4, `probe count preserved, got ${c0.probes}`);
+
+  // Sorted worst-score-first, matching what summariseTargetHit expects.
+  assert(r.chunks[0].score <= r.chunks[1].score, 'chunks sorted worst-score-first');
+
+  // Path derivation: the report sits beside the input with the extension swapped.
+  const p = chunkReportPath('/temp/workDir-x/Some Movie.staged.mkv');
+  assert(p === '/temp/workDir-x/Some Movie.staged.json', `unexpected report path: ${p}`);
+
+  // A fixed-CRF run writes no report at all, and that must be survivable.
+  assert(readChunkReport('/nonexistent/nope.mkv', () => {}) === null,
+    'a missing report must return null, not throw');
+  assert(parseChunkReport('not json at all') === null, 'garbage must not throw');
+  assert(parseChunkReport('{"chunks_ssimulacra2":[]}') === null, 'no chunks -> null');
+}
+
+function ffmpegStderrCollapsesToCountedMessages() {
+  const { createStderrCollector, normaliseFfmpegLine } = require(
+    path.join(SRC, 'shared', 'xav.js'));
+
+  // Same complaint from two decoder instances must collapse to one entry.
+  assert(normaliseFfmpegLine('[hevc @ 0x56431f4f7b00] PPS changed between slices.')
+    === normaliseFfmpegLine('[hevc @ 0xdeadbeef] PPS changed between slices.'),
+    'instance addresses must not split identical messages');
+
+  const c = createStderrCollector();
+  // Arrives in arbitrary chunks, splitting mid-line -- as a pipe actually does.
+  c.push('[hevc @ 0x1] PPS changed between slices.\n[hevc @ 0x2] PPS chan');
+  c.push('ged between slices.\n[hevc @ 0x1] Skipping invalid undecodable NALU: 9\n');
+  c.push('[hevc @ 0x1] Multiple Dolby Vision RPUs found in one AU. Skipping previous.');
+
+  const { rows, distinct } = c.summary();
+  assert(distinct === 3, `three distinct messages, got ${distinct}`);
+  assert(rows[0].includes('PPS changed between slices') && rows[0].includes('(x2)'),
+    `the repeated message must lead with its count, got: ${rows[0]}`);
+  // The trailing line had no newline; it must not be lost.
+  assert(rows.some((r) => r.includes('Dolby Vision RPUs')),
+    'a final line without a trailing newline must still be reported');
+
+  const empty = createStderrCollector().summary();
+  assert(empty.rows.length === 0, 'silence produces no log lines');
+}
+
+function crfSpreadNamesTheHighestCrfChunks() {
+  const { summariseCrfSpread } = require(path.join(SRC, 'shared', 'xav.js'));
+
+  // A run where the blocky chunks are the HIGH-crf ones that scored fine -- the
+  // failure mode summariseTargetHit cannot see, because nothing is out of band.
+  const stats = [
+    { chunk: 0, crf: 12.5, score: 75.0 },
+    { chunk: 1, crf: 16.0, score: 75.1 },
+    { chunk: 2, crf: 20.0, score: 74.9 },
+    { chunk: 3, crf: 32.75, score: 74.97 },
+    { chunk: 4, crf: 36.75, score: 74.86 },
+  ];
+  const s = summariseCrfSpread(stats, 2);
+  assert(Math.abs(s.min - 12.5) < 1e-6, `min crf, got ${s.min}`);
+  assert(Math.abs(s.max - 36.75) < 1e-6, `max crf, got ${s.max}`);
+  assert(s.highest.length === 2, 'topN respected');
+  assert(s.highest[0].chunk === 4 && s.highest[1].chunk === 3,
+    'highest-CRF chunks listed highest-first');
+  assert(summariseCrfSpread([]) === null, 'no chunks -> no summary');
+}
+
 const TESTS = [
   ['processManager: killAll spares later children', killAllDoesNotReachLaterChildren],
   ['xav: target-hit summary separates failure modes', targetHitSummarySeparatesFailureModes],
@@ -370,6 +478,9 @@ const TESTS = [
   ['xav: mux takes video only from the encode, no duplicate streams', muxTakesVideoOnlyFromEncode],
   ['xavEncode: stages input from outside workDir', xavEncodeStagesInputFromOutsideWorkDir],
   ['xavEncode: survives EPIPE when xav closes the pipe first', xavEncodeSurvivesEpipeOnTheScaledPipe],
+  ['xav: chunk report carries the final probe, not the displayed one', chunkReportCarriesFinalProbeNotTheDisplayedOne],
+  ['xav: ffmpeg stderr collapses to counted messages', ffmpegStderrCollapsesToCountedMessages],
+  ['xav: CRF spread names the highest-CRF chunks', crfSpreadNamesTheHighestCrfChunks],
 ];
 
 // The inverse of the old contract. sanitizeFile used to hardlink-or-copy every

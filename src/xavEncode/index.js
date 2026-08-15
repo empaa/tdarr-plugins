@@ -199,6 +199,7 @@ const plugin = async (args) => {
     buildXavArgs, buildPipeFfmpegArgs, filterEncoderParams, resolveParamSet, createXavTracker,
     sourceVideoDuration, validateOutput, detectCrfPinning, logTargetHit, probeOutput,
     selectEncodePath, RESOLUTION_PRESETS,
+    readChunkReport, logCrfSpread, createStderrCollector,
   } = require('../shared/xav');
 
   const inputs = args.inputs || {};
@@ -342,6 +343,9 @@ const plugin = async (args) => {
       `#!/usr/bin/env bash\nexec ${shellQuote(xavBin)} ${xavArgs.map(shellQuote).join(' ')}\n`,
       { mode: 0o755 },
     );
+    // Job log, not just av1-debug.log -- same reason as the scaled path: workDir
+    // is gone by the time anyone needs to know what was run.
+    jobLog(`[xav] xav: ${xavBin} ${xavArgs.join(' ')}`);
     dbg(`launcher: ${fs.readFileSync(launcherPath, 'utf8').trim()}`);
 
     return pm.spawnAsync('/usr/bin/script', ['-qec', launcherPath, '/dev/null'], {
@@ -375,8 +379,13 @@ const plugin = async (args) => {
   // zero.
   const runPiped = async () => {
     const ffmpegArgs = buildPipeFfmpegArgs({ inputPath, resolution: maxResolution });
-    dbg(`ffmpeg: ${ffmpegBin} ${ffmpegArgs.join(' ')}`);
-    dbg(`xav:    ${xavBin} ${xavArgs.join(' ')}`);
+    // The resolved argv belongs in the JOB LOG, not only in av1-debug.log.
+    // av1-debug.log lives in workDir and dies with it, so by the time anyone asks
+    // "what exactly did we run on that file?" the answer is gone -- which is
+    // precisely the question that came up diagnosing the 4K blocking on
+    // 2026-08-15. It is two lines per job.
+    jobLog(`[xav] ffmpeg: ${ffmpegBin} ${ffmpegArgs.join(' ')}`);
+    jobLog(`[xav] xav:    ${xavBin} ${xavArgs.join(' ')}`);
 
     return new Promise((resolve) => {
       const ff = cp.spawn(ffmpegBin, ffmpegArgs, {
@@ -423,12 +432,28 @@ const plugin = async (args) => {
 
       ff.stdout.pipe(xav.stdin);
 
-      let ffErr = '';
-      ff.stderr.on('data', (d) => { ffErr += d.toString(); });
+      const ffErr = createStderrCollector();
+      ff.stderr.on('data', (d) => ffErr.push(d.toString()));
       // ffmpeg dying leaves xav waiting on a pipe that will never deliver.
       ff.on('close', (code) => {
+        // Report what the decoder said REGARDLESS of exit status. The old code
+        // only logged on a non-zero exit, which is backwards: an ffmpeg that
+        // complains about every frame and still exits 0 is the case worth
+        // hearing about, and it is the case that actually happens -- the "Anyone
+        // but You" DV source produces "PPS changed between slices", "Skipping
+        // invalid undecodable NALU" and "Multiple Dolby Vision RPUs found in one
+        // AU" on a clean exit (measured 2026-08-15). Production had been
+        // discarding all of it.
+        const { rows, distinct, dropped } = ffErr.summary();
+        if (rows.length) {
+          jobLog(
+            `[ffmpeg] exited ${code} with ${distinct} distinct message(s)`
+            + (dropped ? ` (+${dropped} beyond the cap)` : '') + ':',
+          );
+          for (const r of rows) jobLog(`[ffmpeg]   ${r}`);
+        }
         if (code !== 0) {
-          jobLog(`[ffmpeg] exited ${code}: ${ffErr.trim().split('\n').slice(-3).join(' | ')}`);
+          jobLog(`[ffmpeg] non-zero exit ${code} -- closing xav's stdin`);
           try { xav.stdin.end(); } catch (_) {}
         }
       });
@@ -479,8 +504,41 @@ const plugin = async (args) => {
     );
   }
 
-  const scores = tracker.getChunkScores();
-  const crfs = tracker.getChunkCrfs();
+  // Prefer xav's own report over the TUI the tracker scrapes. The TUI pairs the
+  // CRF being encoded with the PREVIOUS probe's score, so every scraped pair is
+  // one probe stale and the delivered chunk's score is never shown at all
+  // (measured 2026-08-15 -- see readChunkReport in shared/xav.js). The tracker
+  // stays as the fallback: it is all we have on a fixed-CRF run, and it is what
+  // drives the live dashboard either way.
+  const report = readChunkReport(inputPath, dbg);
+  const stats = report ? report.chunks : tracker.getChunkStats();
+  const scores = stats.map((s) => s.score);
+  const crfs = stats.map((s) => s.crf);
+  if (report) {
+    jobLog(
+      `[xav] chunk report: ${report.chunks.length} chunks from xav's own JSON `
+      + `(${report.averageProbes.toFixed(1)} probes/chunk, `
+      + `${report.inRange} in range, ${report.outRange} out)`,
+    );
+  } else if (scores.length) {
+    jobLog(
+      '[xav] NOTE: no chunk report from xav -- per-chunk scores below are scraped from '
+      + 'its progress display and are one probe stale. Treat them as approximate.',
+    );
+  }
+
+  // A chunk that finished but never reported is a silent unknown: it landed at
+  // some CRF nobody measured. The all-or-nothing check below cannot see this,
+  // and on the production run that missed it 40 of 1457 chunks were unaccounted
+  // for (job Zn5dE_yQq, 2026-08-15).
+  const lastState = tracker.getState();
+  const chunksTotal = lastState && Number(lastState.chunksTotal);
+  if (scores.length && chunksTotal > 0 && scores.length < chunksTotal) {
+    jobLog(
+      `[xav] WARNING: only ${scores.length} of ${chunksTotal} chunks reported a score `
+      + `-- ${chunksTotal - scores.length} landed at an unverified CRF.`,
+    );
+  }
 
   // Did target quality actually run? Only the piped path could plausibly lose
   // it, so only the piped path is allowed to fail the job over it.
@@ -504,7 +562,10 @@ const plugin = async (args) => {
       `[xav] achieved SSIMULACRA2: mean ${mean.toFixed(2)}, `
       + `worst ${Math.min(...scores).toFixed(2)} across ${scores.length} chunks`,
     );
-    logTargetHit(jobLog, tracker.getChunkStats(), targetQuality, crfRange);
+    logTargetHit(jobLog, stats, targetQuality, crfRange);
+    // The score alone is not a quality verdict on flat content -- see
+    // summariseCrfSpread in shared/xav.js for the measurement behind that.
+    logCrfSpread(jobLog, stats);
 
     // A target-quality run whose chunks all landed on a CRF bound measured
     // nothing: it is a fixed-CRF encode wearing a target-quality costume. Warn
