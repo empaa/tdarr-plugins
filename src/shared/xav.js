@@ -417,6 +417,10 @@ const buildPipeFfmpegArgs = (opts) => {
 // Matroska usually reports no per-stream duration and carries it in the
 // tags.DURATION string instead, so try: stream duration, then that tag, then the
 // container as a last resort.
+//
+// That chain is best-effort and CANNOT be trusted on its own -- see
+// measureVideoDuration below for why, and prefer a measurement where one is
+// available.
 const parseDurationTag = (tag) => {
   const m = /^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$/.exec(String(tag || '').trim());
   if (!m) return 0;
@@ -430,6 +434,77 @@ const sourceVideoDuration = (videoStream, format) => {
   const tagged = parseDurationTag((v.tags || {}).DURATION);
   if (tagged > 0) return tagged;
   return Number((format || {}).duration) || 0;
+};
+
+// How far back from the container's end to look for the last video packet.
+// Generous enough for the trailing audio/subtitle overhang seen in the wild
+// (3.5 s on the Harry Potter remuxes) without scanning the whole file: on a
+// 25 GiB source this reads a couple of hundred MB, against a 1.5 h encode.
+const VIDEO_TAIL_WINDOW_S = 120;
+
+// Last end time across a run of `pts_time,dts_time,duration_time` packet lines.
+//
+// Two things this must survive, both observed on real files:
+//   - VC-1 in matroska emits NO pts at all ("N/A,9655.104000,0.041000"), so a
+//     parser that reads pts and gives up returns nothing for that whole class.
+//   - With B-frames the last packet in decode order is not the last one
+//     displayed, so take the maximum rather than the final line.
+const videoTailEndTime = (lines) => {
+  let end = 0;
+  (lines || []).forEach((line) => {
+    const [pts, dts, dur] = String(line).split(',').map((v) => parseFloat(v));
+    const at = isFinite(pts) ? pts : dts;
+    if (!isFinite(at)) return;
+    const stop = at + (isFinite(dur) ? dur : 0);
+    if (stop > end) end = stop;
+  });
+  return end;
+};
+
+// The video track's real length, measured rather than read off the container.
+//
+// Matroska stores ONE duration for the whole segment, and ffprobe reports that
+// number as every stream's `duration`. So on "Harry Potter and the Chamber of
+// Secrets" -- a VC-1 remux with no statistics tags and a DTS-X track running
+// 3.543 s past the picture -- all 55 streams report the identical 9658.688,
+// including the video. sourceVideoDuration's whole chain returns the audio's
+// length, and a flawless video-only encode measuring 9655.145 gets thrown away
+// (job YlW6hqiBU, 2026-08-15: 1834 chunks, mean 75.93, 1h22m of GPU time).
+//
+// There is no metadata field that answers this, so seek near the end and read
+// where the video actually stops. Never throws and never guesses: a 0 return
+// means "no answer", and the caller keeps its metadata value. Validation
+// failing open is right here -- the other checks (bytes, codec, dimensions,
+// frame count) still run, and no encode should die because ffprobe hiccuped.
+const measureVideoDuration = async (inputPath, pm, containerDuration, dbg) => {
+  const total = Number(containerDuration) || 0;
+  if (!(total > 0) || !pm || typeof pm.spawnAsync !== 'function') return 0;
+
+  const ffprobeBin = ['/usr/local/bin/ffprobe', '/usr/bin/ffprobe']
+    .find((p) => fs.existsSync(p)) || 'ffprobe';
+  const start = Math.max(0, total - VIDEO_TAIL_WINDOW_S);
+  const lines = [];
+  try {
+    await pm.spawnAsync(ffprobeBin, [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'packet=pts_time,dts_time,duration_time',
+      '-of', 'csv=p=0',
+      // Seek to the window rather than reading the file: the interval runs past
+      // the container end on purpose so nothing is clipped by rounding.
+      '-read_intervals', `${start.toFixed(3)}%+${VIDEO_TAIL_WINDOW_S + 60}`,
+      inputPath,
+    ], { silent: true, onLine: (l) => lines.push(l) });
+  } catch (err) {
+    if (typeof dbg === 'function') dbg(`video tail probe failed: ${err.message}`);
+    return 0;
+  }
+
+  const end = videoTailEndTime(lines);
+  if (typeof dbg === 'function') {
+    dbg(`video tail: ${lines.length} packets from ${start.toFixed(3)}s -> end ${end.toFixed(3)}s`);
+  }
+  return end;
 };
 
 const validateOutput = (probe, source, opts) => {
@@ -983,6 +1058,8 @@ module.exports = {
   probeOutput,
   validateOutput,
   sourceVideoDuration,
+  videoTailEndTime,
+  measureVideoDuration,
   detectCrfPinning,
   summariseTargetHit,
   logTargetHit,
