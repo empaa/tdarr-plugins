@@ -80,6 +80,23 @@ Two traps:
 
 ## Environment traps
 
+> Rebuilt and re-destroyed 2026-08-14 to verify v4.0.0. Three traps cost real time on that
+> rebuild, all of them new since this file was written:
+>
+> - **Do NOT pass `--init` to the Tdarr containers.** The images use s6-overlay, which must be
+>   PID 1; `--init` inserts docker's own init and both containers die instantly with
+>   `s6-overlay-suexec: fatal: can only run as pid 1`. (`--init` is still right for a bare
+>   `node` functest container — that advice below applies there, not here.)
+> - **Flows exist only in `cruddb`.** There is no `get-flow-plugins` / `list-flow-plugins`
+>   REST route — the Flows page issues exactly one `POST /api/v2/cruddb` and nothing else, and
+>   the routes are not extractable from the packaged `Tdarr_Server` binary. The Flows page also
+>   offers no creation control until a library exists. Creating a library + flow
+>   programmatically was not solved; budget for it or drive the UI.
+> - **`shfs` lies about `st_dev`.** Two paths under `/mnt/user` report the *same* device
+>   number and `link()` still fails `EXDEV`, because shfs is a FUSE union across disks. Any
+>   same-filesystem check must therefore attempt the hardlink and catch the failure rather
+>   than trusting `stat`. This is why `src/shared/staging.js` is written the way it is.
+
 - Library dirs must be owned **99:100** or staging fails `EACCES`.
 - **`rm -rf` on a bind-mounted directory** empties it inside the running containers until they
   restart. Restage in place, or restart both after.
