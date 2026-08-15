@@ -558,6 +558,182 @@ const logTargetHit = (jobLog, stats, targetQuality, crfRange) => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// Authoritative chunk report
+// ---------------------------------------------------------------------------
+
+// xav's TUI is NOT a reliable source of (crf, score) pairs, and the tracker that
+// scrapes it has been reporting mismatched ones all along.
+//
+// Measured 2026-08-15 on a 22 s 4K clip, TUI against xav's own JSON:
+//   JSON chunk 0 probes : 27.50->77.638, 32.00->75.468, 32.75->74.974, 39.00->70.773
+//   TUI, in time order  : [27.50 / -----] [39.00 / 77.64] [32.00 / 70.77] [32.75 / 75.47]
+// The worker line shows the CRF being encoded NOW beside the score of the probe
+// that just finished, so every pair is one probe stale -- and the FINAL probe's
+// score, the only one that describes the delivered encode, is never displayed at
+// all (chunk 0 ended at crf 32.75 score 74.974; the TUI's last word was 75.47,
+// which belongs to crf 32.00). So `achieved SSIMULACRA2` and the whole
+// in-band/below/above breakdown have been computed on stale numbers.
+//
+// xav writes the truth instead: enc.rs:2008 `write_tq_log` renders
+// <input>.json, holding each chunk's final crf/score/kbs plus its full probe
+// history. Since <input> is the staged file in workDir, the report lands in
+// workDir and is readable for as long as the job owns it. Only written when the
+// TQ search actually ran (it is gated on the vship feature and a non-empty
+// chunks.json), so absence is normal on a fixed-CRF encode and must not fail.
+const chunkReportPath = (inputPath) => {
+  const dir = path.dirname(String(inputPath));
+  const base = path.basename(String(inputPath));
+  const stem = base.replace(/\.[^.]*$/, '');
+  return path.join(dir, `${stem}.json`);
+};
+
+const parseChunkReport = (text) => {
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (_) {
+    return null;
+  }
+  const raw = Array.isArray(doc && doc.chunks_ssimulacra2) ? doc.chunks_ssimulacra2 : null;
+  if (!raw) return null;
+
+  const chunks = [];
+  for (const c of raw) {
+    const fin = c && c.final;
+    if (!fin || !isFinite(Number(fin.crf)) || !isFinite(Number(fin.score))) continue;
+    chunks.push({
+      chunk: Number(c.id),
+      crf: Number(fin.crf),
+      score: Number(fin.score),
+      kbs: Number(fin.kbs) || 0,
+      probes: Array.isArray(c.probes) ? c.probes.length : 0,
+    });
+  }
+  if (!chunks.length) return null;
+
+  chunks.sort((a, b) => a.score - b.score);
+  return {
+    chunks,
+    inRange: Number(doc.in_range) || 0,
+    outRange: Number(doc.out_range) || 0,
+    averageProbes: Number(doc.average_probes) || 0,
+  };
+};
+
+const readChunkReport = (inputPath, dbg) => {
+  const p = chunkReportPath(inputPath);
+  let text;
+  try {
+    text = fs.readFileSync(p, 'utf8');
+  } catch (_) {
+    if (dbg) dbg(`[xav] no chunk report at ${p} -- falling back to TUI-scraped stats`);
+    return null;
+  }
+  const parsed = parseChunkReport(text);
+  if (!parsed && dbg) dbg(`[xav] chunk report at ${p} did not parse`);
+  if (parsed) parsed.path = p;
+  return parsed;
+};
+
+// A high CRF on flat content is the risk this plugin could not previously see.
+//
+// Measured 2026-08-15, "Anyone but You" 4K HDR intro: a near-featureless pale
+// sky pan encoded at crf 32.75 came back at PSNR 65.8 dB / mean |err| 0.25 of
+// 1023, and SSIMULACRA2 called it 74.97 -- in band, no warning, nothing wrong by
+// any number the plugin had. It was still visibly broken: the frame carried only
+// 33 distinct luma codes and the encoder had snapped the gradient's contours onto
+// transform-block boundaries, giving grid-aligned edge energy 21-95x baseline.
+// SSIMULACRA2 barely moves on that content -- 11.5 CRF steps cost 6.9 points,
+// about a third of its usual slope -- so the search runs CRF roughly twice as
+// high as it should and reports a healthy score for a blocky picture.
+//
+// The score therefore cannot be the only thing reported. The CRF spread can at
+// least show a human WHERE to look, so log it and name the highest-CRF chunks.
+const summariseCrfSpread = (stats, topN = 5) => {
+  if (!stats || !stats.length) return null;
+  const crfs = stats.map((s) => s.crf).filter((v) => isFinite(v)).sort((a, b) => a - b);
+  if (!crfs.length) return null;
+  const at = (q) => crfs[Math.min(crfs.length - 1, Math.floor(q * (crfs.length - 1)))];
+  const highest = stats.slice()
+    .sort((a, b) => b.crf - a.crf)
+    .slice(0, topN);
+  return { min: crfs[0], p50: at(0.5), p90: at(0.9), max: crfs[crfs.length - 1], highest };
+};
+
+const logCrfSpread = (jobLog, stats) => {
+  const s = summariseCrfSpread(stats);
+  if (!s) return;
+  jobLog(
+    `[xav] CRF spread: min ${s.min.toFixed(2)}, median ${s.p50.toFixed(2)}, `
+    + `p90 ${s.p90.toFixed(2)}, max ${s.max.toFixed(2)}`,
+  );
+  jobLog(`[xav] highest-CRF chunks: ${s.highest.map(
+    (w) => `#${w.chunk} crf ${w.crf.toFixed(2)} -> ${w.score.toFixed(2)}`).join(', ')}`);
+  jobLog(
+    '[xav] note: a high CRF on flat, low-detail content (skies, fades, gradients) can '
+    + 'block visibly while still scoring in band -- SSIMULACRA2 is weakly sensitive to '
+    + 'grid-aligned banding. Check those chunks by eye before trusting the score alone.',
+  );
+};
+
+// ffmpeg on the scaled path used to have its stderr thrown away unless it exited
+// non-zero, which is exactly backwards: a decoder that complains for 170k frames
+// and still exits 0 is the interesting case. Verified 2026-08-15 -- the "Anyone
+// but You" DV source makes ffmpeg emit "PPS changed between slices", "Skipping
+// invalid undecodable NALU" and "Multiple Dolby Vision RPUs found in one AU" and
+// exit 0, so production learned nothing about any of it.
+//
+// Logging it raw is not an option either: those messages are per-frame, so a
+// feature-length job would bury the log. Collapse to unique message + count,
+// which is bounded and strictly more informative than the raw stream.
+// Drop the instance address so the same complaint from two decoder instances
+// collapses into one entry: "[hevc @ 0x55f1c0] foo" -> "[hevc] foo".
+const normaliseFfmpegLine = (line) => String(line).trim()
+  .replace(/\[(\w+) @ 0x[0-9a-f]+\]/gi, '[$1]');
+
+// Counts as it goes rather than buffering. A 2-hour DV source emits a per-frame
+// complaint, so the raw stream is ~170k lines -- holding that to summarise it at
+// the end would be several MB of a worker's heap for no gain, and capping the
+// buffer instead would silently undercount.
+const createStderrCollector = (maxDistinct = 200) => {
+  const counts = new Map();
+  let partial = '';
+  let dropped = 0;
+
+  const take = (line) => {
+    const key = normaliseFfmpegLine(line);
+    if (!key) return;
+    if (counts.has(key)) { counts.set(key, counts.get(key) + 1); return; }
+    // A pathological stream of never-repeating messages must not grow forever.
+    if (counts.size >= maxDistinct) { dropped++; return; }
+    counts.set(key, 1);
+  };
+
+  return {
+    push: (chunk) => {
+      const parts = (partial + String(chunk)).split('\n');
+      partial = parts.pop();
+      for (const p of parts) take(p);
+    },
+    summary: (maxLines = 8) => {
+      if (partial) { take(partial); partial = ''; }
+      const rows = Array.from(counts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, maxLines)
+        .map(([msg, n]) => (n > 1 ? `${msg}  (x${n})` : msg));
+      return { rows, distinct: counts.size, dropped };
+    },
+  };
+};
+
+// Thin wrapper over the collector, for callers that already hold the whole text.
+const summariseFfmpegStderr = (text, maxLines = 8) => {
+  const c = createStderrCollector();
+  c.push(String(text || ''));
+  return c.summary(maxLines).rows;
+};
+
 // Bytes xav has actually written so far, by measuring its chunk directory.
 //
 // Tdarr's outputFileSizeInGbytes is the ACTUAL current size, and xav's master
@@ -810,6 +986,14 @@ module.exports = {
   detectCrfPinning,
   summariseTargetHit,
   logTargetHit,
+  chunkReportPath,
+  parseChunkReport,
+  readChunkReport,
+  summariseCrfSpread,
+  logCrfSpread,
+  normaliseFfmpegLine,
+  createStderrCollector,
+  summariseFfmpegStderr,
   createXavTracker,
   formatEta,
 };

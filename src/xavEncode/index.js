@@ -49,10 +49,17 @@ const details = () => ({
       defaultValue: '74.8-75.2',
       inputUI: { type: 'text' },
       tooltip: [
-        'Target SSIMULACRA2 band. Tier targets: top 74.8-75.2, mid 70.8-71.2,',
-        'low 66.8-67.2. Measured across 28 encodes, 2026-08-13/14.',
+        'Target SSIMULACRA2 band. Tier ladder in use: top 74.8-75.2, mid 69.8-70.2,',
+        'low 64.8-65.2 -- pair each with the matching CRF Range ceiling (30/40/50).',
         'At the top tier that is 63% of source on grain-heavy film, 47% on',
         'clean 1080p and 16% on high-motion digital.',
+        'IMPORTANT: the score is not a quality guarantee on flat, low-detail content',
+        '(skies, fades, gradients, logos over black). There the metric saturates --',
+        'measured 0.6 points per CRF step against a normal 1.0-1.4 -- so the search',
+        'runs to the CRF ceiling and still reports an in-band score for a picture with',
+        'visible grid-aligned blocking. On "Anyone but You" a blocked frame scored 76.93',
+        'at PSNR 65.8 dB. The ceiling, not this target, is what sets quality on that',
+        'content, which is why it is tiered too.',
         'Do not raise it much further: SSIMU2 79.67 measures as VMAF 98.5, past',
         'the VMAF 95 that reads as visually lossless, and above ~76 the cost',
         'curve turns steeply non-linear because the metric scores against the',
@@ -88,14 +95,28 @@ const details = () => ({
       label: 'CRF Range',
       name: 'crf_range',
       type: 'string',
-      defaultValue: '5-63',
+      defaultValue: '5-30',
       inputUI: { type: 'text' },
       tooltip: [
-        'CRF floor-ceiling the target-quality search may use. Keep it WIDE:',
-        'a run whose chunks all pin at a bound is a fixed-CRF encode wearing a',
-        'target-quality costume, and the plugin will warn when that happens.',
-        'Measured mean CRF ranges from ~8 on demanding content at the top tier to',
-        '~41 on easy content at the low tier, so 10-50 is too narrow at both ends.',
+        'CRF floor-ceiling the target-quality search may use. Tier ladder in use:',
+        'top 5-30, mid 10-40, low 10-50, matching the target ladder above.',
+        'The CEILING is the important half, and it is deliberately tight -- an earlier',
+        'default of 5-63 was wrong. On flat content SSIMULACRA2 saturates, so the search',
+        'climbs to whatever ceiling it is given and reports a healthy score; at CRF 45-50',
+        'that content comes back with visible grid-aligned blocking, measured 3.7x the',
+        'unencoded reference at 50 against 1.4x at 33.',
+        'Capping it is close to free because the chunks it catches are long, flat and',
+        'byte-cheap: measured on two unrelated films (4K HDR downscaled via the hdr fork,',
+        'and a grain-heavy 1080p remux on mainline), 50 -> 30 cost +0.6% total size while',
+        'putting +17.5% into the affected regions. 11-15% of chunks pin at the ceiling and',
+        'they are ~5% of the bytes.',
+        'The ceiling is tiered rather than fixed because the metric cannot distinguish',
+        'those chunks at all -- with one ceiling for every tier they would be encoded',
+        'identically regardless of target, so the ceiling is the only lever the tier',
+        'system has on them.',
+        'The floor matters less but keep it at 5 on the top tier: demanding content',
+        'reached CRF 5.25 there (job M6el8sA4t). A floor that is too high shows up as',
+        'chunks pinned at the floor still missing the target, which the log warns about.',
       ].join(' '),
     },
     {
@@ -199,6 +220,7 @@ const plugin = async (args) => {
     buildXavArgs, buildPipeFfmpegArgs, filterEncoderParams, resolveParamSet, createXavTracker,
     sourceVideoDuration, validateOutput, detectCrfPinning, logTargetHit, probeOutput,
     selectEncodePath, RESOLUTION_PRESETS,
+    readChunkReport, logCrfSpread, createStderrCollector,
   } = require('../shared/xav');
 
   const inputs = args.inputs || {};
@@ -210,7 +232,7 @@ const plugin = async (args) => {
   const targetQuality = String(inputs.target_quality || '74.8-75.2');
   const tqUnavailableAction = String(inputs.tq_unavailable_action || 'fail');
   const tqMode = String(inputs.tq_mode || 'mean');
-  const crfRange = String(inputs.crf_range || '5-63');
+  const crfRange = String(inputs.crf_range || '5-30');
   const preset = Number(inputs.preset) || 6;
   const workers = Number(inputs.workers) || 2;
   const vship = Number(inputs.vship) || 1;
@@ -342,6 +364,9 @@ const plugin = async (args) => {
       `#!/usr/bin/env bash\nexec ${shellQuote(xavBin)} ${xavArgs.map(shellQuote).join(' ')}\n`,
       { mode: 0o755 },
     );
+    // Job log, not just av1-debug.log -- same reason as the scaled path: workDir
+    // is gone by the time anyone needs to know what was run.
+    jobLog(`[xav] xav: ${xavBin} ${xavArgs.join(' ')}`);
     dbg(`launcher: ${fs.readFileSync(launcherPath, 'utf8').trim()}`);
 
     return pm.spawnAsync('/usr/bin/script', ['-qec', launcherPath, '/dev/null'], {
@@ -375,8 +400,13 @@ const plugin = async (args) => {
   // zero.
   const runPiped = async () => {
     const ffmpegArgs = buildPipeFfmpegArgs({ inputPath, resolution: maxResolution });
-    dbg(`ffmpeg: ${ffmpegBin} ${ffmpegArgs.join(' ')}`);
-    dbg(`xav:    ${xavBin} ${xavArgs.join(' ')}`);
+    // The resolved argv belongs in the JOB LOG, not only in av1-debug.log.
+    // av1-debug.log lives in workDir and dies with it, so by the time anyone asks
+    // "what exactly did we run on that file?" the answer is gone -- which is
+    // precisely the question that came up diagnosing the 4K blocking on
+    // 2026-08-15. It is two lines per job.
+    jobLog(`[xav] ffmpeg: ${ffmpegBin} ${ffmpegArgs.join(' ')}`);
+    jobLog(`[xav] xav:    ${xavBin} ${xavArgs.join(' ')}`);
 
     return new Promise((resolve) => {
       const ff = cp.spawn(ffmpegBin, ffmpegArgs, {
@@ -423,12 +453,28 @@ const plugin = async (args) => {
 
       ff.stdout.pipe(xav.stdin);
 
-      let ffErr = '';
-      ff.stderr.on('data', (d) => { ffErr += d.toString(); });
+      const ffErr = createStderrCollector();
+      ff.stderr.on('data', (d) => ffErr.push(d.toString()));
       // ffmpeg dying leaves xav waiting on a pipe that will never deliver.
       ff.on('close', (code) => {
+        // Report what the decoder said REGARDLESS of exit status. The old code
+        // only logged on a non-zero exit, which is backwards: an ffmpeg that
+        // complains about every frame and still exits 0 is the case worth
+        // hearing about, and it is the case that actually happens -- the "Anyone
+        // but You" DV source produces "PPS changed between slices", "Skipping
+        // invalid undecodable NALU" and "Multiple Dolby Vision RPUs found in one
+        // AU" on a clean exit (measured 2026-08-15). Production had been
+        // discarding all of it.
+        const { rows, distinct, dropped } = ffErr.summary();
+        if (rows.length) {
+          jobLog(
+            `[ffmpeg] exited ${code} with ${distinct} distinct message(s)`
+            + (dropped ? ` (+${dropped} beyond the cap)` : '') + ':',
+          );
+          for (const r of rows) jobLog(`[ffmpeg]   ${r}`);
+        }
         if (code !== 0) {
-          jobLog(`[ffmpeg] exited ${code}: ${ffErr.trim().split('\n').slice(-3).join(' | ')}`);
+          jobLog(`[ffmpeg] non-zero exit ${code} -- closing xav's stdin`);
           try { xav.stdin.end(); } catch (_) {}
         }
       });
@@ -479,8 +525,41 @@ const plugin = async (args) => {
     );
   }
 
-  const scores = tracker.getChunkScores();
-  const crfs = tracker.getChunkCrfs();
+  // Prefer xav's own report over the TUI the tracker scrapes. The TUI pairs the
+  // CRF being encoded with the PREVIOUS probe's score, so every scraped pair is
+  // one probe stale and the delivered chunk's score is never shown at all
+  // (measured 2026-08-15 -- see readChunkReport in shared/xav.js). The tracker
+  // stays as the fallback: it is all we have on a fixed-CRF run, and it is what
+  // drives the live dashboard either way.
+  const report = readChunkReport(inputPath, dbg);
+  const stats = report ? report.chunks : tracker.getChunkStats();
+  const scores = stats.map((s) => s.score);
+  const crfs = stats.map((s) => s.crf);
+  if (report) {
+    jobLog(
+      `[xav] chunk report: ${report.chunks.length} chunks from xav's own JSON `
+      + `(${report.averageProbes.toFixed(1)} probes/chunk, `
+      + `${report.inRange} in range, ${report.outRange} out)`,
+    );
+  } else if (scores.length) {
+    jobLog(
+      '[xav] NOTE: no chunk report from xav -- per-chunk scores below are scraped from '
+      + 'its progress display and are one probe stale. Treat them as approximate.',
+    );
+  }
+
+  // A chunk that finished but never reported is a silent unknown: it landed at
+  // some CRF nobody measured. The all-or-nothing check below cannot see this,
+  // and on the production run that missed it 40 of 1457 chunks were unaccounted
+  // for (job Zn5dE_yQq, 2026-08-15).
+  const lastState = tracker.getState();
+  const chunksTotal = lastState && Number(lastState.chunksTotal);
+  if (scores.length && chunksTotal > 0 && scores.length < chunksTotal) {
+    jobLog(
+      `[xav] WARNING: only ${scores.length} of ${chunksTotal} chunks reported a score `
+      + `-- ${chunksTotal - scores.length} landed at an unverified CRF.`,
+    );
+  }
 
   // Did target quality actually run? Only the piped path could plausibly lose
   // it, so only the piped path is allowed to fail the job over it.
@@ -504,7 +583,10 @@ const plugin = async (args) => {
       `[xav] achieved SSIMULACRA2: mean ${mean.toFixed(2)}, `
       + `worst ${Math.min(...scores).toFixed(2)} across ${scores.length} chunks`,
     );
-    logTargetHit(jobLog, tracker.getChunkStats(), targetQuality, crfRange);
+    logTargetHit(jobLog, stats, targetQuality, crfRange);
+    // The score alone is not a quality verdict on flat content -- see
+    // summariseCrfSpread in shared/xav.js for the measurement behind that.
+    logCrfSpread(jobLog, stats);
 
     // A target-quality run whose chunks all landed on a CRF bound measured
     // nothing: it is a fixed-CRF encode wearing a target-quality costume. Warn
@@ -514,7 +596,15 @@ const plugin = async (args) => {
       jobLog(
         `[xav] WARNING: all ${pinning.total} chunks pinned at the CRF ${pinning.bound} `
         + `(${pinning.value}). The target-quality search had nowhere to go, so this is `
-        + `effectively a fixed-CRF encode. Widen the CRF range or change the target.`,
+        + 'effectively a fixed-CRF encode.'
+        + (pinning.bound === 'ceiling'
+          // Ceilings are deliberately tight now (see the CRF Range tooltip), so a
+          // ceiling pin is only a problem if EVERY chunk hit it -- that means the
+          // whole file was easier than the tier assumes, not that the cap is wrong.
+          ? ' Every chunk hitting the CEILING means this file is easier than its tier '
+            + 'assumes -- move it to a lower tier rather than raising the ceiling, which '
+            + 'is what protects flat content from blocking.'
+          : ' Lower the CRF floor or raise the target.'),
       );
     }
   }

@@ -50,7 +50,7 @@ The xav plugins additionally need the **xav binary mounted** (searched at `/usr/
 
 ## Testing
 
-`npm run test:unit` is the only stage that runs without a live Tdarr (36 tests, pure logic). Smoke and e2e need a server; see the Sibling Protocol note below for why the local one may not exist. **There is no automated coverage of a real xav encode** — xav is verified by live production runs, because a real harness needs the GPU host. Known gap, deliberately deferred.
+`npm run test:unit` is the only stage that runs without a live Tdarr (44 tests, pure logic). Smoke and e2e need a server; see the Sibling Protocol note below for why the local one may not exist. **There is no automated coverage of a real xav encode** — xav is verified by live production runs, because a real harness needs the GPU host. Known gap, deliberately deferred.
 
 ## Environment
 
