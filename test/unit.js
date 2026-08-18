@@ -628,6 +628,11 @@ async function extraVideoTrackMeansNotClean() {
 }
 
 const TESTS = [
+  ['arrRename: plugin fails rather than swallowing an unconfirmed rename', arrRenamePluginFailsInsteadOfSwallowingAnUnconfirmedRename],
+  ['arrRename: plugin propagates the new path on _id and file', arrRenamePluginPropagatesNewPathOnIdAndFile],
+  ['arrRename: a never-confirmed rename must not report success', arrRenameRefusesToReportAStalePathOnTimeout],
+  ['arrRename: the file record beats the command status', arrRenameTrustsTheFileRecordOverTheCommandStatus],
+  ['arrRename: a completed no-op rename is not an error', arrRenameAcceptsACompletedNoOp],
   ['sanitizeFile: primary video picked by picture, not order', primaryVideoIsPickedByPictureNotByOrder],
   ['sanitizeFile: an extra video track means not clean', extraVideoTrackMeansNotClean],
   ['xav: video tail end time reads the real stream end', videoTailEndTimeReadsTheRealStreamEnd],
@@ -1777,3 +1782,184 @@ if (require.main === module) {
 }
 
 module.exports = { unitTest };
+
+// ---------------------------------------------------------------------------
+// arrApi rename confirmation (job ctkumSFxY, Balls Up 2026, 2026-08-17)
+//
+// Radarr accepted RenameMovie but left it "queued" for the whole 120s window.
+// pollCommand returned normally on timeout, radarrRename read the movieFile
+// back unchanged, and the plugin reported that stale path as a successful
+// rename. Radarr renamed the file minutes later; Tdarr's DB kept the old path
+// and its next scan filed the renamed file as a brand-new one, re-queueing an
+// already-encoded movie. The file record -- not the command status -- is the
+// only thing that proves a rename landed.
+// ---------------------------------------------------------------------------
+
+const ARR_URL = 'http://radarr:7878';
+const ARR_OLD = '/media/movies/Example (2026)/Example (2026) - [h264]-GRP.mkv';
+const ARR_NEW = '/media/movies/Example (2026)/Example (2026) - [AV1]-GRP.mkv';
+
+// Stand up a fake Radarr. `moviePathAt(callIndex)` decides what the movieFile
+// record reports on each read, `renameStatusAt(pollIndex)` drives the command.
+function withFakeRadarr({ moviePathAt, renameStatusAt }, fn) {
+  const realFetch = global.fetch;
+  let fileReads = 0;
+  let renamePolls = 0;
+  const json = (body) => ({ ok: true, status: 200, json: async () => body });
+
+  global.fetch = async (url, options = {}) => {
+    if ((options.method || 'GET') === 'POST' && url.endsWith('/api/v3/command')) {
+      const name = JSON.parse(options.body).name;
+      return json({ id: name === 'RescanMovie' ? 1 : 2, status: 'queued' });
+    }
+    if (url.endsWith('/api/v3/command/1')) return json({ id: 1, status: 'completed' });
+    if (url.endsWith('/api/v3/command/2')) return json({ id: 2, status: renameStatusAt(renamePolls++) });
+    if (url.includes('/api/v3/moviefile/')) return json({ id: 11231, path: moviePathAt(fileReads++) });
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  return fn().finally(() => { global.fetch = realFetch; });
+}
+
+function radarrRenameFixture() {
+  const { radarrRename } = require(path.join(SRC, 'shared', 'arrApi.js'));
+  return (opts) => withFakeRadarr(opts, () => radarrRename(
+    ARR_URL, 'key',
+    { id: 1500, title: 'Example' },
+    { id: 11231, path: ARR_OLD },
+    300, () => {}, { intervalMs: 5 },
+  ));
+}
+
+// The exact Balls Up failure: queued forever, file never moves.
+async function arrRenameRefusesToReportAStalePathOnTimeout() {
+  const run = radarrRenameFixture();
+  let threw = null;
+  let returned = null;
+  try {
+    returned = await run({ moviePathAt: () => ARR_OLD, renameStatusAt: () => 'queued' });
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw !== null,
+    `a rename that never lands must fail loudly, but it returned "${returned}" as if renamed`);
+  assert(returned !== ARR_OLD, 'the pre-rename path must never be reported as a rename result');
+  assert(/queued|confirm/i.test(threw.message),
+    `the error must say the rename was never confirmed, got: ${threw.message}`);
+}
+
+// A slow Radarr still renames -- the file record proves it, whatever the queue says.
+async function arrRenameTrustsTheFileRecordOverTheCommandStatus() {
+  const run = radarrRenameFixture();
+  const result = await run({
+    moviePathAt: (i) => (i < 3 ? ARR_OLD : ARR_NEW),
+    renameStatusAt: () => 'queued',
+  });
+  assert(result === ARR_NEW,
+    `the landed rename must be picked up from the file record, got: ${result}`);
+}
+
+// Radarr's naming scheme already matches: completed, nothing moved, not an error.
+async function arrRenameAcceptsACompletedNoOp() {
+  const run = radarrRenameFixture();
+  const result = await run({
+    moviePathAt: () => ARR_OLD,
+    renameStatusAt: () => 'completed',
+  });
+  assert(result === ARR_OLD, `a completed no-op must return the unchanged path, got: ${result}`);
+}
+
+// Virtual clock: each setTimeout fires immediately but still advances Date.now,
+// so a poll loop with a 3s interval resolves instantly without wedging the
+// timeout branch (which needs the clock to actually move).
+function withFastClock(fn) {
+  const realSetTimeout = global.setTimeout;
+  const realNow = Date.now;
+  let offset = 0;
+  global.setTimeout = (cb, ms) => {
+    offset += (ms || 0);
+    return realSetTimeout(cb, 0);
+  };
+  Date.now = () => realNow.call(Date) + offset;
+  return fn().finally(() => {
+    global.setTimeout = realSetTimeout;
+    Date.now = realNow;
+  });
+}
+
+// Whole-plugin fake Radarr: one movie, one file, a rename that behaves as told.
+function withFakeRadarrPlugin({ moviePathAt, renameStatusAt }, fn) {
+  const realFetch = global.fetch;
+  let fileReads = 0;
+  let renamePolls = 0;
+  const json = (body) => ({ ok: true, status: 200, json: async () => body });
+
+  global.fetch = async (url, options = {}) => {
+    if ((options.method || 'GET') === 'POST' && url.endsWith('/api/v3/command')) {
+      const name = JSON.parse(options.body).name;
+      return json({ id: name === 'RescanMovie' ? 1 : 2, status: 'queued' });
+    }
+    if (url.endsWith('/api/v3/command/1')) return json({ id: 1, status: 'completed' });
+    if (url.endsWith('/api/v3/command/2')) return json({ id: 2, status: renameStatusAt(renamePolls++) });
+    if (url.endsWith('/api/v3/movie')) {
+      return json([{ id: 1500, title: 'Example', path: '/media/movies/Example (2026)' }]);
+    }
+    if (url.includes('/api/v3/moviefile?')) return json([{ id: 11231, path: ARR_OLD }]);
+    if (url.includes('/api/v3/moviefile/')) return json({ id: 11231, path: moviePathAt(fileReads++) });
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  return withFastClock(fn).finally(() => { global.fetch = realFetch; });
+}
+
+function runArrRenamePlugin(opts) {
+  delete require.cache[require.resolve(path.join(SRC, 'arrRename', 'index.js'))];
+  const { plugin } = require(path.join(SRC, 'arrRename', 'index.js'));
+  return withFakeRadarrPlugin(opts, () => plugin({
+    inputFileObj: { _id: ARR_OLD, file: ARR_OLD, DB: 'testDB', footprintId: 'testFP' },
+    inputs: {
+      radarr_url: ARR_URL,
+      radarr_api_key: 'key',
+      sonarr_url: '',
+      sonarr_api_key: '',
+      path_mappings: '',
+      poll_timeout: 30,
+    },
+    variables: {},
+    jobLog: () => {},
+  }));
+}
+
+// The whole point of the arrApi fix: the plugin must not bury the failure.
+// Before the fix it caught the error, fell through, and returned output 2 with
+// the stale path -- which is what let Tdarr's DB drift from disk.
+async function arrRenamePluginFailsInsteadOfSwallowingAnUnconfirmedRename() {
+  let threw = null;
+  let result = null;
+  try {
+    result = await runArrRenamePlugin({
+      moviePathAt: () => ARR_OLD,
+      renameStatusAt: () => 'queued',
+    });
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw !== null,
+    `an unconfirmed rename must fail the flow, but the plugin returned ${JSON.stringify(result)}`);
+  assert(/never confirmed/i.test(threw.message),
+    `the flow error must name the cause, got: ${threw.message}`);
+}
+
+// A confirmed rename has to reach the next node on BOTH fields -- a stale
+// `file` alongside a fresh `_id` points a later node at a path that is gone.
+async function arrRenamePluginPropagatesNewPathOnIdAndFile() {
+  const result = await runArrRenamePlugin({
+    moviePathAt: (i) => (i < 1 ? ARR_OLD : ARR_NEW),
+    renameStatusAt: () => 'queued',
+  });
+  assert(result.outputNumber === 1, `a confirmed rename takes output 1, got ${result.outputNumber}`);
+  assert(result.outputFileObj._id === ARR_NEW,
+    `_id must carry the renamed path, got: ${result.outputFileObj._id}`);
+  assert(result.outputFileObj.file === ARR_NEW,
+    `file must carry the renamed path too, got: ${result.outputFileObj.file}`);
+}
