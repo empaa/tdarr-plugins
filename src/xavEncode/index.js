@@ -521,8 +521,27 @@ const plugin = async (args) => {
   }
 
   if (exitCode !== 0) {
+    // Where it died, in one parsed line. The dump above is bounded (see
+    // SILENT_HEAD/TAIL_LINES in shared/processManager) and its tail is raw TUI
+    // redraws, which read as noise; this is the same information as a fact.
+    // Job H1Hsr3m2av died with nothing on record but "Segmentation fault", and
+    // "chunk 516/965" is the first thing anyone asks afterwards.
+    const last = tracker.getState();
+    if (last) {
+      jobLog(
+        `[xav] died at chunk ${last.chunksDone}/${last.chunksTotal}`
+        + `  frame ${last.frames}/${last.totalFrames} (${last.percent}%)`,
+      );
+    } else {
+      jobLog('[xav] died before it reported any progress');
+    }
+    // 128+N is a signal, and a segfault mid-encode says nothing about the flow
+    // being misconfigured -- name it so the next reader does not go looking for
+    // a plugin bug that is not there.
+    const signalled = exitCode > 128 && exitCode < 160;
     throw new Error(
-      `xav exited ${exitCode}${scaled ? ' on the scaled path' : ''} -- see the job log for its output`,
+      `xav exited ${exitCode}${signalled ? ` (killed by signal ${exitCode - 128})` : ''}`
+      + `${scaled ? ' on the scaled path' : ''} -- see the job log for its output`,
     );
   }
 
