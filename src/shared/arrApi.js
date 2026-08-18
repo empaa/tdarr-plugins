@@ -16,19 +16,95 @@ async function arrFetch(url, apiKey, options = {}) {
 }
 
 /**
- * Poll a Radarr/Sonarr command until completed, failed, or timed out.
- * @param {Function} log - logging function
+ * Poll a Radarr/Sonarr command until it resolves.
+ * @returns {string} 'completed', or 'timeout' if the window ran out
+ * @throws if the command reports failure
  */
-async function pollCommand(baseUrl, apiKey, commandId, label, timeoutMs, log) {
+async function pollCommand(baseUrl, apiKey, commandId, label, timeoutMs, log, opts = {}) {
+  const intervalMs = opts.intervalMs || 3000;
   const start = Date.now();
+  let last = '';
   while (Date.now() - start < timeoutMs) {
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, intervalMs));
     const cmd = await arrFetch(`${baseUrl}/api/v3/command/${commandId}`, apiKey);
-    log(`${label}: ${cmd.status}`);
-    if (cmd.status === 'completed') return;
+    if (cmd.status !== last) {
+      log(`${label}: ${cmd.status}`);
+      last = cmd.status;
+    }
+    if (cmd.status === 'completed') return 'completed';
     if (cmd.status === 'failed') throw new Error(`${label} command failed`);
   }
-  log(`${label}: timed out after ${timeoutMs / 1000}s, proceeding`);
+  log(`${label}: still "${last || 'unknown'}" after ${Math.round(timeoutMs / 1000)}s`);
+  return 'timeout';
+}
+
+/**
+ * Wait for a rename to actually land, and return the path it landed on.
+ *
+ * Command status is advisory only. Radarr/Sonarr can hold a rename in "queued"
+ * for minutes behind another command, and a queued command still renames the
+ * file once it runs -- so the FILE RECORD, not the queue, decides. A completed
+ * command with an unchanged path is the legitimate no-op: the name already
+ * matches the naming scheme.
+ *
+ * Never report a path the rename has not been confirmed against. Tdarr stores
+ * whatever we return; if the Arr renames the file afterwards, Tdarr's DB points
+ * at a path that no longer exists and the next library scan files the renamed
+ * file as a new one -- re-queueing an already-encoded file (job ctkumSFxY,
+ * Balls Up 2026, 2026-08-17).
+ *
+ * @param {Function} opts.readPath - resolves the file's current path, or null
+ * @returns {string} the confirmed path (unchanged only when the command completed)
+ */
+async function waitForRename(opts) {
+  const {
+    baseUrl, apiKey, readPath, commandId, label, beforePath, timeoutMs, log,
+  } = opts;
+  const intervalMs = opts.intervalMs || 3000;
+  const start = Date.now();
+  let lastStatus = '';
+  let nextHeartbeat = 30000;
+
+  while (Date.now() - start < timeoutMs) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+
+    const current = await readPath();
+    if (current && current !== beforePath) {
+      log(`${label}: confirmed, file record now at ${current}`);
+      return current;
+    }
+
+    const cmd = await arrFetch(`${baseUrl}/api/v3/command/${commandId}`, apiKey);
+    if (cmd.status !== lastStatus) {
+      log(`${label}: ${cmd.status}`);
+      lastStatus = cmd.status;
+    }
+    if (cmd.status === 'failed') throw new Error(`${label} command failed`);
+    if (cmd.status === 'completed') {
+      // The command updates the record before reporting completion, but read
+      // once more so a same-tick ordering cannot cost us the new path.
+      const settled = await readPath();
+      if (settled && settled !== beforePath) {
+        log(`${label}: confirmed, file record now at ${settled}`);
+        return settled;
+      }
+      log(`${label}: completed with no rename needed -- the name already matches the naming scheme`);
+      return beforePath;
+    }
+
+    const elapsed = Date.now() - start;
+    if (elapsed >= nextHeartbeat) {
+      log(`${label}: still "${lastStatus}" after ${Math.round(elapsed / 1000)}s, waiting`);
+      nextHeartbeat = elapsed + 30000;
+    }
+  }
+
+  throw new Error(
+    `${label} was never confirmed within ${Math.round(timeoutMs / 1000)}s `
+    + `(last status: ${lastStatus || 'unknown'}; file still at ${beforePath}). `
+    + 'Refusing to report an unrenamed path: Tdarr would store a path the Arr is '
+    + 'about to change, then rescan the renamed file as a new one.',
+  );
 }
 
 /**
@@ -87,41 +163,64 @@ async function findSonarrMatch(baseUrl, apiKey, arrPath, log) {
 
 /**
  * Trigger Radarr rescan + rename for a specific movie file.
- * @returns {string} new file path (Arr-side)
+ * @returns {string} confirmed file path (Arr-side)
  */
-async function radarrRename(baseUrl, apiKey, movie, movieFile, timeoutMs, log) {
+async function radarrRename(baseUrl, apiKey, movie, movieFile, timeoutMs, log, opts = {}) {
   log(`Calling RescanMovie for "${movie.title}" (id: ${movie.id})...`);
   const rescanCmd = await arrFetch(`${baseUrl}/api/v3/command`, apiKey, {
     method: 'POST',
     body: JSON.stringify({ name: 'RescanMovie', movieId: movie.id }),
   });
-  await pollCommand(baseUrl, apiKey, rescanCmd.id, 'RescanMovie', timeoutMs, log);
+  await pollCommand(baseUrl, apiKey, rescanCmd.id, 'RescanMovie', timeoutMs, log, opts);
 
-  log(`Calling RenameMovie...`);
+  // A rescan can replace the movieFile row outright. A movie holds one file, so
+  // fall back to whatever file it holds now rather than tracking a dead id.
+  const readPath = async () => {
+    const f = await arrFetch(`${baseUrl}/api/v3/moviefile/${movieFile.id}`, apiKey)
+      .catch(() => null);
+    if (f && f.path) return f.path;
+    const files = await arrFetch(`${baseUrl}/api/v3/moviefile?movieId=${movie.id}`, apiKey)
+      .catch(() => []);
+    return files.length === 1 ? files[0].path : null;
+  };
+
+  log('Calling RenameMovie...');
   const renameCmd = await arrFetch(`${baseUrl}/api/v3/command`, apiKey, {
     method: 'POST',
     body: JSON.stringify({ name: 'RenameMovie', movieIds: [movie.id] }),
   });
-  await pollCommand(baseUrl, apiKey, renameCmd.id, 'RenameMovie', timeoutMs, log);
-
-  const updated = await arrFetch(
-    `${baseUrl}/api/v3/moviefile/${movieFile.id}`,
+  return waitForRename({
+    baseUrl,
     apiKey,
-  );
-  return updated.path;
+    readPath,
+    commandId: renameCmd.id,
+    label: 'RenameMovie',
+    beforePath: movieFile.path,
+    timeoutMs,
+    log,
+    intervalMs: opts.intervalMs,
+  });
 }
 
 /**
  * Trigger Sonarr refresh + rename for a specific episode file.
- * @returns {string} new file path (Arr-side)
+ * @returns {string} confirmed file path (Arr-side)
  */
-async function sonarrRename(baseUrl, apiKey, series, episodeFile, timeoutMs, log) {
+async function sonarrRename(baseUrl, apiKey, series, episodeFile, timeoutMs, log, opts = {}) {
   log(`Calling RefreshSeries for "${series.title}" (id: ${series.id})...`);
   const refreshCmd = await arrFetch(`${baseUrl}/api/v3/command`, apiKey, {
     method: 'POST',
     body: JSON.stringify({ name: 'RefreshSeries', seriesId: series.id }),
   });
-  await pollCommand(baseUrl, apiKey, refreshCmd.id, 'RefreshSeries', timeoutMs, log);
+  await pollCommand(baseUrl, apiKey, refreshCmd.id, 'RefreshSeries', timeoutMs, log, opts);
+
+  // A series holds many files, so there is no safe fallback here: if the id is
+  // gone we cannot tell which file was ours, and an unconfirmed rename must fail.
+  const readPath = async () => {
+    const f = await arrFetch(`${baseUrl}/api/v3/episodefile/${episodeFile.id}`, apiKey)
+      .catch(() => null);
+    return f && f.path ? f.path : null;
+  };
 
   log(`Calling RenameFiles for episode file id: ${episodeFile.id}...`);
   const renameCmd = await arrFetch(`${baseUrl}/api/v3/command`, apiKey, {
@@ -132,13 +231,17 @@ async function sonarrRename(baseUrl, apiKey, series, episodeFile, timeoutMs, log
       files: [episodeFile.id],
     }),
   });
-  await pollCommand(baseUrl, apiKey, renameCmd.id, 'RenameFiles', timeoutMs, log);
-
-  const updated = await arrFetch(
-    `${baseUrl}/api/v3/episodefile/${episodeFile.id}`,
+  return waitForRename({
+    baseUrl,
     apiKey,
-  );
-  return updated.path;
+    readPath,
+    commandId: renameCmd.id,
+    label: 'RenameFiles',
+    beforePath: episodeFile.path,
+    timeoutMs,
+    log,
+    intervalMs: opts.intervalMs,
+  });
 }
 
 // Radarr/Sonarr API only returns language name, not ISO codes.
@@ -255,6 +358,7 @@ async function getOriginalLanguage(opts) {
 module.exports = {
   arrFetch,
   pollCommand,
+  waitForRename,
   findRadarrMatch,
   findSonarrMatch,
   radarrRename,
