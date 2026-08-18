@@ -4,6 +4,12 @@
 const cp = require('child_process');
 const path = require('path');
 
+// Bounds on the failure dump of a `silent` child. 40 + 150 lines is two orders
+// of magnitude under Tdarr's 1000-entry log-report queue, so the dump can never
+// again evict the surrounding job log on its way out.
+const SILENT_HEAD_LINES = 40;
+const SILENT_TAIL_LINES = 150;
+
 const createProcessManager = (jobLog, dbg) => {
   const activeChildren = new Set();
   const ppidWatchers = [];
@@ -80,7 +86,25 @@ const createProcessManager = (jobLog, dbg) => {
       activeChildren.add(child);
       if (opts.onSpawn) opts.onSpawn(child.pid);
 
-      const silentBuf = [];
+      // A silent child's output is kept ONLY to explain a failure, so it is held
+      // at both ends and never in full. Job H1Hsr3m2av (Bohemian Rhapsody,
+      // 2026-08-18) is why: xav segfaulted 18 minutes into a 965-chunk encode
+      // and the old code replayed every buffered line -- an entire run's worth of
+      // TUI redraws -- into the job log in one burst. Tdarr's log-report queue is
+      // 1000 deep and evicts the OLDEST entry on overflow, so the dump threw away
+      // the history it was supposed to preserve: the node logged 2402 "Request
+      // dropped due to queue overflow" warnings and the report that survived
+      // jumps from "[xav] 16%" straight to "Segmentation fault". The head says
+      // how the run started, the tail says what it was doing as it died, and
+      // nothing in between is worth losing the other two for.
+      const head = [];
+      const tail = [];
+      let suppressed = 0;
+      const keepLine = (l) => {
+        if (head.length < SILENT_HEAD_LINES) { head.push(l); return; }
+        tail.push(l);
+        if (tail.length > SILENT_TAIL_LINES) { tail.shift(); suppressed++; }
+      };
       let lastLine = '';
       const handleData = (data) => {
         const text = data.toString();
@@ -91,7 +115,7 @@ const createProcessManager = (jobLog, dbg) => {
           if (!l) continue;
           if (opts.onLine) opts.onLine(l);
           if (opts.filter && !opts.filter(l)) continue;
-          if (opts.silent) { silentBuf.push(l); } else { jobLog(l); }
+          if (opts.silent) { keepLine(l); } else { jobLog(l); }
         }
       };
 
@@ -104,12 +128,16 @@ const createProcessManager = (jobLog, dbg) => {
           const l = lastLine.trim();
           if (opts.onLine) opts.onLine(l);
           if (!opts.filter || opts.filter(l)) {
-            if (opts.silent) { silentBuf.push(l); } else { jobLog(l); }
+            if (opts.silent) { keepLine(l); } else { jobLog(l); }
           }
         }
         const exitCode = code !== null ? code : signal ? 1 : 0;
         if (opts.silent && exitCode !== 0) {
-          silentBuf.forEach((l) => jobLog(l));
+          head.forEach((l) => jobLog(l));
+          if (suppressed > 0) {
+            jobLog(`... ${suppressed} line(s) suppressed -- last ${tail.length} follow ...`);
+          }
+          tail.forEach((l) => jobLog(l));
         }
         dbg(`< ${path.basename(bin)} exited ${exitCode}${signal ? ` (signal ${signal})` : ''}`);
         resolve(exitCode);

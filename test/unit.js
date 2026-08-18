@@ -627,6 +627,74 @@ async function extraVideoTrackMeansNotClean() {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
+// Regression: job H1Hsr3m2av (Bohemian Rhapsody, 2026-08-18). xav segfaulted 18
+// minutes into a 965-chunk encode and the plugin dumped its ENTIRE buffered PTY
+// output -- every TUI redraw of the whole run -- into the job log at once. Tdarr
+// caps its log-report queue at 1000 and drops the OLDEST entry when it overflows,
+// so the dump evicted the very lines that explained the failure: the node logged
+// 2402 "Failed to log job report: Request dropped due to queue overflow" warnings
+// and the surviving report jumps from "[xav] 16%" straight to "Segmentation
+// fault" with nothing in between. The failure dump destroyed the failure
+// evidence. It must be bounded, and it must keep BOTH ends -- the first lines
+// (how the run started) and the last (what it was doing as it died).
+async function silentFailureDumpIsBoundedAndKeepsBothEnds() {
+  const pmPath = require.resolve(path.join(SRC, 'shared', 'processManager.js'));
+  delete require.cache[pmPath];
+  const { createProcessManager } = require(pmPath);
+
+  const logged = [];
+  const pm = createProcessManager((m) => logged.push(String(m)), () => {});
+
+  const keepAlive = setInterval(() => {}, 250);
+  try {
+    const code = await pm.spawnAsync(
+      'sh', ['-c', 'i=1; while [ $i -le 5000 ]; do echo "line$i"; i=$((i+1)); done; exit 3'],
+      { silent: true },
+    );
+    assert(code === 3, `expected exit 3, got ${code}`);
+
+    // Tdarr's queue is 1000 deep and shared with every other line the flow wants
+    // to log. A dump that alone approaches it is the bug.
+    assert(logged.length <= 200,
+      `failure dump must stay far under Tdarr's 1000-entry log queue, got ${logged.length} lines`);
+
+    const text = logged.join('\n');
+    assert(/\bline1\b/.test(text), 'the dump must keep the first lines of output');
+    assert(/\bline5000\b/.test(text),
+      'the dump must keep the last lines -- that is where a crash says why');
+    assert(/suppress/i.test(text),
+      'the dump must say how much it left out rather than silently truncating');
+  } finally {
+    clearInterval(keepAlive);
+    delete require.cache[pmPath];
+  }
+}
+
+// The buffer exists only to explain a failure. A clean run must stay silent, or
+// every successful encode floods the same queue.
+async function silentSuccessLogsNothing() {
+  const pmPath = require.resolve(path.join(SRC, 'shared', 'processManager.js'));
+  delete require.cache[pmPath];
+  const { createProcessManager } = require(pmPath);
+
+  const logged = [];
+  const pm = createProcessManager((m) => logged.push(String(m)), () => {});
+
+  const keepAlive = setInterval(() => {}, 250);
+  try {
+    const code = await pm.spawnAsync(
+      'sh', ['-c', 'i=1; while [ $i -le 3000 ]; do echo "line$i"; i=$((i+1)); done'],
+      { silent: true },
+    );
+    assert(code === 0, `expected exit 0, got ${code}`);
+    assert(logged.length === 0,
+      `a successful silent child must log nothing, got ${logged.length} lines`);
+  } finally {
+    clearInterval(keepAlive);
+    delete require.cache[pmPath];
+  }
+}
+
 const TESTS = [
   ['arrRename: plugin fails rather than swallowing an unconfirmed rename', arrRenamePluginFailsInsteadOfSwallowingAnUnconfirmedRename],
   ['arrRename: plugin propagates the new path on _id and file', arrRenamePluginPropagatesNewPathOnIdAndFile],
@@ -640,6 +708,8 @@ const TESTS = [
   ['xav: Harry Potter encode validates on measured duration',
     harryPotterEncodeValidatesAgainstMeasuredDuration],
   ['processManager: killAll spares later children', killAllDoesNotReachLaterChildren],
+  ['processManager: silent failure dump is bounded and keeps both ends', silentFailureDumpIsBoundedAndKeepsBothEnds],
+  ['processManager: a clean silent run logs nothing', silentSuccessLogsNothing],
   ['xav: target-hit summary separates failure modes', targetHitSummarySeparatesFailureModes],
   ['xav: source duration comes from the video stream', sourceDurationComesFromVideoStream],
   ['xav: argv carries the researched param set', xavArgvCarriesResearchedParams],
