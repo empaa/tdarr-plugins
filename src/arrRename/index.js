@@ -60,9 +60,11 @@ const details = () => ({
       label: 'Poll Timeout (s)',
       name: 'poll_timeout',
       type: 'number',
-      defaultValue: '120',
+      defaultValue: '600',
       inputUI: { type: 'text' },
-      tooltip: 'Max seconds to wait for Arr rescan/rename commands to complete.',
+      tooltip: 'Max seconds to wait for the Arr rename to be confirmed on the file record. '
+        + 'A busy Radarr/Sonarr can leave a rename queued for minutes; if the wait runs out '
+        + 'the plugin fails rather than reporting an unrenamed path.',
     },
   ],
   outputs: [
@@ -85,7 +87,7 @@ const plugin = async (args) => {
   const radarrKey = (inputs.radarr_api_key || '').trim();
   const sonarrUrl = (inputs.sonarr_url || '').trim().replace(/\/+$/, '');
   const sonarrKey = (inputs.sonarr_api_key || '').trim();
-  const timeoutMs = (Number(inputs.poll_timeout) || 120) * 1000;
+  const timeoutMs = (Number(inputs.poll_timeout) || 600) * 1000;
 
   const log = (msg) => {
     if (typeof args.jobLog === 'function') args.jobLog(msg);
@@ -121,53 +123,63 @@ const plugin = async (args) => {
   const arrPath = mapper.toArr(filePath);
   log(`Arr-side path: ${arrPath}${arrPath === filePath ? ' (no mapping applied)' : ''}`);
 
+  // Only reached once a rename has been CONFIRMED against the Arr's file record,
+  // so the path here is real. Carry it on both _id and file: the two must not
+  // diverge or the next node works on a path that no longer exists.
+  const renamed = (newArrPath, m, logFn) => {
+    const newPath = m.fromArr(newArrPath);
+    if (newPath === filePath) logFn('No rename needed -- name already matches the Arr naming scheme');
+    else logFn(`Renamed: ${newPath}`);
+    return {
+      outputFileObj: Object.assign({}, args.inputFileObj, { _id: newPath, file: newPath }),
+      outputNumber: 1,
+      variables: args.variables,
+    };
+  };
+
   // Try Radarr
+  //
+  // A lookup failure is recoverable -- the file may belong to the other service,
+  // so fall through. A rename failure on a file we DID match is not: returning
+  // an unconfirmed path makes Tdarr store a path the Arr is about to change,
+  // and the renamed file then rescans as a new one (job ctkumSFxY, 2026-08-17).
+  // Let it throw, per this repo's "throw for Tdarr's own error handler" rule.
   if (hasRadarr) {
+    let match = null;
     try {
       log('Searching Radarr...');
-      const match = await findRadarrMatch(radarrUrl, radarrKey, arrPath);
-      if (match) {
-        log(`Matched movie: ${match.movie.title} (file id: ${match.movieFile.id})`);
-        const newArrPath = await radarrRename(
-          radarrUrl, radarrKey, match.movie, match.movieFile, timeoutMs, log,
-        );
-        const newPath = mapper.fromArr(newArrPath);
-        log(`Renamed: ${newPath}`);
-        args.inputFileObj._id = newPath;
-        return {
-          outputFileObj: args.inputFileObj,
-          outputNumber: 1,
-          variables: args.variables,
-        };
-      }
-      log('No Radarr match');
+      match = await findRadarrMatch(radarrUrl, radarrKey, arrPath);
+      if (!match) log('No Radarr match');
     } catch (err) {
-      log(`Radarr error: ${err.message}`);
+      log(`Radarr lookup error: ${err.message}`);
+    }
+
+    if (match) {
+      log(`Matched movie: ${match.movie.title} (file id: ${match.movieFile.id})`);
+      const newArrPath = await radarrRename(
+        radarrUrl, radarrKey, match.movie, match.movieFile, timeoutMs, log,
+      );
+      return renamed(newArrPath, mapper, log);
     }
   }
 
-  // Try Sonarr
+  // Try Sonarr -- same split: tolerate a failed lookup, never a failed rename.
   if (hasSonarr) {
+    let match = null;
     try {
       log('Searching Sonarr...');
-      const match = await findSonarrMatch(sonarrUrl, sonarrKey, arrPath, log);
-      if (match) {
-        log(`Matched series: ${match.series.title} (file id: ${match.episodeFile.id})`);
-        const newArrPath = await sonarrRename(
-          sonarrUrl, sonarrKey, match.series, match.episodeFile, timeoutMs, log,
-        );
-        const newPath = mapper.fromArr(newArrPath);
-        log(`Renamed: ${newPath}`);
-        args.inputFileObj._id = newPath;
-        return {
-          outputFileObj: args.inputFileObj,
-          outputNumber: 1,
-          variables: args.variables,
-        };
-      }
-      log('No Sonarr match');
+      match = await findSonarrMatch(sonarrUrl, sonarrKey, arrPath, log);
+      if (!match) log('No Sonarr match');
     } catch (err) {
-      log(`Sonarr error: ${err.message}`);
+      log(`Sonarr lookup error: ${err.message}`);
+    }
+
+    if (match) {
+      log(`Matched series: ${match.series.title} (file id: ${match.episodeFile.id})`);
+      const newArrPath = await sonarrRename(
+        sonarrUrl, sonarrKey, match.series, match.episodeFile, timeoutMs, log,
+      );
+      return renamed(newArrPath, mapper, log);
     }
   }
 
